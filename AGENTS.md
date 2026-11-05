@@ -3,6 +3,17 @@
 <!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
 
+## Goals
+
+@docs/GOAL.md
+
+Read docs/GOAL.md before planning any change. Section goals live in docs/goals/; each lists the code folders it governs in its front matter. Before changing code, read every goal file whose `code` covers the files you touch, plus each of its parents.
+
+- When a change would cross a Non-goal or a Constraint, stop and ask Joseph.
+- When a change alters what a section should do, edit that goal file in the same pull request, with Joseph's approval.
+
+The v1 build design is `docs/superpowers/specs/2026-11-05-clicky-fork-design.md`. The Overview and Architecture below still describe upstream Clicky until v1 replaces them.
+
 ## Overview
 
 macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
