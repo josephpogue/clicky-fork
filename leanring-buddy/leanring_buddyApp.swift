@@ -2,14 +2,12 @@
 //  leanring_buddyApp.swift
 //  leanring-buddy
 //
-//  Menu bar-only companion app. No dock icon, no main window — just an
+//  Menu bar-only companion app. No dock icon, no main window: just an
 //  always-available status item in the macOS menu bar. Clicking the icon
-//  opens a floating panel with companion voice controls.
+//  opens a floating panel with the session controls.
 //
 
-import ServiceManagement
 import SwiftUI
-import Sparkle
 
 @main
 struct leanring_buddyApp: App {
@@ -25,65 +23,50 @@ struct leanring_buddyApp: App {
     }
 }
 
-/// Manages the companion lifecycle: creates the menu bar panel and starts
-/// the companion voice pipeline on launch.
+/// Manages the companion lifecycle: creates the menu bar panel. It starts no
+/// session, no capture and no login item; a session starts only from the panel.
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
-    private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🎯 Clicky: Starting...")
-        print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        // Preview rendering runs first and exits before any permission request.
+        renderUIPreviewsAndExitIfRequested()
+
+        print("Clicky Fork: starting")
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
-        ClickyAnalytics.configure()
-        ClickyAnalytics.trackAppOpened()
-
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
-        // Auto-open the panel if the user still needs to do something:
-        // either they haven't onboarded yet, or permissions were revoked.
-        if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
+        // Auto-open the panel when permissions are missing so the user sees what to grant.
+        if !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
-        registerAsLoginItemIfNeeded()
-        // startSparkleUpdater()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
     }
 
-    /// Registers the app as a login item so it launches automatically on
-    /// startup. Uses SMAppService which shows the app in System Settings >
-    /// General > Login Items, letting the user toggle it off if they want.
-    private func registerAsLoginItemIfNeeded() {
-        let loginItemService = SMAppService.mainApp
-        if loginItemService.status != .enabled {
-            do {
-                try loginItemService.register()
-                print("🎯 Clicky: Registered as login item")
-            } catch {
-                print("⚠️ Clicky: Failed to register as login item: \(error)")
-            }
+    /// When launched as `Clicky Fork --render-ui-previews <directory>`, writes
+    /// the preview PNGs into that directory and exits, so screens can be checked
+    /// without opening the app or asking for any permission.
+    private func renderUIPreviewsAndExitIfRequested() {
+        let launchArguments = CommandLine.arguments
+        guard let flagIndex = launchArguments.firstIndex(of: "--render-ui-previews") else { return }
+        guard flagIndex + 1 < launchArguments.count else {
+            print("--render-ui-previews needs a folder path")
+            exit(1)
         }
-    }
-
-    private func startSparkleUpdater() {
-        let updaterController = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        self.sparkleUpdaterController = updaterController
-
+        let outputDirectory = URL(fileURLWithPath: launchArguments[flagIndex + 1], isDirectory: true)
         do {
-            try updaterController.updater.start()
+            try UIPreviewRendering.renderAll(into: outputDirectory)
+            exit(0)
         } catch {
-            print("⚠️ Clicky: Sparkle updater failed to start: \(error)")
+            print("Rendering UI previews failed: \(error)")
+            exit(1)
         }
     }
 }
