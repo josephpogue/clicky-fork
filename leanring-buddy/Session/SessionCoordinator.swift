@@ -53,6 +53,10 @@ final class SessionCoordinator: ObservableObject {
     private let settings = AppSettings.shared
     private let pointerFlight = PointerFlightController()
     private let markerPanel = QuestionMarkerPanel()
+    /// The answer bubble, notices and speaker capsule beside the cursor. No window opens during a session.
+    private let cursorAnswerPresenter: CursorAnswerPresenter
+    /// Reads answers aloud when Settings asks for spoken answers.
+    private let spokenAnswerPlayer = SpokenAnswerPlayer()
     private let questionKeyMonitor = QuestionKeyMonitor()
     private let frontmostWindowTracker = FrontmostWindowTracker()
 
@@ -94,6 +98,10 @@ final class SessionCoordinator: ObservableObject {
         locations = AppDataLocations.standard(environment: ProcessInfo.processInfo.environment)
         try? locations.createDirectories()
         sessionStore = SessionStore(locations: locations)
+        cursorAnswerPresenter = CursorAnswerPresenter(pointerFlight: pointerFlight)
+        spokenAnswerPlayer.onSpeakingChanged = { [weak self] isSpeaking in
+            self?.cursorAnswerPresenter.showSpeaking(isSpeaking)
+        }
 
         // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
         chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
@@ -147,7 +155,8 @@ final class SessionCoordinator: ObservableObject {
         chatWindowState.messages = []
         chatWindowState.usageLimitOffer = nil
         chatWindowState.questionPhase = .idle
-        AppWindowRouter.shared.showChat()
+        // Start opens no window: the chat window opens only from the menu-bar panel's Open chat row.
+        hideCursorAnswerAndStopSpeaking()
         startTask = Task {
             await performStart()
             startTask = nil
@@ -417,7 +426,8 @@ final class SessionCoordinator: ObservableObject {
     private func failToStart(_ noticeText: String) {
         panelNotice = noticeText
         chatWindowState.messages.append(ChatMessage(role: .notice, text: noticeText))
-        AppWindowRouter.shared.showChat()
+        // The notice shows in the panel and beside the cursor; no window opens for it.
+        cursorAnswerPresenter.showNotice(text: noticeText)
     }
 
     private func clearSessionObjects() {
@@ -550,7 +560,13 @@ final class SessionCoordinator: ObservableObject {
 
     private func resetMarkerAndQuestionPhase() {
         markerPanel.hide()
+        hideCursorAnswerAndStopSpeaking()
         chatWindowState.questionPhase = .idle
+    }
+
+    private func hideCursorAnswerAndStopSpeaking() {
+        cursorAnswerPresenter.hideAll()
+        spokenAnswerPlayer.stopSpeaking()
     }
 
     // MARK: - Quit
@@ -601,6 +617,8 @@ final class SessionCoordinator: ObservableObject {
             chatWindowState.questionPhase = .idle
             markerPanel.show(phase: .idle)
         case .listening:
+            // A new question replaces the last answer: its text goes and its reading stops.
+            hideCursorAnswerAndStopSpeaking()
             lastShownAudioLevel = 0
             chatWindowState.questionPhase = .listening(audioLevel: 0)
             markerPanel.show(phase: .listening(audioLevel: 0))
@@ -626,16 +644,25 @@ final class SessionCoordinator: ObservableObject {
         ))
         chatWindowState.activeModel = model.isEmpty ? "default" : model
         settings.recordMeasuredAnswerSeconds(secondsToAnswer, for: provider)
+        // An answer that lands during Stop's drain reaches the chat only, like the pointer.
+        guard lifecycle.acceptsPointerFlights else { return }
+        let deliveryMode = settings.answerDeliveryMode
+        if deliveryMode.showsText { cursorAnswerPresenter.showAnswer(text: spokenText) }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speak(text: spokenText) }
     }
 
     fileprivate func showNotice(_ text: String) {
         chatWindowState.messages.append(ChatMessage(role: .notice, text: text))
+        guard lifecycle.acceptsPointerFlights else { return }
+        cursorAnswerPresenter.showNotice(text: text)
     }
 
     fileprivate func showUsageLimitOffer(message: String, switchTo provider: ProviderID) {
-        chatWindowState.usageLimitOffer = UsageLimitOffer(
-            message: message, switchToProviderName: ProviderFailureNotice.displayName(for: provider)
-        )
+        let switchToProviderName = ProviderFailureNotice.displayName(for: provider)
+        chatWindowState.usageLimitOffer = UsageLimitOffer(message: message, switchToProviderName: switchToProviderName)
+        // The one-tap switch lives in the menu-bar panel; the cursor only says where to find it.
+        guard lifecycle.acceptsPointerFlights else { return }
+        cursorAnswerPresenter.showNotice(text: "\(message) Switch to \(switchToProviderName) from the menu bar.")
     }
 
     fileprivate func clearUsageLimitOffer() {

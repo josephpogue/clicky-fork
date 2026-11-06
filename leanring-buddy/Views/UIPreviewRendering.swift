@@ -86,11 +86,16 @@ enum UIPreviewRendering {
         for (fileName, saveState) in UIPreviewSamples.saveStates() {
             try render(SaveToVaultSheet(state: saveState, onConfirm: { _ in }, onCancel: {}, onOpenSettings: {}), size: nil, fileName: fileName, into: directory)
         }
+
+        // Each answer-delivery slice renders its own previews from its own file.
+        try renderCursorAnswerPreviews(into: directory)
+        try renderAnswerDeliverySettingsPreviews(into: directory)
+        try renderMenuPanelPreviews(into: directory)
     }
 
     /// Draws `view` at `size` (or at its own fitting size when nil) at 2x and writes a PNG.
     @MainActor
-    private static func render<Content: View>(_ view: Content, size: CGSize?, fileName: String, into directory: URL) throws {
+    static func render<Content: View>(_ view: Content, size: CGSize?, fileName: String, into directory: URL) throws {
         let hostingView = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
         let offscreenWindow = NSWindow(
             contentRect: NSRect(x: -20000, y: -20000, width: 400, height: 400),

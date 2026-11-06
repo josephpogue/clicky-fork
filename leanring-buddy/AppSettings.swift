@@ -39,6 +39,17 @@ final class AppSettings: ObservableObject {
         didSet { userDefaults.set(summaryAtStopEnabled, forKey: Keys.summaryAtStopEnabled) }
     }
 
+    /// How answers reach the user: text beside the cursor, spoken, or both. Text by default.
+    @Published var answerDeliveryMode: AnswerDeliveryMode {
+        didSet { userDefaults.set(answerDeliveryMode.rawValue, forKey: Keys.answerDeliveryMode) }
+    }
+
+    /// The macOS voice (an `AVSpeechSynthesisVoice` identifier) that reads spoken answers. Nil means the
+    /// system's default voice for the user's language.
+    @Published var spokenAnswerVoiceIdentifier: String? {
+        didSet { userDefaults.set(spokenAnswerVoiceIdentifier, forKey: Keys.spokenAnswerVoiceIdentifier) }
+    }
+
     /// Seconds the last answer took, per provider raw value, shown in Settings.
     @Published private(set) var measuredAnswerSeconds: [String: Double] {
         didSet { userDefaults.set(measuredAnswerSeconds, forKey: Keys.measuredAnswerSeconds) }
@@ -55,6 +66,8 @@ final class AppSettings: ObservableObject {
         chatgptModel = userDefaults.string(forKey: Keys.chatgptModel) ?? ""
         notesFolderPath = userDefaults.string(forKey: Keys.notesFolderPath)
         summaryAtStopEnabled = userDefaults.object(forKey: Keys.summaryAtStopEnabled) as? Bool ?? true
+        answerDeliveryMode = userDefaults.string(forKey: Keys.answerDeliveryMode).flatMap(AnswerDeliveryMode.init(rawValue:)) ?? .text
+        spokenAnswerVoiceIdentifier = userDefaults.string(forKey: Keys.spokenAnswerVoiceIdentifier)
         measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 
@@ -65,5 +78,7 @@ final class AppSettings: ObservableObject {
         static let notesFolderPath = "settings.notesFolderPath"
         static let summaryAtStopEnabled = "settings.summaryAtStopEnabled"
         static let measuredAnswerSeconds = "settings.measuredAnswerSeconds"
+        static let answerDeliveryMode = "settings.answerDeliveryMode"
+        static let spokenAnswerVoiceIdentifier = "settings.spokenAnswerVoiceIdentifier"
     }
 }
