@@ -10,16 +10,18 @@
 import AppKit
 import SwiftUI
 
+// Not generic on purpose: Swift 6.2.4's Release optimizer crashed specializing the
+// deallocator of a generic @MainActor class here. Only init and update are generic.
 @MainActor
-final class CursorAttachedPanel<Content: View> {
+final class CursorAttachedPanel {
     private var panel: NSPanel?
-    private var hostingView: NSHostingView<Content>?
+    private var hostingView: NSView?
     private let panelSize: CGSize
     /// Empty room around the content for its shadow, which a window would otherwise cut off.
     /// `size` and `setFrameOrigin` speak of the content; the panel is larger by this on every side.
     private let shadowMargin: CGFloat
 
-    init(rootView: Content, size: CGSize, shadowMargin: CGFloat = 0) {
+    init<Content: View>(rootView: Content, size: CGSize, shadowMargin: CGFloat = 0) {
         panelSize = size
         self.shadowMargin = shadowMargin
         let windowSize = CGSize(width: size.width + 2 * shadowMargin, height: size.height + 2 * shadowMargin)
@@ -48,8 +50,9 @@ final class CursorAttachedPanel<Content: View> {
 
     var size: CGSize { panelSize }
     
-    func update(rootView: Content) {
-        hostingView?.rootView = rootView
+    /// `Content` must be the view type the panel was made with.
+    func update<Content: View>(rootView: Content) {
+        (hostingView as? NSHostingView<Content>)?.rootView = rootView
     }
 
     func setFrameOrigin(_ origin: CGPoint) {

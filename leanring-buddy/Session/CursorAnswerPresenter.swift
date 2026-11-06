@@ -22,13 +22,13 @@ import SwiftUI
 final class CursorAnswerPresenter {
     private let pointerFlight: PointerFlightController
 
-    private var bubblePanel: CursorAttachedPanel<AnswerBubbleView>?
+    private var bubblePanel: CursorAttachedPanel?
     private var bubbleContent: AnswerBubbleContent?
     private var bubbleNearCorner: CursorBubbleLayout.NearCorner = .topLeading
     /// A bubble that is fading out after a click or keypress; `hideAll` removes it at once.
-    private var fadingBubblePanel: CursorAttachedPanel<AnswerBubbleView>?
+    private var fadingBubblePanel: CursorAttachedPanel?
 
-    private var speakingPanel: CursorAttachedPanel<SpeakingMarkerPanelContent>?
+    private var speakingPanel: CursorAttachedPanel?
     private var isSpeaking = false
 
     private var followTimer: Timer?
