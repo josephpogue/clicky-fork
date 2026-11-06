@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+# Codex stand-in for the test Mac. No login, no network. It speaks the parts of the real CLI the app uses:
+#   codex --version | login status | login | logout | debug models
+#   codex exec --json ... "<prompt>" -i a.jpg -i b.jpg        and        codex exec resume --json ... <thread_id> "<prompt>" -i ...
+# Every call appends a JSON line to $STANDIN_LOG_DIR/codex.jsonl (default /Users/admin/standin-log): argv, environment
+# variable names, and the prompt with image arguments listed by file size.
+import json, os, sys, time, uuid
+
+# ---- THE REPLY TABLE: the one place to edit canned answers. First matching keyword (lower case, in the question) wins. ----
+REPLY_TABLE = [
+    ("limit", "LIMIT"),
+    ("save", "Click the Save button at the top right. [POINT:1180,40:save button:screen1]"),
+    ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
+                "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
+    ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
+]
+DEFAULT_REPLY = "I can see your screen. [POINT:none]"
+LIMIT_MESSAGE = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits"  # real CLI wording
+VERSION = "codex-cli 0.155.1"
+MODELS = [("gpt-6-astra", "GPT-6-Astra"), ("gpt-6-astra-mini", "GPT-6-Astra Mini")]
+# -----------------------------------------------------------------------------------------------------------------------
+
+log_dir = os.environ.get("STANDIN_LOG_DIR", "/Users/admin/standin-log")
+config_dir = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex-standin")
+flag_file = os.path.join(config_dir, "standin-signed-in")   # contains "yes" or "no"; absent means signed in
+FLAGS_WITH_VALUE = {"-i", "--image", "-m", "--model", "-c", "--config", "-C", "--cd", "-s", "--sandbox", "-p", "--profile",
+                    "--color", "--output-schema", "-o", "--output-last-message", "--add-dir", "--local-provider", "--oss-provider"}
+
+
+def log(event):
+    os.makedirs(log_dir, exist_ok=True)
+    event.update({"time": time.time(), "pid": os.getpid()})
+    with open(os.path.join(log_dir, "codex.jsonl"), "a") as handle:
+        handle.write(json.dumps(event) + "\n")
+
+
+def signed_in():
+    try:
+        return open(flag_file).read().strip() != "no"
+    except OSError:
+        return True
+
+
+def set_signed_in(value):
+    os.makedirs(config_dir, exist_ok=True)
+    with open(flag_file, "w") as handle:
+        handle.write("yes" if value else "no")
+
+
+def say(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def reply_for(question):
+    lowered = question.lower()
+    for keyword, reply in REPLY_TABLE:
+        if keyword in lowered:
+            return reply
+    return DEFAULT_REPLY
+
+
+def main():
+    argv = sys.argv[1:]
+    log({"argv": argv, "env_keys": sorted(os.environ.keys())})
+    if argv[:1] == ["--version"]:
+        print(VERSION)
+        return 0
+    if argv[:2] == ["login", "status"]:
+        print("Logged in using ChatGPT" if signed_in() else "Not logged in")
+        return 0 if signed_in() else 1
+    if argv[:1] == ["login"]:
+        set_signed_in(True)
+        print("Successfully logged in")
+        return 0
+    if argv[:1] == ["logout"]:
+        set_signed_in(False)
+        print("Successfully logged out")
+        return 0
+    if argv[:2] == ["debug", "models"]:
+        print(json.dumps({"models": [{"slug": slug, "display_name": name, "visibility": "list"} for slug, name in MODELS]}))
+        return 0
+    if argv[:1] != ["exec"]:
+        print("error: unknown command", file=sys.stderr)
+        return 2
+
+    rest = argv[1:]
+    thread_id = None
+    if rest[:1] == ["resume"]:
+        rest = rest[1:]
+    positionals, images, index = [], [], 0
+    while index < len(rest):
+        value = rest[index]
+        if value in ("-i", "--image") and index + 1 < len(rest):
+            images.append(rest[index + 1]); index += 2; continue
+        if value in FLAGS_WITH_VALUE:
+            index += 2; continue
+        if value.startswith("-"):
+            index += 1; continue
+        positionals.append(value); index += 1
+    # For a resume the first positional is the thread id and the next is the prompt; for a new run only the prompt.
+    resumed = argv[1:2] == ["resume"]
+    if resumed and positionals:
+        thread_id = positionals.pop(0)
+    prompt = positionals[-1] if positionals else ""
+    question = prompt
+    for line in reversed(prompt.splitlines()):
+        if line.startswith("Question:"):
+            question = line[len("Question:"):]; break
+    sizes = [os.path.getsize(path) if os.path.exists(path) else -1 for path in images]
+    log({"prompt": prompt, "thread_id": thread_id, "image_byte_counts": sizes})
+    if not signed_in():
+        print("Not logged in", file=sys.stderr)
+        return 1
+    thread_id = thread_id or str(uuid.uuid4())
+    say({"type": "thread.started", "thread_id": thread_id})
+    say({"type": "turn.started"})
+    reply = reply_for(question)
+    if reply == "LIMIT":
+        say({"type": "error", "message": LIMIT_MESSAGE})
+        say({"type": "turn.failed", "error": {"message": LIMIT_MESSAGE}})
+        return 1
+    say({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": reply}})
+    say({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}})
+    return 0
+
+
+sys.exit(main())

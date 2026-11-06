@@ -4,14 +4,15 @@
 //
 //  Manages the NSStatusItem (menu bar icon) and a custom borderless NSPanel
 //  that drops down below it when clicked. The panel hosts a SwiftUI view
-//  (CompanionPanelView) via NSHostingView. Uses the same NSPanel pattern as
-//  FloatingSessionButton and GlobalPushToTalkOverlay for consistency.
+//  (CompanionPanelView) via NSHostingView.
 //
 //  The panel is non-activating so it does not steal focus from the user's
 //  current app, and auto-dismisses when the user clicks outside.
 //
 
 import AppKit
+import ClickyCore
+import Combine
 import SwiftUI
 
 extension Notification.Name {
@@ -30,15 +31,26 @@ final class MenuBarPanelManager: NSObject {
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
+    private var sessionRunningCancellable: AnyCancellable?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
-    private let panelHeight: CGFloat = 380
+    private let panelHeight: CGFloat = 300
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         super.init()
         createStatusItem()
+
+        // While a session runs the menu bar icon shows a red dot, so the user
+        // can see at a glance that the app is watching.
+        sessionRunningCancellable = SessionCoordinator.shared.$lifecycle
+            .map(\.phase)
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] phase in
+                self?.updateStatusItemIcon(phase: phase)
+            }
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
             forName: .clickyDismissPanel,
@@ -65,10 +77,52 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
-        button.image?.isTemplate = true
+        updateStatusItemIcon(phase: SessionCoordinator.shared.lifecycle.phase)
         button.action = #selector(statusItemClicked)
         button.target = self
+    }
+
+    /// Idle: the plain triangle as a template image (the system tints it).
+    /// Running: the triangle with a red dot badge, drawn per appearance because
+    /// a template image cannot carry a colour. Starting and stopping: the triangle with an
+    /// amber ring instead of the dot, so the red dot always means the app is watching.
+    private func updateStatusItemIcon(phase: SessionLifecyclePhase) {
+        guard let button = statusItem?.button else { return }
+        switch phase {
+        case .running:
+            button.image = makeSessionRunningMenuBarIcon(showsWatchingDot: true)
+            button.image?.isTemplate = false
+        case .starting, .stopping:
+            button.image = makeSessionRunningMenuBarIcon(showsWatchingDot: false)
+            button.image?.isTemplate = false
+        case .idle:
+            button.image = makeClickyMenuBarIcon()
+            button.image?.isTemplate = true
+        }
+    }
+
+    private func makeSessionRunningMenuBarIcon(showsWatchingDot: Bool) -> NSImage {
+        let iconSize: CGFloat = 18
+        let triangleImage = makeClickyMenuBarIcon()
+        return NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { drawingRect in
+            // The drawing handler runs at draw time, so labelColor follows light and dark menu bars.
+            triangleImage.draw(in: drawingRect)
+            NSColor.labelColor.set()
+            drawingRect.fill(using: .sourceAtop)
+
+            let badgeDiameter: CGFloat = 8
+            let badgeRect = NSRect(x: iconSize - badgeDiameter, y: iconSize - badgeDiameter, width: badgeDiameter, height: badgeDiameter)
+            if showsWatchingDot {
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: badgeRect).fill()
+            } else {
+                let ringPath = NSBezierPath(ovalIn: badgeRect.insetBy(dx: 1, dy: 1))
+                ringPath.lineWidth = 1.5
+                NSColor.systemOrange.setStroke()
+                ringPath.stroke()
+            }
+            return true
+        }
     }
 
     /// Draws the clicky triangle as a menu bar icon. Uses the same shape

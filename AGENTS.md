@@ -3,110 +3,91 @@
 <!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
 
+## Goals
+
+@docs/GOAL.md
+
+Read docs/GOAL.md before planning any change. Section goals live in docs/goals/; each lists the code folders it governs in its front matter. Before changing code, read every goal file whose `code` covers the files you touch, plus each of its parents.
+
+- When a change would cross a Non-goal or a Constraint, stop and ask Joseph.
+- When a change alters what a section should do, edit that goal file in the same pull request, with Joseph's approval.
+
+The v1 build design is `docs/superpowers/specs/2026-11-05-clicky-fork-design.md`.
+
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+Clicky Fork is a macOS menu-bar assistant (no dock icon, no main window). The user starts a session from the menu bar. During a session the app listens on the microphone and transcribes speech on the Mac, saves screenshots of every display when the app or window changes or the screen changes clearly, and logs it all to a session folder. A lone tap of right Command starts a spoken question; the next lone tap sends it. The question goes, with the current screens, a short note of what happened since the last question and (when the question is about an earlier moment) that moment's screenshot, to Claude through the official `claude` CLI or to ChatGPT through the official `codex` CLI, each on the user's own subscription login kept in the app's own config folder. The answer shows as text beside the cursor, is read aloud with a built-in macOS voice, or both (Settings, Answer by), and a pointer flies to the spot its `[POINT:...]` tag names. Moving the mouse keeps the text; any click or keypress fades it. No window opens during a session; the chat window holding the whole conversation opens only from the menu-bar panel's Open chat row. Stop turns everything off, cleans up near-duplicate screenshots, writes `log.md`, and (when on) asks for one text-only summary. Save files a session into the user's notes folder under a project.
 
-All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
+Nothing is captured, heard or sent outside a session, and nothing goes to any AI between questions. There are no API keys and no network calls of the app's own; the CLIs make the only AI requests.
 
 ## Architecture
 
-- **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
-- **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
-- **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
-- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
-- **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
-- **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
-- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
-- **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
-- **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Analytics**: PostHog via `ClickyAnalytics.swift`
-
-### API Proxy (Cloudflare Worker)
-
-The app never calls external APIs directly. All requests go through a Cloudflare Worker (`worker/src/index.ts`) that holds the real API keys as secrets.
-
-| Route | Upstream | Purpose |
-|-------|----------|---------|
-| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat |
-| `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS audio |
-| `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token |
-
-Worker secrets: `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`
-Worker vars: `ELEVENLABS_VOICE_ID`
+- **App type:** menu bar only (`LSUIElement=true`), SwiftUI with AppKit bridging (`NSStatusItem`, `NSPanel`, `NSHostingView`), `@MainActor` UI state, async/await.
+- **Shared logic:** the local Swift package `Packages/ClickyCore`, tested with `make test` (swift-testing). Target `ClickyCore` holds everything pure: contracts, question key detection, capture policy, the session store and log, the per-question payload, the providers, vault save and session browsing. Target `ClickySpeech` holds local speech (FluidAudio Parakeet, Apple Speech fallback). The app target `leanring-buddy` holds only AppKit glue and views.
+- **Session:** `SessionCoordinator` (app) starts and stops the pieces through the phases in `SessionLifecycle` (idle, starting, running, stopping). Screen, microphone and key tap start together only once speech, the permissions and the provider are ready; quit in any phase but idle waits for a clean stop. A Start cancelled or quit before the session shows as running removes its session folder, even when capture had begun (`SessionStartEnding`); a Start that fails after capture began keeps a short session and shows the notice. The chat window, when open, shows the same phase as the panel. `SessionQuestionFlow` (ClickyCore actor) runs each question: transcribe, capture, pick an earlier moment, build the turn, ask, parse the point, log, and start a fresh conversation with a text recap after 15 turns or 40 images.
+- **Providers:** both behind `AnswerProvider` / `ProviderAccount`. Claude: one long-lived `claude -p --input-format stream-json --output-format stream-json` process per session with `--safe-mode`, no tools and no settings, `CLAUDE_CONFIG_DIR` = the app's `providers/claude-config`; model changes use the CLI's in-place `set_model`. ChatGPT: `codex exec` then `codex exec resume <thread>` per question, `CODEX_HOME` = the app's `providers/codex-home`, low reasoning effort, the thread deleted at Stop. Both refuse an API-key login. Codex runs with every model tool turned off (`CodexToolRestrictions`). Neither `startConversation` sends anything: a recap rides on the next question.
+- **Speech:** `SessionSpeechPipeline` reads the microphone only between Start and Stop, splits utterances with an energy segmenter, and transcribes them with Parakeet TDT 0.6b v3 on the Mac. Its timeline is anchored to when audio arrives (re-anchored after a gap), and Stop drains the last words. The model loads at app launch (about 45 s the first time on a Mac, under a second after); a download that fails for 300 s falls back to Apple Speech.
+- **Screen capture:** ScreenCaptureKit, all displays, the app's own windows excluded, 1280 px long side, JPEG about 75 KB. Saves on session start, each question, app or window switches and clear screen changes (32x20 grayscale thumbnail difference), at most one save every 2 s. Screens are numbered by display order. No text is ever read off a screenshot.
+- **Answers beside the cursor:** `CursorAnswerPresenter` shows the answer, a notice or the speaker capsule in `CursorAttachedPanel`, a borderless panel that ignores the mouse and never becomes key, so the user's app keeps every click, key and scroll. It follows the cursor each frame, flips left or up near an edge, and rides under the pointer's label while the pointer is out (`CursorBubbleLayout` holds the placement, width and line-cap rules). A global click or key monitor fades it. `SpokenAnswerPlayer` reads answers with `AVSpeechSynthesizer` and the voice from Settings (`SpokenVoiceChoice`); a new question stops it.
+- **Pointing:** answers end with `[POINT:x,y:label:screenN]` in that screenshot's pixels; `PointMapper` maps it to the display and the overlay flies the pointer there along upstream's bezier arc.
+- **Data:** `~/Library/Application Support/Clicky Fork/` (or `CLICKY_DATA_DIR`): `sessions/<yyyy-MM-dd-HHmmss>/` with `session.json`, `events.jsonl`, `shots.jsonl`, `shots/` and `log.md`, plus `providers/`. The only write outside it is Save, into the notes folder set in Settings (or `CLICKY_VAULT_ROOT`; `CLICKY_VAULT_DRY_RUN=1` writes nothing).
 
 ### Key Architecture Decisions
 
-**Menu Bar Panel Pattern**: The companion panel uses `NSStatusItem` for the menu bar icon and a custom borderless `NSPanel` for the floating control panel. This gives full control over appearance (dark, rounded corners, custom shadow) and avoids the standard macOS menu/popover chrome. The panel is non-activating so it doesn't steal focus. A global event monitor auto-dismisses it on outside clicks.
+**Menu bar panel:** `NSStatusItem` plus a custom borderless non-activating `NSPanel`, dismissed by a global click-outside monitor. The icon shows a red dot while a session runs.
 
-**Cursor Overlay**: A full-screen transparent `NSPanel` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
+**Chat window:** a floating non-activating `NSPanel` whose `canBecomeKey` is false, so showing or updating it never takes keyboard focus from the user's app. It opens only from the panel's Open chat row, never by itself. Fixed-size hosting views set `sizingOptions = []` or they can render blank.
 
-**Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
+**Cursor answer panel:** `ignoresMouseEvents = true` and `canBecomeKey` false, so the answer beside the cursor can never take input from the user's app. Long answers are cut near 9 lines with a footer pointing to Open chat; there is no scrolling inside it.
 
-**Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
+**Question key:** a listen-only `CGEvent` tap installed only during a session. A tap counts only when right Command is pressed and released within 1 s with no other key, modifier or mouse button in between.
 
-**Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
+**One provider interface:** the session, recap and log code never knows which provider answers; a usage-limit failure on Claude shows a notice beside the cursor and a one-tap switch to ChatGPT in the menu-bar panel that carries the conversation over as a text recap.
 
 ## Key Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
-| `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
-| `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
-| `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
-| `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
-| `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
-| `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
-| `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
-| `OpenAIAudioTranscriptionProvider.swift` | ~317 | Upload-based transcription provider. Buffers push-to-talk audio locally, uploads as WAV on release, returns finalized transcript. |
-| `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
-| `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
-| `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
-| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
-| `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
-| `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
-| `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
-| `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
-| `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
-| `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
+| File | Purpose |
+|------|---------|
+| `leanring_buddyApp.swift` | Entry point; the app delegate creates the menu bar panel, starts permission polling and loads speech. Quitting stops a running session. |
+| `Session/SessionCoordinator.swift` | Start and Stop: permissions check, session store, window tracker, screen recorder, speech pipeline, question key, provider; bridges `SessionQuestionFlow` to the chat state, marker and pointer. |
+| `Session/QuestionMarkerPanel.swift`, `Session/PointerFlight.swift` | The listening marker beside the cursor, and the pointer flight to an answer's point. |
+| `Session/CursorAnswerPresenter.swift`, `Session/CursorAttachedPanel.swift` | The answer, notice and speaker capsule beside the cursor: following, flipping, riding the pointer label, fading on a click or key. |
+| `Session/SpokenAnswerPlayer.swift` | `SpeechOwner` (the one synthesizer shared by session answers and the Settings sample) and the session's answer player; `InstalledSpokenVoices` lists the Mac's voices for Settings. |
+| `Views/AnswerBubbleView.swift`, `Views/SpeakingMarkerView.swift` | The answer bubble (short, long with the Open chat footer, notice) and the speaker capsule. |
+| `Views/AnswerDeliverySettingsSection.swift` | Settings' Showing answers section: Answer by chips, the Voice picker and Play sample. |
+| `Views/PanelChatRows.swift`, `Views/ChatWindowState+PanelSummary.swift` | The panel's Open chat row (answer count and the start of the last answer) and the usage-limit switch row. |
+| `Session/SessionProviderFactory.swift` | Makes the Claude or ChatGPT provider and picks its model from Settings. |
+| `QuestionKey/QuestionKeyMonitor.swift` | Session-only listen-only event tap feeding `ClickyCore/QuestionKey`. |
+| `Capture/SessionScreenRecorder.swift`, `Capture/FrontmostWindowTracker.swift`, `CompanionScreenCaptureUtility.swift` | Screenshot saving during a session, app and window switch reports, multi-display capture. |
+| `Windows/*.swift`, `AppWindowRouter.swift` | The chat panel, Settings, session list, session detail and Save sheet windows. |
+| `Views/*.swift` | The designer's views; `ViewState.swift` holds the state they take. `--render-ui-previews <dir>` renders every state to PNG. |
+| `CompanionManager.swift`, `WindowPositionManager.swift` | Permission state and polling, and the Screen Recording and Accessibility permission helpers. |
+| `MenuBarPanelManager.swift`, `CompanionPanelView.swift` | The status item, the panel and its Start/Stop, Open chat, Sessions, Settings and permission rows. |
+| `OverlayWindow.swift` | Full-screen transparent overlay hosting the pointer and its bezier flight on any display. |
+| `AppSettings.swift` | Provider, models, notes folder, summary at Stop, answer delivery (Text, Spoken, Both), the spoken voice and the measured answer time per provider, in UserDefaults. |
+| `DesignSystem.swift` | `DS` design tokens. |
+| `Packages/ClickyCore/Sources/ClickyCore/` | `Contracts/`, `QuestionKey/`, `Capture/`, `SessionLog/`, `Questions/`, `Session/` (question flow, lifecycle phases, spoken voice choice), `Providers/Claude/`, `Providers/Codex/`, `Vault/`, `Browsing/`, `WindowSupport/` (pointer label layout, cursor bubble layout, the panel's chat summary, window fit, `WindowPlacement` keeping opened windows clear of the chat panel, sign-in process ending), `AppDataLocations`, `ProviderProcessSupport`. |
+| `Packages/ClickyCore/Sources/ClickySpeech/` | Microphone and file sample sources, energy segmenter, Parakeet and Apple transcribers, `SessionSpeechPipeline`. |
+| `testenv/` | Tart test Mac recipe for user-mock walks: stand-in `claude` and `codex`, an accessibility driver (with `click-at` and `press-key`), a fake microphone and a fixture vault. Read `testenv/README.md`. |
 
 ## Build & Run
 
 ```bash
-# Open in Xcode
-open leanring-buddy.xcodeproj
+# Build the app (Debug by default; the last printed line is the path of Clicky Fork.app)
+bash scripts/build-app.sh            # or: make build
+bash scripts/build-app.sh --configuration Release
+bash scripts/build-app.sh --install  # also copies the app to /Applications
 
-# Select the leanring-buddy scheme, set signing team, Cmd+R to build and run
+# Run the shared-logic tests (Packages/ClickyCore)
+make test
 
-# Known non-blocking warnings: Swift 6 concurrency warnings,
-# deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
+# Render SwiftUI previews to PNG files without opening the app (no permission prompts)
+"<app>/Contents/MacOS/Clicky Fork" --render-ui-previews <folder>
 ```
 
-**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
+Build only through `scripts/build-app.sh`. It signs with `$CLICKY_DEVELOPMENT_TEAM`, else with the team of the first "Apple Development" identity in the keychain, so macOS permissions (screen recording, microphone, accessibility) stick across rebuilds. With no identity it signs ad hoc and prints a warning, and permissions need re-granting after each rebuild. No team id is stored in the project file. The script never launches the app.
 
-## Cloudflare Worker
-
-```bash
-cd worker
-npm install
-
-# Add secrets
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ASSEMBLYAI_API_KEY
-npx wrangler secret put ELEVENLABS_API_KEY
-
-# Deploy
-npx wrangler deploy
-
-# Local dev (create worker/.dev.vars with your keys)
-npx wrangler dev
-```
+Known non-blocking warnings: Swift 6 concurrency warnings, deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
 
 ## Code Style & Conventions
 
@@ -137,13 +118,26 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - All buttons must show a pointer cursor on hover
 - For any interactive element, explicitly think through its hover behavior (cursor, visual feedback, and whether hover should communicate clickability)
 
+### Fork rules
+
+- Build the environment of every `claude` or `codex` child only through `ProviderProcessSupport.scrubbedEnvironment`: an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `TERM`, `__CF_USER_TEXT_ENCODING`) plus the app's own `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Every `codex exec` and `exec resume` carries `CodexToolRestrictions.arguments`. Never pass `--bare` to `claude`.
+- Any step in the question flow or a provider that awaits re-checks that the session or conversation is still running afterwards, and ends any conversation it opened if Stop landed meanwhile.
+- Build question text (instructions, notes, recaps) only in `ClickyCore/Questions`, so both providers send the same thing.
+- In ClickyCore, loop by index instead of calling `.enumerated().count` or similar on a sequence: it crashed at the macOS 14 deployment target.
+- New windows host SwiftUI through `Windows/WindowHosting.swift` with `sizingOptions = []`, and use the `DS` tokens and `PillOutline` from `DesignSystem.swift` and `WindowComponents.swift`.
+- Read only channel 0 of a microphone input with more than two channels (the test Mac's fake input has 16).
+- Tests write vault files only under a temporary `CLICKY_VAULT_ROOT`, never the user's real notes folder.
+- Spoken output goes through `SpeechOwner.shared` (one `AVSpeechSynthesizer`; `SpeechTurnTracker` in ClickyCore decides who is reported speaking), so a Settings sample and a session answer never talk over each other. Never create another `AVSpeechSynthesizer`.
+- A pointer flight carries a token (`PointerFlightTokens`): its hold and return timers and `finishFlight` act only for the current flight, never one a newer flight or Stop replaced. A new question ends a flight with `endCurrentFlightByReturningToCursor()`, never `cancelFlight` (which hides the whole overlay). The target counts in the bubble's clearance frame only while the pointer holds at it.
+- Run the `testenv/` driver commands only inside the test Mac, never on the host.
+- App-target logic that needs a test goes in a new file in `Packages/ClickyCore`: the app target has no test target because the GUI never launches on the build Mac.
+
 ### Do NOT
 
 - Do not add features, refactor code, or make "improvements" beyond what was asked
 - Do not add docstrings, comments, or type annotations to code you did not change
 - Do not try to fix the known non-blocking warnings (Swift 6 concurrency, deprecated onChange)
 - Do not rename the project directory or scheme (the "leanring" typo is intentional/legacy)
-- Do not run `xcodebuild` from the terminal — it invalidates TCC permissions
 
 ## Git Workflow
 

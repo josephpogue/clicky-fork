@@ -9,6 +9,7 @@
 
 import AppKit
 import AVFoundation
+import ClickyCore
 import SwiftUI
 
 class OverlayWindow: NSWindow {
@@ -53,6 +54,15 @@ class OverlayWindow: NSWindow {
 }
 
 // Cursor-like triangle shape (equilateral)
+enum PointerLabelMetrics {
+    /// The width the label takes once all of `text` is typed: the text at the label's font (11 pt medium)
+    /// plus its 8 pt padding on each side.
+    static func fullWidth(ofText text: String) -> CGFloat {
+        let textWidth = (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width
+        return ceil(textWidth) + 16
+    }
+}
+
 struct Triangle: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -105,15 +115,15 @@ enum BuddyNavigationMode {
 struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
-    @ObservedObject var companionManager: CompanionManager
+    @ObservedObject var pointerFlight: PointerFlightController
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
-    init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+    init(screenFrame: CGRect, isFirstAppearance: Bool, pointerFlight: PointerFlightController) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
-        self.companionManager = companionManager
+        self.pointerFlight = pointerFlight
 
         // Seed the cursor position from the current mouse location so the
         // buddy doesn't flash at (0,0) before onAppear fires.
@@ -143,6 +153,8 @@ struct BlueCursorView: View {
     @State private var navigationBubbleText: String = ""
     @State private var navigationBubbleOpacity: Double = 0.0
     @State private var navigationBubbleSize: CGSize = .zero
+    /// Width of the finished label text, known before it types out, so the label picks its side once.
+    @State private var navigationBubbleFullWidth: CGFloat = 0
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
@@ -156,6 +168,8 @@ struct BlueCursorView: View {
     /// at the midpoint of the arc and shrinks back to 1.0x on landing, creating
     /// an energetic "swooping" feel.
     @State private var buddyFlightScale: CGFloat = 1.0
+    /// The token of the pointer flight this overlay is flying; see `PointerFlightController`.
+    @State private var activeFlightToken: Int?
 
     /// Scale factor for the navigation speech bubble's pop-in entrance.
     /// Starts at 0.5 and springs to 1.0 when the first character appears.
@@ -164,11 +178,6 @@ struct BlueCursorView: View {
     /// True when the buddy is flying BACK to the cursor after pointing.
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
-
-    // MARK: - Onboarding Video Layout
-
-    private let onboardingVideoPlayerWidth: CGFloat = 330
-    private let onboardingVideoPlayerHeight: CGFloat = 186
 
     private let fullWelcomeMessage = "hey! i'm clicky"
 
@@ -214,49 +223,6 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Onboarding video — always in the view tree so opacity animation works
-            // reliably. When no player exists or opacity is 0, nothing is visible.
-            // allowsHitTesting(false) prevents it from intercepting clicks.
-            OnboardingVideoPlayerView(player: companionManager.onboardingVideoPlayer)
-                .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
-                .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
-                .position(
-                    x: cursorPosition.x + 10 + (onboardingVideoPlayerWidth / 2),
-                    y: cursorPosition.y + 18 + (onboardingVideoPlayerHeight / 2)
-                )
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
-                .allowsHitTesting(false)
-
-            // Onboarding prompt — "press control + option and say hi" streamed after video ends
-            if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
-                Text(companionManager.onboardingPromptText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
-                    )
-                    .fixedSize()
-                    .overlay(
-                        GeometryReader { geo in
-                            Color.clear
-                                .preference(key: SizePreferenceKey.self, value: geo.size)
-                        }
-                    )
-                    .opacity(companionManager.onboardingPromptOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                    .animation(.easeOut(duration: 0.4), value: companionManager.onboardingPromptOpacity)
-                    .onPreferenceChange(SizePreferenceKey.self) { newSize in
-                        bubbleSize = newSize
-                    }
-            }
 
             // Navigation pointer bubble — shown when buddy arrives at a detected element.
             // Pops in with a scale-bounce (0.5x → 1.0x spring) and a bright initial
@@ -285,7 +251,13 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    // Left of the pointer near the right screen edge, and kept inside the screen top
+                    // and bottom, so the label is never cut off.
+                    .position(PointerLabelLayout.center(
+                        pointerPosition: cursorPosition,
+                        currentLabelSize: navigationBubbleSize,
+                        fullLabelWidth: navigationBubbleFullWidth,
+                        screenSize: screenFrame.size))
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
@@ -308,7 +280,7 @@ struct BlueCursorView: View {
                 .rotationEffect(.degrees(triangleRotationDegrees))
                 .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                 .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
+                .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(
                     buddyNavigationMode == .followingCursor
@@ -316,25 +288,10 @@ struct BlueCursorView: View {
                         : nil,
                     value: cursorPosition
                 )
-                .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
                 .animation(
                     buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
                     value: triangleRotationDegrees
                 )
-
-            // Blue waveform — replaces the triangle while listening
-            BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
-
-            // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
-            BlueCursorSpinnerView()
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
@@ -362,34 +319,68 @@ struct BlueCursorView: View {
             } else {
                 self.cursorOpacity = 1.0
             }
+
+            navigateToPointerFlightTargetIfOnThisScreen()
         }
         .onDisappear {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
-            companionManager.tearDownOnboardingVideo()
         }
-        .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
-            // When a UI element location is detected, navigate the buddy to
-            // that position so it points at the element.
-            guard let screenLocation = newLocation,
-                  let displayFrame = companionManager.detectedElementDisplayFrame else {
-                return
-            }
-
-            // Only navigate if the target is on THIS screen
-            guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
-                  || displayFrame == screenFrame else {
-                return
-            }
-
-            startNavigatingToElement(screenLocation: screenLocation)
+        .onChange(of: pointerFlight.targetLocation) { _ in
+            navigateToPointerFlightTargetIfOnThisScreen()
         }
+        .onChange(of: pointerFlight.returnToCursorRequestedFlight) { requestedFlightToken in
+            endFlightEarlyWhenRequested(requestedFlightToken)
+        }
+        // The answer bubble rides under the pointer's label while the triangle is away from the cursor.
+        .onChange(of: cursorPosition) { _ in
+            publishPointerLabelFrameForAnswerBubble()
+        }
+        .onChange(of: navigationBubbleFullWidth) { _ in
+            publishPointerLabelFrameForAnswerBubble()
+        }
+    }
+
+    /// Tells the pointer flight where the label is (or would be: before it types out, its width is unknown
+    /// and counts as zero), so the answer bubble can sit just under it. Only the display that is flying
+    /// publishes; a pointer back with the cursor publishes nothing.
+    private func publishPointerLabelFrameForAnswerBubble() {
+        guard buddyNavigationMode != .followingCursor, let flightToken = activeFlightToken else { return }
+        let labelWidth = buddyNavigationMode == .pointingAtTarget ? navigationBubbleFullWidth : 0
+        let labelHeight = navigationBubbleSize.height > 0 ? navigationBubbleSize.height : 22
+        pointerFlight.publishPointerLabelFrame(
+            CursorBubbleLayout.pointerLabelFrame(
+                pointerPosition: cursorPosition,
+                labelSize: CGSize(width: labelWidth, height: labelHeight),
+                fullLabelWidth: labelWidth,
+                screenFrame: screenFrame),
+            clearance: CursorBubbleLayout.pointerClearanceFrame(
+                pointerPosition: cursorPosition,
+                screenFrame: screenFrame,
+                target: pointerFlight.targetLocation,
+                isPointerHoldingAtTarget: buddyNavigationMode == .pointingAtTarget),
+            flightToken: flightToken)
+    }
+
+    /// Starts the flight when a target is set and it is on THIS screen. Called when the
+    /// target changes and when the overlay appears already holding a target, because the
+    /// overlay windows are created only when an answer needs to point.
+    private func navigateToPointerFlightTargetIfOnThisScreen() {
+        guard let screenLocation = pointerFlight.targetLocation,
+              let displayFrame = pointerFlight.targetDisplayFrame else {
+            return
+        }
+        guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
+              || displayFrame == screenFrame else {
+            return
+        }
+        startNavigatingToElement(screenLocation: screenLocation)
     }
 
     /// Whether the buddy triangle should be visible on this screen.
     /// True when cursor is on this screen during normal following, or
     /// when navigating/pointing at a target on this screen. When another
-    /// screen is navigating (detectedElementScreenLocation is set but this
+    /// screen is navigating (a flight target is set but this
     /// screen isn't the one animating), hide the cursor so only one buddy
     /// is ever visible at a time.
     private var buddyIsVisibleOnThisScreen: Bool {
@@ -397,7 +388,7 @@ struct BlueCursorView: View {
         case .followingCursor:
             // If another screen's BlueCursorView is navigating to an element,
             // hide the cursor on this screen to prevent a duplicate buddy
-            if companionManager.detectedElementScreenLocation != nil {
+            if pointerFlight.targetLocation != nil {
                 return false
             }
             return isCursorOnThisScreen
@@ -477,6 +468,9 @@ struct BlueCursorView: View {
         // moves the mouse enough to cancel the return flight
         let mouseLocation = NSEvent.mouseLocation
         cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
+
+        // This flight's token: its hold and return timers and its finish act only while it is the current one.
+        activeFlightToken = pointerFlight.currentFlightToken
 
         // Enter navigation mode — stop cursor following
         buddyNavigationMode = .navigatingToTarget
@@ -583,17 +577,20 @@ struct BlueCursorView: View {
 
         // Use custom bubble text from the companion manager (e.g. onboarding demo)
         // if available, otherwise fall back to a random pointer phrase
-        let pointerPhrase = companionManager.detectedElementBubbleText
+        let pointerPhrase = pointerFlight.targetLabel
             ?? navigationPointerPhrases.randomElement()
             ?? "right here!"
 
+        navigationBubbleFullWidth = PointerLabelMetrics.fullWidth(ofText: pointerPhrase)
+
+        let flightToken = activeFlightToken
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
             // All characters streamed — hold for 3 seconds, then fly back
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                guard self.isCurrentFlight(flightToken), self.buddyNavigationMode == .pointingAtTarget else { return }
                 self.navigationBubbleOpacity = 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                    guard self.isCurrentFlight(flightToken), self.buddyNavigationMode == .pointingAtTarget else { return }
                     self.startFlyingBackToCursor()
                 }
             }
@@ -669,7 +666,30 @@ struct BlueCursorView: View {
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
-        companionManager.clearDetectedElementLocation()
+        if let flightToken = activeFlightToken {
+            activeFlightToken = nil
+            pointerFlight.finishFlight(flightToken: flightToken)
+        }
+    }
+
+    /// A new question ended the answer: the flight this overlay runs returns to the cursor now instead of
+    /// holding at its target. Does nothing on a display that is not flying it, or when it is already returning.
+    private func endFlightEarlyWhenRequested(_ requestedFlightToken: Int?) {
+        guard let requestedFlightToken, requestedFlightToken == activeFlightToken,
+              isCurrentFlight(requestedFlightToken) else { return }
+        guard buddyNavigationMode == .pointingAtTarget || (buddyNavigationMode == .navigatingToTarget && !isReturningToCursor) else { return }
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+        navigationBubbleScale = 1.0
+        startFlyingBackToCursor()
+    }
+
+    /// Whether the flight this overlay started is still the one running.
+    private func isCurrentFlight(_ flightToken: Int?) -> Bool {
+        guard let flightToken else { return false }
+        return pointerFlight.isCurrentFlight(flightToken)
     }
 
     // MARK: - Welcome Animation
@@ -689,8 +709,6 @@ struct BlueCursorView: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
                 }
                 return
             }
@@ -702,85 +720,15 @@ struct BlueCursorView: View {
     }
 }
 
-// MARK: - Blue Cursor Waveform
-
-/// A small blue waveform that replaces the triangle cursor while
-/// the user is holding the push-to-talk shortcut and speaking.
-private struct BlueCursorWaveformView: View {
-    let audioPowerLevel: CGFloat
-
-    private let barCount = 5
-    private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
-            HStack(alignment: .center, spacing: 2) {
-                ForEach(0..<barCount, id: \.self) { barIndex in
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
-                        .frame(
-                            width: 2,
-                            height: barHeight(
-                                for: barIndex,
-                                timelineDate: timelineContext.date
-                            )
-                        )
-                }
-            }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .animation(.linear(duration: 0.08), value: audioPowerLevel)
-        }
-    }
-
-    private func barHeight(for barIndex: Int, timelineDate: Date) -> CGFloat {
-        let animationPhase = CGFloat(timelineDate.timeIntervalSinceReferenceDate * 3.6) + CGFloat(barIndex) * 0.35
-        let normalizedAudioPowerLevel = max(audioPowerLevel - 0.008, 0)
-        let easedAudioPowerLevel = pow(min(normalizedAudioPowerLevel * 2.85, 1), 0.76)
-        let reactiveHeight = easedAudioPowerLevel * 10 * listeningBarProfile[barIndex]
-        let idlePulse = (sin(animationPhase) + 1) / 2 * 1.5
-        return 3 + reactiveHeight + idlePulse
-    }
-}
-
-// MARK: - Blue Cursor Spinner
-
-/// A small blue spinning indicator that replaces the triangle cursor
-/// while the AI is processing a voice input.
-private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-            )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
-            }
-    }
-}
-
 // Manager for overlay windows — creates one per screen so the cursor
 // buddy seamlessly follows the cursor across multiple monitors.
 @MainActor
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
-    var hasShownOverlayBefore = false
+    /// The welcome line is upstream's first-launch greeting; this fork never shows it.
+    var hasShownOverlayBefore = true
 
-    func showOverlay(onScreens screens: [NSScreen], companionManager: CompanionManager) {
+    func showOverlay(onScreens screens: [NSScreen], pointerFlight: PointerFlightController) {
         // Hide any existing overlays
         hideOverlay()
 
@@ -795,7 +743,7 @@ class OverlayWindowManager {
             let contentView = BlueCursorView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
-                companionManager: companionManager
+                pointerFlight: pointerFlight
             )
 
             let hostingView = NSHostingView(rootView: contentView)
@@ -839,43 +787,3 @@ class OverlayWindowManager {
     }
 }
 
-// MARK: - Onboarding Video Player
-
-/// NSViewRepresentable wrapping an AVPlayerLayer so HLS video plays
-/// inside SwiftUI. Uses a custom NSView subclass to keep the player
-/// layer sized to the view's bounds automatically.
-private struct OnboardingVideoPlayerView: NSViewRepresentable {
-    let player: AVPlayer?
-
-    func makeNSView(context: Context) -> AVPlayerNSView {
-        let view = AVPlayerNSView()
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ nsView: AVPlayerNSView, context: Context) {
-        nsView.player = player
-    }
-}
-
-private class AVPlayerNSView: NSView {
-    var player: AVPlayer? {
-        didSet { playerLayer.player = player }
-    }
-
-    private let playerLayer = AVPlayerLayer()
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspectFill
-        layer?.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
-    }
-}

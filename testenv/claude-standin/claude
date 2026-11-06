@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+# Claude stand-in for the test Mac. No login, no network, no credentials. It speaks the parts of the real CLI the app uses:
+#   claude --version | auth status | auth login | auth logout
+#   claude -p --input-format stream-json --output-format stream-json --verbose --model <m> --system-prompt <s> ...
+# Every call appends one JSON line per event to $STANDIN_LOG_DIR/claude.jsonl (default /Users/admin/standin-log): the argv,
+# the names of the environment variables it got, and each stdin line with images replaced by their byte counts.
+import base64, json, os, sys, time
+
+# ---- THE REPLY TABLE: the one place to edit canned answers. First matching keyword (lower case, in the question) wins. ----
+REPLY_TABLE = [
+    ("limit", "LIMIT"),
+    ("save", "Click the Save button at the top right. [POINT:1180,40:save button:screen1]"),
+    ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
+                "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
+    ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
+]
+SUMMARY_REPLY = "Asked where the save button is and about an earlier error."   # plain-text answer to the summary call
+DEFAULT_REPLY = "I can see your screen. [POINT:none]"
+LIMIT_MESSAGE = "You've hit your limit · resets 3pm (America/New_York)"   # wording of the real CLI
+NOT_SIGNED_IN_MESSAGE = "Not logged in · Please run /login"                  # wording of the real CLI
+VERSION = "2.1.318 (Claude Code)"
+# -----------------------------------------------------------------------------------------------------------------------
+
+log_dir = os.environ.get("STANDIN_LOG_DIR", "/Users/admin/standin-log")
+config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude-standin")
+flag_file = os.path.join(config_dir, "standin-signed-in")   # contains "yes" or "no"; absent means signed in
+
+
+def log(event):
+    os.makedirs(log_dir, exist_ok=True)
+    event.update({"time": time.time(), "pid": os.getpid()})
+    with open(os.path.join(log_dir, "claude.jsonl"), "a") as handle:
+        handle.write(json.dumps(event) + "\n")
+
+
+def signed_in():
+    try:
+        return open(flag_file).read().strip() != "no"
+    except OSError:
+        return True
+
+
+def set_signed_in(value):
+    os.makedirs(config_dir, exist_ok=True)
+    with open(flag_file, "w") as handle:
+        handle.write("yes" if value else "no")
+
+
+def say(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def redact(message):
+    # Replace each image's base64 with its byte count, so the log stays small and readable.
+    try:
+        for block in (message.get("message", {}).get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "image":
+                data = block.get("source", {}).get("data", "")
+                block["source"] = {"bytes": len(base64.b64decode(data or ""))}
+    except Exception:
+        pass
+    return message
+
+
+def question_text(message):
+    texts = [b.get("text", "") for b in (message.get("message", {}).get("content") or []) if isinstance(b, dict) and b.get("type") == "text"]
+    content = message.get("message", {}).get("content")
+    if isinstance(content, str):
+        texts = [content]
+    for text in reversed(texts):
+        if text.startswith("Question:"):
+            return text[len("Question:"):].strip()
+    return " ".join(texts)
+
+
+def reply_for(question):
+    lowered = question.lower()
+    for keyword, reply in REPLY_TABLE:
+        if keyword in lowered:
+            return reply
+    return DEFAULT_REPLY
+
+
+def main():
+    argv = sys.argv[1:]
+    log({"argv": argv, "env_keys": sorted(os.environ.keys())})
+    if argv[:1] == ["--version"]:
+        print(VERSION)
+        return 0
+    if argv[:1] == ["auth"]:
+        action = argv[1] if len(argv) > 1 else ""
+        if action == "status":
+            if signed_in():
+                print(json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+                                  "email": "tester@example.com", "subscriptionType": "max"}, indent=2))
+                return 0
+            print(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}, indent=2))
+            return 1
+        if action == "login":
+            set_signed_in(True)
+            print("Login successful.")
+            return 0
+        if action == "logout":
+            set_signed_in(False)
+            print("Successfully logged out from your Anthropic account.")
+            return 0
+        print("error: unknown auth command", file=sys.stderr)
+        return 2
+
+    model = "unknown"
+    for index, value in enumerate(argv):
+        if value == "--model" and index + 1 < len(argv):
+            model = argv[index + 1]
+    if "--input-format" not in argv:
+        # The summary call: plain `-p` with the prompt on stdin, plain text back (no --input-format stream-json).
+        prompt = sys.stdin.read()
+        log({"stdin": {"kind": "summary", "text": prompt}})
+        if not signed_in():
+            print(NOT_SIGNED_IN_MESSAGE)
+            return 1
+        print(SUMMARY_REPLY)
+        return 0
+    session_id = "standin-session-%d" % os.getpid()
+    say({"type": "system", "subtype": "init", "session_id": session_id, "model": model, "apiKeySource": "none",
+         "tools": [], "cwd": os.getcwd()})
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            message = json.loads(raw)
+        except ValueError:
+            log({"stdin_unparsed": raw[:200]})
+            continue
+        log({"stdin": redact(json.loads(raw))})
+        if message.get("type") == "control_request":
+            request = message.get("request", {})
+            if request.get("subtype") == "set_model":
+                model = request.get("model") or model
+            say({"type": "control_response", "response": {"subtype": "success", "request_id": message.get("request_id"), "response": {}}})
+            continue
+        if message.get("type") != "user":
+            continue
+        started = time.time()
+        if not signed_in():
+            say({"type": "result", "subtype": "success", "is_error": True, "result": NOT_SIGNED_IN_MESSAGE,
+                 "session_id": session_id, "duration_ms": 1})
+            continue
+        reply = reply_for(question_text(message))
+        is_error = reply == "LIMIT"
+        if is_error:
+            reply = LIMIT_MESSAGE
+        say({"type": "assistant", "session_id": session_id,
+             "message": {"role": "assistant", "model": model, "content": [{"type": "text", "text": reply}]}})
+        result = {"type": "result", "subtype": "success", "is_error": is_error, "result": reply, "session_id": session_id,
+                  "duration_ms": int((time.time() - started) * 1000) + 1, "num_turns": 1,
+                  "usage": {"input_tokens": 1, "output_tokens": 1}}
+        if is_error:
+            result["api_error_status"] = 429
+        say(result)
+    return 0
+
+
+sys.exit(main())
