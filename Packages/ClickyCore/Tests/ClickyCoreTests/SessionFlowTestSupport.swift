@@ -66,6 +66,7 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     private var stopCount = 0
     private var pausedStreamContinuation: CheckedContinuation<Void, Never>?
     private var toolsAreSupported = false
+    private var nextStopGate: TestGate?
 
     init(providerID: ProviderID) {
         self.providerID = providerID
@@ -83,6 +84,13 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         var toolCalls: [BrainToolCall] = []
         var notesRead: [String] = []
         var toolResultCharacterCount = 0
+        /// Thrown after the progress reports (and the pause), the way a provider fails partway through an answer.
+        var failureAfterProgress: ProviderFailure?
+        /// After a stop the answer still returns whole and not cut short: the stop landed after the final text.
+        var completesDespiteStop = false
+        /// The answer ends early on its own (the repeat guard) with the text so far, cut short, with no stop asked.
+        var endsEarlyOnItsOwn = false
+        var effortWasApplied: Bool?
     }
 
     /// Streamed answers given in order to `answer`; once they run out it falls back to the `ask` script.
@@ -97,6 +105,12 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         pausedStreamContinuation = nil
         lock.unlock()
         continuation?.resume()
+    }
+
+    /// The next stopCurrentAnswer call waits at this gate before it ends the held answer, like an interrupt that is pending.
+    func holdNextStop(at gate: TestGate) {
+        lock.lock(); defer { lock.unlock() }
+        nextStopGate = gate
     }
 
     func setSupportsBrainTools(_ supported: Bool) {
@@ -231,7 +245,16 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
             }
         }
         lock.lock(); let wasStopped = stopCount > stopsBefore; lock.unlock()
-        if wasStopped {
+        if let failure = stream.failureAfterProgress { throw failure }
+        if stream.endsEarlyOnItsOwn {
+            return ProviderAnswer(
+                text: latestRawText, model: request.model, secondsToAnswer: 1.0,
+                secondsToFirstText: stream.secondsToFirstText, toolCalls: stream.toolCalls,
+                notesRead: stream.notesRead, toolResultCharacterCount: stream.toolResultCharacterCount,
+                wasCutShort: true
+            )
+        }
+        if wasStopped && !stream.completesDespiteStop {
             for step in stream.progressAfterStop { await progress(step) }
             return ProviderAnswer(
                 text: latestRawText, model: request.model, secondsToAnswer: 1.0,
@@ -243,7 +266,8 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         return ProviderAnswer(
             text: stream.finalText, model: request.model, secondsToAnswer: 2.5,
             secondsToFirstText: stream.secondsToFirstText, toolCalls: stream.toolCalls,
-            notesRead: stream.notesRead, toolResultCharacterCount: stream.toolResultCharacterCount
+            notesRead: stream.notesRead, toolResultCharacterCount: stream.toolResultCharacterCount,
+            effortWasApplied: stream.effortWasApplied
         )
     }
 
@@ -254,7 +278,11 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         heldContinuation = nil
         let paused = pausedStreamContinuation
         pausedStreamContinuation = nil
+        let gate = nextStopGate
+        nextStopGate = nil
         lock.unlock()
+        // A held stop is an interrupt still pending: the answer has not returned yet when the gate is closed.
+        await gate?.pass()
         held?.resume()
         paused?.resume()
     }
@@ -305,6 +333,10 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     private(set) var toolCallStartedCount = 0
     /// Every streaming-related call in the order it happened: "text", "checking", "pointer", "answer", "cut".
     private(set) var callOrder: [String] = []
+    /// Phases, cut-shorts, answers, notices and the harness's markQuestionStarted, in the order they happened.
+    private(set) var timeline: [String] = []
+
+    func recordTimeline(_ entry: String) { lock.lock(); timeline.append(entry); lock.unlock() }
 
     func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {
         lock.lock(); textChanges.append(visibleText); callOrder.append("text"); lock.unlock()
@@ -315,13 +347,18 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     func answerCutShort(
         visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
     ) async {
-        lock.lock(); cutShorts.append((visibleText, notesRead)); cutReasons.append(reason); callOrder.append("cut"); lock.unlock()
+        lock.lock(); cutShorts.append((visibleText, notesRead)); cutReasons.append(reason); callOrder.append("cut")
+        timeline.append("cut"); lock.unlock()
     }
     func toolCallStarted() async {
         lock.lock(); toolCallStartedCount += 1; lock.unlock()
     }
 
-    func phaseChanged(_ phase: SessionFlowPhase) async { lock.lock(); phases.append(phase); lock.unlock() }
+    func phaseChanged(_ phase: SessionFlowPhase) async {
+        lock.lock(); phases.append(phase)
+        if phase == .listening { timeline.append("listening") }
+        lock.unlock()
+    }
     func questionAsked(_ text: String) async {
         lock.lock()
         questions.append(text)
@@ -340,10 +377,10 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
         answers.append(Answer(spokenText: spokenText, provider: provider, model: model,
                               secondsToAnswer: secondsToAnswer, pointLabel: pointLabel))
         answerNotesRead.append(notesRead)
-        callOrder.append("answer")
+        callOrder.append("answer"); timeline.append("answer")
         lock.unlock()
     }
-    func noticeShown(_ text: String) async { lock.lock(); notices.append(text); lock.unlock() }
+    func noticeShown(_ text: String) async { lock.lock(); notices.append(text); timeline.append("notice"); lock.unlock() }
     func usageLimitOffered(message: String, switchTo: ProviderID) async {
         lock.lock(); offers.append((message, switchTo)); lock.unlock()
     }
@@ -403,8 +440,14 @@ final class FlowHarness: @unchecked Sendable {
                 makeProvider: { id in id == .claude ? claudeProvider : chatgptProvider },
                 model: { id in id == .claude ? "sonnet" : "gpt-test" },
                 instructions: "Be brief.",
-                markQuestionStarted: { date in holder.recordStart(date) },
-                transcribeQuestion: { _, _ in holder.nextTranscription() },
+                markQuestionStarted: { [output] date in
+                    holder.recordStart(date)
+                    output.recordTimeline("markStarted")
+                },
+                transcribeQuestion: { [output] _, _ in
+                    output.recordTimeline("transcribe")
+                    return holder.nextTranscription()
+                },
                 captureCurrentGroup: {
                     await captureHold.takeGate()?.pass()
                     return holder.makeGroup(shots: screenShots)

@@ -24,11 +24,14 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     /// Raised by `startConversation` and `endConversation`, so a question that was started under an older number
     /// (and an answer that arrives after Stop) is dropped.
     private var conversationGeneration = 0
-    /// True while `answer` is running a question. `stopCurrentAnswer` only acts then.
-    private var isAnswerInFlight = false
-    /// Raised by `stopCurrentAnswer` for the answer in flight, so even an answer whose `exec` has not started yet
+    /// Handed to each `answer` call. An answer that returns late only clears what carries its own number, so it
+    /// cannot wipe the state of the answer that replaced it.
+    private var lastAnswerToken = 0
+    /// The number of the answer `answer` is running now, nil between answers. `stopCurrentAnswer` only acts then.
+    private var inFlightAnswerToken: Int?
+    /// The answer `stopCurrentAnswer` asked to end, so even an answer whose `exec` has not started yet
     /// (the login check is still running) ends at once with what it has.
-    private var isStopOfCurrentAnswerRequested = false
+    private var stopRequestedAnswerToken: Int?
 
     public init(
         locations: AppDataLocations,
@@ -72,16 +75,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
         guard isRunning else {
             throw ProviderFailure.failed(message: "ChatGPT is not started yet.")
         }
-        withState {
-            isAnswerInFlight = true
-            isStopOfCurrentAnswerRequested = false
-        }
-        defer {
-            withState {
-                isAnswerInFlight = false
-                isStopOfCurrentAnswerRequested = false
-            }
-        }
+        let answerToken = beginAnswer()
+        defer { finishAnswer(token: answerToken) }
         let executableURL = try setup.resolveExecutable()
         try setup.prepareDirectories()
         try await checkSubscriptionLoginOnce(executableURL: executableURL, generation: generation)
@@ -98,7 +93,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
                 await progress(.textSoFar(textSoFar))
             }
         }
-        let liveTurn = CodexLiveTurn(onTextSoFar: { textContinuation.yield($0) })
+        let joinsEveryAgentMessage = !turn.brainNote.isEmpty
+        let liveTurn = CodexLiveTurn(joinsEveryMessage: joinsEveryAgentMessage, onTextSoFar: { textContinuation.yield($0) })
         let output: CodexTurnOutput
         let wasCutShort: Bool
         do {
@@ -112,6 +108,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
                 threadIDToResume: threadToResume,
                 keepsThread: true,
                 endsOnStopOfCurrentAnswer: true,
+                answerToken: answerToken,
+                joinsEveryAgentMessage: joinsEveryAgentMessage,
                 liveTurn: liveTurn,
                 generation: generation
             )
@@ -148,14 +146,20 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     }
 
     /// Ends the exec that is running, if any. The pending `answer` returns the agent text so far, cut short, and the
-    /// conversation stays open for the next question.
+    /// conversation stays open for the next question. Returns once that answer has returned, bounded by the time
+    /// the exec needs to end (its grace, then a kill).
     public func stopCurrentAnswer() async {
-        let shouldEnd = withState { () -> Bool in
-            guard isAnswerInFlight else { return false }
-            isStopOfCurrentAnswerRequested = true
-            return true
+        let tokenToEnd = withState { () -> Int? in
+            guard let token = inFlightAnswerToken else { return nil }
+            stopRequestedAnswerToken = token
+            return token
         }
-        if shouldEnd { runner.endRunningProcesses() }
+        guard let tokenToEnd else { return }
+        runner.endRunningProcesses()
+        let deadline = Date().addingTimeInterval(stopWaitSeconds)
+        while withState({ inFlightAnswerToken == tokenToEnd }), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     public func summarize(_ text: String, instructions: String, model: String) async throws -> String {
@@ -175,7 +179,9 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             threadIDToResume: nil,
             keepsThread: false,
             endsOnStopOfCurrentAnswer: false,
-            liveTurn: CodexLiveTurn(onTextSoFar: { _ in }),
+            answerToken: nil,
+            joinsEveryAgentMessage: false,
+            liveTurn: CodexLiveTurn(joinsEveryMessage: false, onTextSoFar: { _ in }),
             generation: generation
         ).output.answerText ?? ""
     }
@@ -216,6 +222,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
         threadIDToResume: String?,
         keepsThread: Bool,
         endsOnStopOfCurrentAnswer: Bool,
+        answerToken: Int?,
+        joinsEveryAgentMessage: Bool,
         liveTurn: CodexLiveTurn,
         generation: Int
     ) async throws -> (output: CodexTurnOutput, wasCutShort: Bool) {
@@ -243,7 +251,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             onLine: { liveTurn.take(line: $0) },
             shouldStillStart: { [self] in
                 withState({
-                    conversationGeneration == generation && !(endsOnStopOfCurrentAnswer && isStopOfCurrentAnswerRequested)
+                    conversationGeneration == generation
+                        && !(endsOnStopOfCurrentAnswer && stopRequestedAnswerToken == answerToken)
                 })
             }
         )
@@ -254,10 +263,11 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             throw ProviderFailure.failed(message: "The question was stopped.")
         }
         if endsOnStopOfCurrentAnswer,
-           result.wasEndedOnRequest || withState({ isStopOfCurrentAnswerRequested }) {
+           result.wasEndedOnRequest || withState({ stopRequestedAnswerToken == answerToken }) {
             // Ended on purpose (a new question): hand back what had arrived. The live turn saw every complete line,
             // including lines the process printed just before it ended.
             var cutShortOutput = CodexTurnOutput()
+            cutShortOutput.joinsEveryAgentMessage = joinsEveryAgentMessage
             cutShortOutput.agentMessages = liveTurn.agentMessages
             cutShortOutput.threadID = liveTurn.threadID
             return (cutShortOutput, true)
@@ -266,7 +276,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             throw ProviderFailure.failed(message: "The question was stopped.")
         }
 
-        let output = CodexOutputParsing.parseTurnOutput(lines: result.outputLines)
+        var output = CodexOutputParsing.parseTurnOutput(lines: result.outputLines)
+        output.joinsEveryAgentMessage = joinsEveryAgentMessage
         if result.wasStoppedEarly {
             throw ProviderFailure.notSignedIn
         }
@@ -354,6 +365,10 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             throw ProviderFailure.failed(message: "The question was stopped.")
         }
         switch state {
+        case .endedOnRequest:
+            // A new question killed the check. It proved nothing, so the next question checks again; this one
+            // ends through the stop request it came with.
+            break
         case .chatGPT, .unknown:
             withState { hasCheckedLoginThisConversation = true }
         case .notLoggedIn:
@@ -366,6 +381,32 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     }
 
     // MARK: State
+
+    /// How long `stopCurrentAnswer` waits for the ended answer to return.
+    var stopWaitSeconds = 5.0
+
+    /// True while an `answer` call has not returned yet.
+    var hasAnswerInFlight: Bool { withState { inFlightAnswerToken != nil } }
+
+    /// Whether `stopCurrentAnswer` asked to end the answer with this number.
+    func isStopRequested(forAnswerToken token: Int) -> Bool { withState { stopRequestedAnswerToken == token } }
+
+    func beginAnswer() -> Int {
+        withState {
+            lastAnswerToken += 1
+            inFlightAnswerToken = lastAnswerToken
+            stopRequestedAnswerToken = nil
+            return lastAnswerToken
+        }
+    }
+
+    /// Clears only what belongs to this answer: a late return must not wipe the state of the one that replaced it.
+    func finishAnswer(token: Int) {
+        withState {
+            if inFlightAnswerToken == token { inFlightAnswerToken = nil }
+            if stopRequestedAnswerToken == token { stopRequestedAnswerToken = nil }
+        }
+    }
 
     private func recordThreadID(_ newThreadID: String?, generation: Int) {
         withState {
@@ -391,8 +432,11 @@ final class CodexLiveTurn: @unchecked Sendable {
     private var firstTextAt: Date?
     private var messages: [String] = []
     private var recordedThreadID: String?
+    private let joinsEveryMessage: Bool
 
-    init(onTextSoFar: @escaping @Sendable (String) -> Void) {
+    /// `joinsEveryMessage` is true for a turn with a brain note; otherwise the text so far is the last message.
+    init(joinsEveryMessage: Bool, onTextSoFar: @escaping @Sendable (String) -> Void) {
+        self.joinsEveryMessage = joinsEveryMessage
         self.onTextSoFar = onTextSoFar
     }
 
@@ -410,7 +454,7 @@ final class CodexLiveTurn: @unchecked Sendable {
         lock.lock()
         messages.append(messageText)
         if firstTextAt == nil { firstTextAt = Date() }
-        let textSoFar = CodexOutputParsing.joinedAgentMessages(messages)
+        let textSoFar = joinsEveryMessage ? CodexOutputParsing.joinedAgentMessages(messages) : messageText
         lock.unlock()
         onTextSoFar(textSoFar)
     }

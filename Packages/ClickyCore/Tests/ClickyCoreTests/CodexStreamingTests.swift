@@ -132,7 +132,7 @@ struct CodexStreamingTests {
         try await provider.startConversation(instructions: "", model: "gpt-a", recap: nil)
         let log = ProgressLog()
 
-        let answer = try await provider.answer(turn(), request: AnswerRequest(model: "gpt-a"), progress: { log.add($0) })
+        let answer = try await provider.answer(turn(brainNote: "From notes/a.md: x"), request: AnswerRequest(model: "gpt-a"), progress: { log.add($0) })
 
         #expect(log.texts == ["First finding.", "First finding.\n\nSecond finding. [POINT:40,12:file menu]"])
         #expect(answer.text == "First finding.\n\nSecond finding. [POINT:40,12:file menu]")
@@ -147,7 +147,7 @@ struct CodexStreamingTests {
         standIn.setMode("twomessages")
         let provider = standIn.makeProvider()
         try await provider.startConversation(instructions: "", model: "gpt-a", recap: nil)
-        let answer = try await provider.ask(turn(), model: "gpt-a")
+        let answer = try await provider.ask(turn(brainNote: "From notes/a.md: x"), model: "gpt-a")
         #expect(answer.text == "First finding.\n\nSecond finding. [POINT:40,12:file menu]")
     }
 

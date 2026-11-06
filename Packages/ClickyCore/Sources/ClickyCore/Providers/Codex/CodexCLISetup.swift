@@ -58,6 +58,7 @@ struct CodexCLISetup: Sendable {
         )
         // Stop ended the check. That says nothing about the login, so it must not read as signed in.
         if result.wasCancelled { return .cancelled }
+        if result.wasEndedOnRequest { return .endedOnRequest }
         if result.couldNotStart || result.didTimeOut { return .unknown }
         let combinedText = result.outputLines.joined(separator: "\n") + "\n" + result.standardErrorText
         return CodexOutputParsing.parseLoginState(from: combinedText)

@@ -50,6 +50,10 @@ public struct ProviderAnswer: Sendable, Equatable {
     public var toolResultCharacterCount: Int
     /// True when a new question, Stop or the repeat guard ended the answer early; `text` is what had arrived
     public var wasCutShort: Bool
+    /// For a question that asked for a stronger effort: whether the provider really put the answer on it.
+    /// False when the CLI refused the change (the answer ran on the old effort); nil when the provider does not
+    /// report it (the effort rides on the command itself) or no effort was asked for.
+    public var effortWasApplied: Bool?
 
     public init(
         text: String,
@@ -59,7 +63,8 @@ public struct ProviderAnswer: Sendable, Equatable {
         toolCalls: [BrainToolCall] = [],
         notesRead: [String] = [],
         toolResultCharacterCount: Int = 0,
-        wasCutShort: Bool = false
+        wasCutShort: Bool = false,
+        effortWasApplied: Bool? = nil
     ) {
         self.text = text
         self.model = model
@@ -69,6 +74,7 @@ public struct ProviderAnswer: Sendable, Equatable {
         self.notesRead = notesRead
         self.toolResultCharacterCount = toolResultCharacterCount
         self.wasCutShort = wasCutShort
+        self.effortWasApplied = effortWasApplied
     }
 }
 

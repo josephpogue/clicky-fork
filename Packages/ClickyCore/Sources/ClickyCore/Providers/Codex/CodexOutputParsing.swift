@@ -5,9 +5,14 @@ struct CodexTurnOutput: Equatable {
     var threadID: String?
     /// The text of every `agent_message` item, oldest first.
     var agentMessages: [String] = []
-    /// Every agent message joined with a blank line between, so a searched answer that spoke before and after
-    /// its findings reads as one answer. Nil when the run produced no agent message.
-    var answerText: String? { agentMessages.isEmpty ? nil : CodexOutputParsing.joinedAgentMessages(agentMessages) }
+    /// True when the turn carried a brain note: the model may then speak before and after its findings, so every
+    /// agent message is the answer. Without one the answer is the last agent message, as it always was.
+    var joinsEveryAgentMessage = false
+    /// Nil when the run produced no agent message.
+    var answerText: String? {
+        guard let lastMessage = agentMessages.last else { return nil }
+        return joinsEveryAgentMessage ? CodexOutputParsing.joinedAgentMessages(agentMessages) : lastMessage
+    }
     /// Every error message the run printed, oldest first (retry notices included).
     var errorMessages: [String] = []
     var turnFailedMessage: String?
@@ -23,6 +28,8 @@ enum CodexLoginState: Equatable {
     case unknown
     /// Stop ended the status check before it answered.
     case cancelled
+    /// A new question ended the status check before it answered. Says nothing about the login.
+    case endedOnRequest
 }
 
 /// Pure helpers for the text the `codex` tool prints and the text the app sends it.

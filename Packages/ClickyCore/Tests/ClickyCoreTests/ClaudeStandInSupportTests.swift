@@ -79,6 +79,12 @@ struct ClaudeStandIn {
         }
     }
 
+    /// Changes how the running stand-in answers `apply_flag_settings` from the next request on.
+    func switchEffortRefusal(on: Bool) throws {
+        try (on ? Mode.refuseEffortChange : Mode.normal).rawValue
+            .write(to: directory.appendingPathComponent("mode"), atomically: true, encoding: .utf8)
+    }
+
     /// Variables that must never reach a child: keys and tokens, a base URL, the keychain folder switch, and
     /// other login folders.
     static let variablesThatMustNotReachTheChild: [String: String] = [
@@ -325,7 +331,7 @@ def handle_control(message):
         emit({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
               "response": {"effective": effective, "sources": [], "applied": {"model": model, "effort": effort or "medium"}}}})
     elif subtype == "apply_flag_settings":
-        if mode == "noeffort":
+        if open(os.path.join(directory, "mode")).read().strip() == "noeffort":
             emit({"type": "control_response", "response": {"subtype": "error",
                   "request_id": request_id, "error": "Unsupported control request subtype: apply_flag_settings"}})
             return

@@ -123,10 +123,13 @@ struct SessionQuestionFlowBrainTests {
         // The question is sent and logged as spoken.
         #expect(harness.claude.askedTurns[1].questionText == "dig deeper on the deposit")
         let kinds = harness.log.kinds
+        // The dig deeper line is written once the provider has answered (it names the effort really applied), so it
+        // follows the question and its passages and comes right before the answer's timing line.
         let askedIndex = try #require(kinds.firstIndex(of: .digDeeperAsked(model: "opus", effort: "high")))
-        #expect(kinds[askedIndex - 1] == .questionStarted)
-        #expect(kinds[askedIndex + 1] == .question(text: "dig deeper on the deposit", shotGroupID: 102, earlierShotGroupIDs: []))
-        #expect(kinds[askedIndex + 2] == .passagesAttached(paths: ["/notes/lease.md"]))
+        #expect(kinds[askedIndex - 3] == .questionStarted)
+        #expect(kinds[askedIndex - 2] == .question(text: "dig deeper on the deposit", shotGroupID: 102, earlierShotGroupIDs: []))
+        #expect(kinds[askedIndex - 1] == .passagesAttached(paths: ["/notes/lease.md"]))
+        #expect(kinds[askedIndex + 1] == .answerTiming(secondsToFirstText: nil, toolCallCount: 0, wasCutShort: false))
         #expect(kinds.filter { if case .digDeeperAsked = $0 { return true } else { return false } }.count == 1)
     }
 

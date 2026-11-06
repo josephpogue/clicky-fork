@@ -385,6 +385,83 @@ struct ClaudeStreamingTests {
         #expect(result.text == ClaudeStandIn.defaultAnswer)
     }
 
+    // MARK: Stop and effort (fix wave)
+
+    @Test func aStopThatLandsWhileANewQuestionWaitsForTheOldAnswerEndsTheNewQuestionUnsent() async throws {
+        let standIn = try ClaudeStandIn(mode: .ignoreInterrupt)
+        let provider = makeProvider(standIn, interruptGraceSeconds: 2)
+        let recorder = ClaudeProgressRecorder()
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+
+        let heldAnswer = Task { try await answer(provider, question(Trigger.held), recorder: recorder) }
+        await recorder.waitForReports(count: 1)
+        let waitingQuestion = Task { try await answer(provider, question("plain"), recorder: ClaudeProgressRecorder()) }
+        // The new question is now inside the engine, waiting for the held answer, which ignores the interrupt.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        await provider.stopCurrentAnswer()
+
+        let second = try await waitingQuestion.value
+        _ = try await heldAnswer.value
+        await provider.endConversation()
+        #expect(second.wasCutShort)
+        #expect(second.text == "")
+        #expect(standIn.userMessages.count == 1)
+    }
+
+    @Test func stopCurrentAnswerReturnsOnlyOnceTheEndedAnswerHasReturned() async throws {
+        let standIn = try ClaudeStandIn()
+        let provider = makeProvider(standIn)
+        let recorder = ClaudeProgressRecorder()
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+        let heldAnswer = Task { try await answer(provider, question(Trigger.held), recorder: recorder) }
+        await recorder.waitForReports(count: 1)
+        await provider.stopCurrentAnswer()
+        #expect(provider.answersInside.numberInside == 0)
+        _ = try await heldAnswer.value
+        await provider.endConversation()
+    }
+
+    @Test func theAnswerSaysWhetherTheEffortWasApplied() async throws {
+        let standIn = try ClaudeStandIn(startingEffortLevel: "medium")
+        let provider = makeProvider(standIn)
+        let recorder = ClaudeProgressRecorder()
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+        let normal = try await answer(provider, question("plain"), recorder: recorder)
+        let deeper = try await answer(provider, question("deeper"), request: AnswerRequest(model: "sonnet", effort: .high), recorder: recorder)
+        await provider.endConversation()
+        #expect(normal.effortWasApplied == nil)
+        #expect(deeper.effortWasApplied == true)
+    }
+
+    @Test func aRefusedEffortChangeIsReportedAsNotApplied() async throws {
+        let standIn = try ClaudeStandIn(mode: .refuseEffortChange)
+        let provider = makeProvider(standIn)
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+        let result = try await answer(provider, question("deeper"), request: AnswerRequest(model: "sonnet", effort: .high), recorder: ClaudeProgressRecorder())
+        await provider.endConversation()
+        #expect(result.effortWasApplied == false)
+    }
+
+    @Test func aRefusedRestoreIsRetriedThenTheProcessIsRestartedBeforeTheNextQuestion() async throws {
+        let standIn = try ClaudeStandIn(startingEffortLevel: "medium")
+        let provider = makeProvider(standIn)
+        let recorder = ClaudeProgressRecorder()
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+        _ = try await answer(provider, question("deeper"), request: AnswerRequest(model: "sonnet", effort: .high), recorder: recorder)
+        try standIn.switchEffortRefusal(on: true)
+
+        let next = try await answer(provider, question("plain again"), recorder: recorder)
+        let after = try await answer(provider, question("and again"), recorder: recorder)
+        await provider.endConversation()
+
+        #expect(next.text == ClaudeStandIn.defaultAnswer)
+        #expect(standIn.starts.count == 2)
+        // One applied change for dig deeper, then the refused restore and its single retry.
+        #expect(standIn.controlSubtypes.filter { $0 == "apply_flag_settings" }.count == 3)
+        #expect(after.text == ClaudeStandIn.defaultAnswer)
+        #expect(standIn.starts.count == 2)
+    }
+
     // MARK: Question content
 
     @Test func theBrainNoteSitsAfterTheContextNoteAndBeforeTheQuestion() async throws {

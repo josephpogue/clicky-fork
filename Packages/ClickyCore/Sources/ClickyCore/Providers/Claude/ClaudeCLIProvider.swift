@@ -5,6 +5,8 @@ import Foundation
 public final class ClaudeCLIProvider: AnswerProvider {
     public let providerID: ProviderID = .claude
     private let engine: ClaudeConversationEngine
+    /// How many `answer` calls have started and not yet returned to their caller.
+    let answersInside = ClaudeAnswersInside()
 
     public init(
         locations: AppDataLocations,
@@ -43,11 +45,16 @@ public final class ClaudeCLIProvider: AnswerProvider {
         request: AnswerRequest,
         progress: @escaping @Sendable (AnswerProgress) async -> Void
     ) async throws -> ProviderAnswer {
-        try await engine.answer(turn, request: request, progress: progress)
+        answersInside.enter()
+        defer { answersInside.leave() }
+        return try await engine.answer(turn, request: request, progress: progress)
     }
 
+    /// Returns only once the answer that was running has returned, so a caller that shows the cut answer never
+    /// sees the stop finish first.
     public func stopCurrentAnswer() async {
         await engine.stopCurrentAnswer()
+        await answersInside.waitUntilNoneInside(seconds: 2)
     }
 
     public func summarize(_ text: String, instructions: String, model: String) async throws -> String {
@@ -56,6 +63,24 @@ public final class ClaudeCLIProvider: AnswerProvider {
 
     public func endConversation() async {
         await engine.endConversation()
+    }
+}
+
+/// Counts the `answer` calls that have not returned yet, so `stopCurrentAnswer` can wait for the last line of the
+/// answer it ended and not only for the engine to finish reading.
+final class ClaudeAnswersInside: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func enter() { lock.lock(); count += 1; lock.unlock() }
+    func leave() { lock.lock(); count -= 1; lock.unlock() }
+    var numberInside: Int { lock.lock(); defer { lock.unlock() }; return count }
+
+    func waitUntilNoneInside(seconds: Double) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while numberInside > 0 && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 }
 
@@ -96,6 +121,9 @@ actor ClaudeConversationEngine {
     /// and refuses to go on once it has moved, because the actor is re-entered whenever a question waits.
     private var conversationGeneration = 0
     private var runningAnswer: ClaudeRunningAnswer?
+    /// Moves on every `stopCurrentAnswer`. A question that waited for the earlier answer to end checks it, because
+    /// a stop that came during the wait cancels this question too.
+    private var stopRequestCount = 0
 
     private static let modelChangeTimeoutSeconds = 10.0
     /// How long an interrupted answer has to print its `result` before its process is stopped.
@@ -147,9 +175,14 @@ actor ClaudeConversationEngine {
         }
 
         let generation = conversationGeneration
+        let stopRequestsAtEntry = stopRequestCount
         // Two answers must never share the process: the earlier one ends first.
-        if runningAnswer != nil { await stopCurrentAnswer() }
+        if runningAnswer != nil { await endRunningAnswer() }
         try refuseWhenConversationMoved(since: generation)
+        if stopRequestCount != stopRequestsAtEntry {
+            // Stop (or a newer question's stop) came while this question waited: it ends before it is sent.
+            return ProviderAnswer(text: "", model: request.model, secondsToAnswer: 0, wasCutShort: true)
+        }
         let running = ClaudeRunningAnswer()
         runningAnswer = running
         defer {
@@ -157,11 +190,24 @@ actor ClaudeConversationEngine {
             if runningAnswer === running { runningAnswer = nil }
         }
 
-        let process = try await processReady(forModel: request.model, generation: generation)
+        var process = try await processReady(forModel: request.model, generation: generation)
         running.process = process
         try refuseWhenConversationMoved(since: generation)
-        await settleEffort(of: process, to: request.effort)
+        var effortWasSettled = await settleEffort(of: process, to: request.effort)
         try refuseWhenConversationMoved(since: generation)
+        if !effortWasSettled && request.effort == nil && !running.endedEarly {
+            // Putting the process back to its normal effort failed. Try once more; if it still fails the process
+            // would keep answering on the stronger effort, so a fresh one (default effort) takes this question.
+            effortWasSettled = await settleEffort(of: process, to: request.effort)
+            try refuseWhenConversationMoved(since: generation)
+            if !effortWasSettled && !running.endedEarly {
+                await stopActiveProcess(gracePeriodSeconds: 0.2)
+                try refuseWhenConversationMoved(since: generation)
+                process = try restartSeededWithEarlierTurns(model: request.model, generation: generation)
+                running.process = process
+                effortWasSettled = true
+            }
+        }
         if running.endedEarly {
             // A newer question came before this one was even sent.
             return ProviderAnswer(text: "", model: request.model, secondsToAnswer: 0, wasCutShort: true)
@@ -209,13 +255,21 @@ actor ClaudeConversationEngine {
             toolCalls: finished.toolCalls,
             notesRead: finished.notesRead,
             toolResultCharacterCount: finished.toolResultCharacterCount,
-            wasCutShort: finished.wasCutShort
+            wasCutShort: finished.wasCutShort,
+            effortWasApplied: request.effort == nil ? nil : effortWasSettled
         )
     }
 
     /// Ends the answer under way: the tool is asked to interrupt, the pending `answer` call returns the text that
     /// had arrived, and the process stays open for the next question. Returns once that answer is over.
     func stopCurrentAnswer() async {
+        stopRequestCount += 1
+        await endRunningAnswer()
+    }
+
+    /// The part of a stop that ends the running answer. A question waiting for the earlier answer uses it too,
+    /// without counting as a stop.
+    private func endRunningAnswer() async {
         guard let running = runningAnswer, !running.isFinished else { return }
         running.endedEarly = true
         if running.userLineSent, let process = running.process {
@@ -358,8 +412,8 @@ actor ClaudeConversationEngine {
     /// Puts the process on the effort this question wants: a stronger one for dig deeper, and back to what the
     /// process started with for the next normal question. A refusal never fails the question; it is answered on
     /// the model alone, and the next question tries again.
-    private func settleEffort(of process: ClaudeConversationProcess, to wantedEffort: AnswerEffort?) async {
-        guard wantedEffort != process.appliedEffort else { return }
+    private func settleEffort(of process: ClaudeConversationProcess, to wantedEffort: AnswerEffort?) async -> Bool {
+        guard wantedEffort != process.appliedEffort else { return true }
         if !process.hasCapturedStartingEffort {
             // The effort the process started with, read before the first change so it can be put back.
             let settings = await sendControlRequest(to: process, idPrefix: "clicky-settings", request: ["subtype": "get_settings"])
@@ -374,6 +428,7 @@ actor ClaudeConversationEngine {
             request: ["subtype": "apply_flag_settings", "settings": ["effortLevel": effortLevel]]
         )
         if applied != nil { process.appliedEffort = wantedEffort }
+        return applied != nil
     }
 
     /// Sends one control request and waits for its answer. Returns the answer's payload (empty when it has none),
