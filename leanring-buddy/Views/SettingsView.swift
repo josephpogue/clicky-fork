@@ -3,8 +3,9 @@
 //  leanring-buddy
 //
 //  Settings: which plan answers, each provider's sign-in, model and measured
-//  answer time, the notes folder, the summary switch, and a short note on the
-//  three macOS permissions. Choices are shown as visible pills, not drop-downs,
+//  answer time, the dig-deeper model and effort, the folders Clicky can search,
+//  the notes folder, the summary switch, and a short note on the three macOS
+//  permissions. Choices are shown as visible pills, not drop-downs,
 //  because each set is small.
 //
 
@@ -31,6 +32,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 28) {
                 AnswerDeliverySettingsSection(state: answerDeliveryState)
                 providerSection
+                DigDeeperSettingsSection(state: state)
+                SearchFoldersSettingsSection(state: state)
                 notesSection
                 permissionsSection
             }

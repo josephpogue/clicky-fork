@@ -6,28 +6,39 @@
 //  the cursor is tight (5 pt), the others 14 pt. A long answer is cut at a fixed height with its bottom
 //  fading out, and a footer says the rest is in Open chat. Nothing in it scrolls or takes a click.
 //
+//  While an answer is still coming the bubble grows with it. Past the cap it shows the newest lines instead,
+//  with the top fading in so it reads as continued, and the footer says the start is in Open chat. A
+//  "Checking your notes" line can sit at the end, or show alone in a small bubble before any text comes.
+//
 
 import AppKit
 import ClickyCore
 import SwiftUI
 
 /// Everything the bubble needs, measured once so the panel and the view agree on the size.
+///
+/// For an answer still coming, build a new content on each text report with `showsNewestLines: true`, so a
+/// text past the cap shows its last lines. `showsCheckingLine` adds "Checking your notes" at the end; with an
+/// empty `text` it is the whole bubble. A finished answer uses today's `init(text:isNotice:)`.
 struct AnswerBubbleContent: Equatable {
     let fullText: String
     let paragraphs: [String]
     let isNotice: Bool
+    let showsCheckingLine: Bool
     let layout: CursorBubbleLayout.TextLayout
 
     @MainActor
-    init(text: String, isNotice: Bool) {
+    init(text: String, isNotice: Bool, showsNewestLines: Bool = false, showsCheckingLine: Bool = false) {
         fullText = text
         paragraphs = AnswerBubbleMetrics.paragraphs(of: text)
         self.isNotice = isNotice
-        layout = AnswerBubbleMetrics.textLayout(forParagraphs: paragraphs)
+        self.showsCheckingLine = showsCheckingLine
+        layout = AnswerBubbleMetrics.textLayout(
+            forParagraphs: paragraphs, showsNewestLines: showsNewestLines, showsCheckingLine: showsCheckingLine)
     }
 
     var size: CGSize {
-        CGSize(width: layout.width, height: AnswerBubbleView.totalHeight(forBodyHeight: layout.bodyHeight, showsFooter: layout.isBodyCut))
+        CGSize(width: layout.width, height: AnswerBubbleView.totalHeight(forContentHeight: layout.contentHeight, showsFooter: layout.isBodyCut))
     }
 }
 
@@ -84,7 +95,11 @@ enum AnswerBubbleMetrics {
     }
 
     @MainActor
-    static func textLayout(forParagraphs paragraphs: [String]) -> CursorBubbleLayout.TextLayout {
+    static func textLayout(
+        forParagraphs paragraphs: [String],
+        showsNewestLines: Bool = false,
+        showsCheckingLine: Bool = false
+    ) -> CursorBubbleLayout.TextLayout {
         let shortTextWidth = CursorBubbleLayout.shortWidth - 2 * horizontalPadding
         let longTextWidth = CursorBubbleLayout.longWidth - 2 * horizontalPadding
         let shortLineCounts = paragraphs.map { lineCount(of: $0, textWidth: shortTextWidth) }
@@ -92,7 +107,9 @@ enum AnswerBubbleMetrics {
         return CursorBubbleLayout.textLayout(
             lineCountAtShortWidth: shortLineCounts.reduce(0, +),
             naturalBodyHeightAtShortWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: shortTextWidth),
-            naturalBodyHeightAtLongWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth))
+            naturalBodyHeightAtLongWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth),
+            showsNewestLines: showsNewestLines,
+            showsCheckingLine: showsCheckingLine)
     }
 }
 
@@ -126,13 +143,26 @@ struct AnswerBubbleView: View {
     /// 6 pt above the hairline, 1 pt hairline, 8 pt below it.
     private static let footerExtra: CGFloat = 6 + 1 + 8
 
-    static func totalHeight(forBodyHeight bodyHeight: CGFloat, showsFooter: Bool) -> CGFloat {
-        topPadding + bodyHeight + bottomPadding + (showsFooter ? footerExtra + footerHeight : 0)
+    /// `contentHeight` is the body plus the checking line (`TextLayout.contentHeight`).
+    static func totalHeight(forContentHeight contentHeight: CGFloat, showsFooter: Bool) -> CGFloat {
+        topPadding + contentHeight + bottomPadding + (showsFooter ? footerExtra + footerHeight : 0)
     }
+
+    /// Preview renderer only: freezes the checking line's passing light (see `CheckingNotesLine`).
+    var fixedCheckingSweepPhase: Double? = nil
+
+    private var isCutAtTop: Bool { content.layout.cutEdge == .top }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            bodyText
+            if !content.paragraphs.isEmpty {
+                bodyText
+            }
+            if content.showsCheckingLine {
+                CheckingNotesLine(placement: .cursorBubble, fixedSweepPhase: fixedCheckingSweepPhase)
+                    .frame(height: CursorBubbleLayout.checkingLineHeight, alignment: .leading)
+                    .padding(.top, content.paragraphs.isEmpty ? 0 : CursorBubbleLayout.checkingLineGap)
+            }
             if content.layout.isBodyCut {
                 footer
             }
@@ -168,7 +198,9 @@ struct AnswerBubbleView: View {
         .frame(
             width: content.layout.width - 2 * AnswerBubbleMetrics.horizontalPadding,
             height: content.layout.isBodyCut ? bodyHeight : nil,
-            alignment: .topLeading)
+            // Cut at the top, the text's bottom sits on the frame's bottom, so the newest line is always the
+            // last one showing, even when SwiftUI wraps a line differently from the measurement.
+            alignment: isCutAtTop ? .bottomLeading : .topLeading)
         // Only a cut body is held to a height; an uncut one sizes itself, so a line SwiftUI wraps differently
         // from the measurement is never clipped.
         .clipped()
@@ -180,8 +212,26 @@ struct AnswerBubbleView: View {
         .accessibilityIdentifier(content.isNotice ? "cursor.notice" : "cursor.answer")
     }
 
-    /// Opaque except the bottom 22 pt of a cut body, which fades to 25%.
+    /// Opaque except the cut end: the bottom 22 pt of a finished answer fade to 25%, and the top 30 pt of a
+    /// growing answer fade in from almost nothing, so its first visible line reads as the middle of something
+    /// even when the cut falls exactly between two lines.
+    @ViewBuilder
     private func fadeMask(bodyHeight: CGFloat) -> some View {
+        let fadeLength = min(30 / max(bodyHeight, 1), 1)
+        if isCutAtTop {
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.08), location: 0),
+                    .init(color: .black, location: fadeLength),
+                    .init(color: .black, location: 1),
+                ],
+                startPoint: .top, endPoint: .bottom)
+        } else {
+            bottomFadeMask(bodyHeight: bodyHeight)
+        }
+    }
+
+    private func bottomFadeMask(bodyHeight: CGFloat) -> some View {
         let fadeStart = content.layout.isBodyCut ? max(0, (bodyHeight - 22) / bodyHeight) : 1
         return LinearGradient(
             stops: [
@@ -201,7 +251,7 @@ struct AnswerBubbleView: View {
             HStack(spacing: 6) {
                 Image(systemName: "bubble.left.fill")
                     .font(.system(size: 11))
-                Text("The rest is in Open chat, in the menu bar")
+                Text(footerText)
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
             }
@@ -209,8 +259,13 @@ struct AnswerBubbleView: View {
             .frame(height: Self.footerHeight)
             .padding(.top, 8)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("The rest is in Open chat, in the menu bar")
+            .accessibilityLabel(footerText)
             .accessibilityIdentifier("cursor.answer.more")
         }
+    }
+
+    /// A finished answer hides its end; a growing one past the cap hides its start.
+    private var footerText: String {
+        isCutAtTop ? "The start is in Open chat, in the menu bar" : "The rest is in Open chat, in the menu bar"
     }
 }

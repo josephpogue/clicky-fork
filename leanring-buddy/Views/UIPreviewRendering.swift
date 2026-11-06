@@ -91,6 +91,7 @@ enum UIPreviewRendering {
         try renderCursorAnswerPreviews(into: directory)
         try renderAnswerDeliverySettingsPreviews(into: directory)
         try renderMenuPanelPreviews(into: directory)
+        try renderBrainSearchPreviews(into: directory)
     }
 
     /// Draws `view` at `size` (or at its own fitting size when nil) at 2x and writes a PNG.
