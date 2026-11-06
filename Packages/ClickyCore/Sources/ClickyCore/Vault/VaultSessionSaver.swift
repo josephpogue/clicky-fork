@@ -71,14 +71,37 @@ public enum VaultSessionSaver {
             }
         }
 
+        // Every target is checked with its links resolved: nothing may land outside the notes folder.
+        let resolvedRootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        for target in [sessionsFolder, notePath, shotsFolder] + (pagePath.map { [$0] } ?? []) {
+            if !isInside(target, resolvedRootPath: resolvedRootPath) {
+                return .failure(.writeFailed("\(target.path) is outside the notes folder"))
+            }
+        }
+        if let pagePath, isSymbolicLink(pagePath) {
+            return .failure(.writeFailed("\(pagePath.path) is a link, so Save will not replace it"))
+        }
+
+        // What this Save has written so far, so a failure can take it all back.
+        var wroteNote = false
+        var wroteShotsFolder = false
+        var wrotePage = false
         var pathsToCommit: [URL] = []
         do {
             try fileManager.createDirectory(at: sessionsFolder, withIntermediateDirectories: true)
             let document = frontMatter(input: input) + renderLog(stem)
             try document.write(to: notePath, atomically: true, encoding: .utf8)
+            wroteNote = true
             pathsToCommit.append(notePath)
+            if let pagePath, let pageText,
+               let updated = pageWithSessionLink(pageText, date: input.date, title: input.title, stem: stem) {
+                try updated.write(to: pagePath, atomically: true, encoding: .utf8)
+                wrotePage = true
+                pathsToCommit.append(pagePath)
+            }
             if !input.questionShotFiles.isEmpty {
                 try fileManager.createDirectory(at: shotsFolder, withIntermediateDirectories: true)
+                wroteShotsFolder = true
                 for shot in input.questionShotFiles {
                     let destination = shotsFolder.appendingPathComponent(shot.lastPathComponent)
                     if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
@@ -86,12 +109,13 @@ public enum VaultSessionSaver {
                 }
                 pathsToCommit.append(shotsFolder)
             }
-            if let pagePath, let pageText,
-               let updated = pageWithSessionLink(pageText, date: input.date, title: input.title, stem: stem) {
-                try updated.write(to: pagePath, atomically: true, encoding: .utf8)
-                pathsToCommit.append(pagePath)
-            }
         } catch {
+            if wrotePage, let pagePath, let pageText { try? pageText.write(to: pagePath, atomically: true, encoding: .utf8) }
+            if wroteShotsFolder {
+                // The stem was free, so the folder above `shots` is this Save's own.
+                try? fileManager.removeItem(at: shotsFolder.deletingLastPathComponent())
+            }
+            if wroteNote { try? fileManager.removeItem(at: notePath) }
             return .failure(.writeFailed(error.localizedDescription))
         }
 
@@ -108,13 +132,41 @@ public enum VaultSessionSaver {
     static func freeStem(in folder: URL, date: String, slug: String) -> String {
         let base = "\(date)-\(slug)"
         func taken(_ stem: String) -> Bool {
-            FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(stem).md").path)
-                || FileManager.default.fileExists(atPath: folder.appendingPathComponent(stem).path)
+            // A link counts as taken even when it points nowhere: Save never replaces a user's link.
+            exists(folder.appendingPathComponent("\(stem).md")) || exists(folder.appendingPathComponent(stem))
         }
         if !taken(base) { return base }
         var number = 2
         while taken("\(base)-\(number)") { number += 1 }
         return "\(base)-\(number)"
+    }
+
+    private static func exists(_ url: URL) -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
+    }
+
+    private static func isSymbolicLink(_ url: URL) -> Bool {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return attributes?[.type] as? FileAttributeType == .typeSymbolicLink
+    }
+
+    /// The path with every link in its existing part resolved; the parts that do not exist yet are appended as written.
+    private static func resolvedPath(of url: URL) -> String {
+        var existing = url.standardizedFileURL
+        var missingParts: [String] = []
+        while !exists(existing), existing.path != "/" {
+            missingParts.insert(existing.lastPathComponent, at: 0)
+            existing = existing.deletingLastPathComponent()
+        }
+        var resolved = existing.resolvingSymlinksInPath().standardizedFileURL
+        for part in missingParts { resolved.appendPathComponent(part) }
+        return resolved.path
+    }
+
+    /// True when `url`, with every link in its existing part resolved, sits under the resolved notes folder.
+    private static func isInside(_ url: URL, resolvedRootPath: String) -> Bool {
+        let resolved = resolvedPath(of: url)
+        return resolved == resolvedRootPath || resolved.hasPrefix(resolvedRootPath + "/")
     }
 
     static func frontMatter(input: VaultSaveInput) -> String {
@@ -171,12 +223,24 @@ public enum VaultSessionSaver {
             let full = url.standardizedFileURL.resolvingSymlinksInPath().path
             return full.hasPrefix(rootPath) ? String(full.dropFirst(rootPath.count)) : full
         }
+        // Commit only in a repo whose top is the notes folder itself, never in one that merely encloses it.
+        let top = runGitOutput(["rev-parse", "--show-toplevel"], in: root)
+        if let reason = top.failure { return reason }
+        let resolvedTop = URL(fileURLWithPath: top.text).resolvingSymlinksInPath().standardizedFileURL.path
+        guard resolvedTop == String(rootPath.dropLast()) else {
+            return "the notes folder is inside another git repo (\(resolvedTop)), so nothing was committed"
+        }
         if let failure = runGit(["add", "--"] + relative, in: root) { return failure }
         return runGit(["commit", "-m", message, "--"] + relative, in: root)
     }
 
     /// Runs git in `folder`; nil on success, else a plain reason.
     private static func runGit(_ arguments: [String], in folder: URL) -> String? {
+        runGitOutput(arguments, in: folder).failure
+    }
+
+    /// Runs git in `folder` and returns what it printed, or a plain reason it failed.
+    private static func runGitOutput(_ arguments: [String], in folder: URL) -> (text: String, failure: String?) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git", "-C", folder.path] + arguments
@@ -184,12 +248,12 @@ public enum VaultSessionSaver {
         process.standardOutput = output
         process.standardError = output
         do { try process.run() } catch {
-            return "could not run git \(arguments.first ?? ""): \(error.localizedDescription)"
+            return ("", "could not run git \(arguments.first ?? ""): \(error.localizedDescription)")
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus != 0 else { return nil }
         let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return "git \(arguments.first ?? "") failed: \(text)"
+        guard process.terminationStatus == 0 else { return (text, "git \(arguments.first ?? "") failed: \(text)") }
+        return (text, nil)
     }
 }

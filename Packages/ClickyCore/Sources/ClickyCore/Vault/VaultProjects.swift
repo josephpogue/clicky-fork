@@ -23,6 +23,9 @@ public enum VaultProjects {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return [] }
         return names
             .filter { name in
+                // A linked page is never listed: Save would write through the link, or replace it.
+                let attributes = try? FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(name).path)
+                if attributes?[.type] as? FileAttributeType == .typeSymbolicLink { return false }
                 var isDirectory: ObjCBool = false
                 let exists = FileManager.default.fileExists(
                     atPath: folder.appendingPathComponent(name).path, isDirectory: &isDirectory)

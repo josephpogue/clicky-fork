@@ -61,7 +61,7 @@ struct SessionLogRendererTests {
 
         **Summary:** Worked on the invoice in Safari and asked where to pay.
 
-        Started 14:02:10. Ended 14:47:31. 2 questions. Models: Claude sonnet.
+        Started 14:02:10. Ended 14:47:31. 1 question. Models: Claude sonnet.
 
         ## Timeline
 
@@ -103,6 +103,30 @@ struct SessionLogRendererTests {
         #expect(!rendered.contains("Summary"))
         #expect(!rendered.contains("Ended"))
         #expect(!rendered.contains("Models"))
+    }
+
+    @Test func questionCountCountsHeardQuestionsNotFirstTaps() {
+        // Three taps started a question; only two were heard and turned into .question events.
+        let events = [
+            event("14:02:10", .sessionStarted),
+            event("14:03:00", .questionStarted),
+            event("14:03:01", .question(text: "first", shotGroupID: 4, earlierShotGroupIDs: [])),
+            event("14:04:00", .questionStarted), // cancelled
+            event("14:05:00", .questionStarted),
+            event("14:05:01", .question(text: "second", shotGroupID: 5, earlierShotGroupIDs: [])),
+        ]
+        let rendered = SessionLogRenderer.render(
+            metadata: sampleMetadata(), events: events, shotGroups: [],
+            timeZone: Support.newYork, shotLink: defaultLink
+        )
+        #expect(rendered.contains("Started 14:02:10. Ended 14:47:31. 2 questions."))
+
+        let cancelledOnly = SessionLogRenderer.render(
+            metadata: sampleMetadata(),
+            events: [event("14:02:10", .sessionStarted), event("14:03:00", .questionStarted)],
+            shotGroups: [], timeZone: Support.newYork, shotLink: defaultLink
+        )
+        #expect(cancelledOnly.contains("Ended 14:47:31. 0 questions."))
     }
 
     @Test func screenChangeLinesShowTheirImagesAndDropWhenCleanupDeletedThem() {

@@ -121,7 +121,7 @@ public enum SessionLogRenderer {
             sentences.append("Ended \(clockFormatter.string(from: endedAt)).")
         }
 
-        let questionCount = events.filter { if case .questionStarted = $0.kind { return true } else { return false } }.count
+        let questionCount = events.filter { if case .question = $0.kind { return true } else { return false } }.count
         sentences.append("\(questionCount) \(questionCount == 1 ? "question" : "questions").")
 
         var modelNamesInFirstUseOrder: [String] = []

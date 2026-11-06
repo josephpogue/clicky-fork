@@ -151,8 +151,24 @@ public actor SessionStore {
     /// Finishes every session folder a crash or force quit left without `endedAt`, except the one
     /// running now: runs the same cleanup and `log.md` as Stop, with no summary. Returns the ids it finished.
     public func finishAbandonedSessions(exceptSessionID: String?) throws -> [String] {
-        // Filled in by the session log fix.
-        return []
+        guard fileManager.fileExists(atPath: locations.sessionsDirectory.path) else { return [] }
+        let folders = try fileManager.contentsOfDirectory(at: locations.sessionsDirectory, includingPropertiesForKeys: nil)
+        var finishedIDs: [String] = []
+        for folder in folders.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let folderID = folder.lastPathComponent
+            guard folderID != exceptSessionID,
+                  let metadata = try? readMetadata(in: folder), metadata.endedAt == nil
+            else { continue }
+            // Read everything first: a corrupt log line skips this folder before anything is written to it.
+            guard let events = try? readLines(SessionEvent.self, from: folder.appendingPathComponent("events.jsonl"), sessionID: folderID),
+                  (try? readLines(ShotGroup.self, from: folder.appendingPathComponent("shots.jsonl"), sessionID: folderID)) != nil
+            else { continue }
+            let lastEventTime = events.map(\.time).max() ?? metadata.startedAt
+            if (try? finishSession(sessionID: folderID, at: lastEventTime, summary: nil)) != nil {
+                finishedIDs.append(folderID)
+            }
+        }
+        return finishedIDs
     }
 
     public func listSessions() throws -> [SessionMetadata] {
