@@ -1,10 +1,12 @@
 #!/bin/bash
-# Fixtures in the image: executable stand-ins and driver, the fixture vault (plus a reset script), empty data and log folders.
+# Fixtures in the image: executable stand-ins and driver, the fixture vault and fixture brain (plus reset scripts), empty data and log folders.
 set -euo pipefail
 chmod +x /Users/admin/standin/claude /Users/admin/standin/codex /Users/admin/testenv-driver/clicky-driver \
-  /Users/admin/launch-app.sh /Users/admin/reset-walk.sh /Users/admin/fixture-vault/*.sh
+  /Users/admin/launch-app.sh /Users/admin/reset-walk.sh /Users/admin/fixture-vault/*.sh /Users/admin/fixture-brain/*.sh
 mv /Users/admin/fixture-vault/reset-vault.sh /Users/admin/reset-vault.sh
 bash /Users/admin/reset-vault.sh
+mv /Users/admin/fixture-brain/reset-brain.sh /Users/admin/reset-brain.sh
+bash /Users/admin/reset-brain.sh
 mkdir -p /Users/admin/clicky-data /Users/admin/standin-log
 # Self-checks: each stand-in answers, and the driver starts (exit 64 is its usage exit) under the testenv exec PATH.
 exec_path="/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin"
@@ -13,3 +15,6 @@ env -i PATH="$exec_path" HOME="$HOME" STANDIN_LOG_DIR=/tmp/standin-selfcheck /Us
 rm -rf /tmp/standin-selfcheck
 rc=0; /Users/admin/testenv-driver/clicky-driver bogus >/dev/null 2>&1 || rc=$?
 [ "$rc" = 64 ] || { echo "fixtures.sh: driver did not exit 64 on bad usage (got $rc)" >&2; exit 1; }
+# The fixture brain: the secret file, the symlink out and the outside file it points at must all be in place.
+[ -f /Users/admin/brain-fixture/projects/demo-app/.env ] && [ -L /Users/admin/brain-fixture/projects/demo-app/link-out.md ] \
+  && [ -f /Users/admin/outside-secret.md ] || { echo "fixtures.sh: fixture brain is incomplete" >&2; exit 1; }

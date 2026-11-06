@@ -69,6 +69,15 @@ The fake microphone is BlackHole 16ch (the default input). Clips live in `/Users
 | `what-was-the-error-before.wav` | what was the error before |
 | `talking-to-myself.wav` | this is just me talking to myself (not a question) |
 | `limit.wav` | how close am I to the usage limit |
+| `what-port-does-the-demo-server-use.wav` | what port does the demo server use |
+| `how-do-i-deploy-this.wav` | how do I deploy this |
+| `what-is-in-the-env-file.wav` | what is in the env file |
+| `is-this-the-right-build-correction.wav` | is this the right build, correction |
+| `tell-me-something-long.wav` | tell me something long |
+| `say-something-slow.wav` | say something slow |
+| `dig-deeper-on-the-deploy.wav` | dig deeper on the deploy |
+
+The last seven are for the brain search walk (section 6b).
 
 Play one between the two taps: `testenv play <id> mic /Users/admin/clips/where-is-the-save-button.wav`
 
@@ -86,6 +95,10 @@ Read the sidecar for the words: `testenv exec <id> -- cat /Users/admin/clips/lim
 | `save` | `Click the Save button at the top right. [POINT:1180,40:save button:screen1]` |
 | `explain` | a four sentence answer about the menu bar |
 | `error` | an answer about a red banner saying a file could not be found |
+| `port`, `deploy`, `secret`, `env`, `correction` | the brain rows, section 6b (Claude only, and only when the brain is on; with it off they get the default answer) |
+| `long` | Claude: a 20 sentence answer streamed over about 6 s |
+| `slow` | Claude: one word every half second for 30 s; Codex: a 30 s wait before one short answer |
+| starts with `dig deeper` (checked before every row) | `Digging deeper on <model>, effort <effort>.` with the model and effort of that call |
 | anything else | `I can see your screen. [POINT:none]` |
 
 Signing in and out only flips a flag file in the stand-in's config folder (inside `/Users/admin/clicky-data`); no browser opens. Both start signed in.
@@ -99,6 +112,35 @@ The summary call (plain `claude -p`, no `--input-format`, prompt on stdin, plain
 
 A line with a `stdin` field is a question sent; a line with only `argv` is a process start or a status/sign-in call.
 
+## 6b. Brain search walk
+
+With search folders set, the app gives Claude a helper that searches a notes folder, and the Claude stand-in uses it the way the real CLI would: text arrives a few words at a time, then a tool call, then more text. ChatGPT (Codex) gets no tools; the Mac finds the passages and puts them in the prompt.
+
+**The fixture brain** is `/Users/admin/brain-fixture` (invented notes): `Wiki/Projects/demo-server.md` (says the demo server listens on port 4417), `Wiki/Projects/release.md` (deploys go through the release script; test builds use Release), `Wiki/index.md`, and `projects/demo-app/` with `README.md`, a secret `.env` (`SENTINEL_SECRET=never-shown-8812`), a `.git/` folder, and `link-out.md`, a symlink to `/Users/admin/outside-secret.md` (holds `OUTSIDE-SENTINEL-5531`). `launch-app.sh` writes the app setting `settings.brainSearchFolderPaths` to that one folder before it opens the app. Check: `testenv exec <id> -- defaults read com.clickyfork.app settings.brainSearchFolderPaths`.
+
+**Brain off** (empty list, Clicky as before): `testenv exec <id> -- bash /Users/admin/launch-app.sh brain-off`. Quit the app first (`reset-walk.sh` does).
+
+Steps (start a session, then for each: tap right Command, play the clip, tap right Command, `D read`, `testenv shot`). Use Claude first, then ChatGPT from Settings for step 7. Look for the text with `D read` (`cursor.answer`, `cursor.notice`) and in the chat window (`chat.latestAnswer`; Open chat).
+
+1. `what-port-does-the-demo-server-use`: within about a second the cursor bubble shows `Let me check your notes for the demo port.` (the first part). Then a finding replaces or follows it: `Your notes say the demo server listens on port 4417.` The chat shows the answer and a Notes read list that names `demo-server.md`. The 4417 comes from the helper, so seeing it proves the search ran on the fixture brain.
+2. `how-do-i-deploy-this`: the stand-in says nothing for 3 s, so the bubble shows the app's own `Checking your notes` during that wait (shoot at about 1 s), then `Deploys go through the release script in your notes.` Notes read lists `release.md`.
+3. `what-is-in-the-env-file`: the answer is `I can't open that file: That file is never readable: it may hold secrets.` The secret value never shows anywhere. Notes read does not list the `.env` as read.
+4. `is-this-the-right-build-correction`: first `From the screen this looks like the Debug build.`, then the later finding `Correction: your notes say test builds use Release.` Both parts are visible in the chat answer, the correction last.
+5. `tell-me-something-long`: the bubble keeps showing the newest lines as the sentences stream in (over about 6 s) and ends with the cut footer pointing to Open chat; `cursor.answer` holds the whole text.
+6. `say-something-slow` and then, after about 3 s, a second question (`where-is-the-save-button`): the slow answer stops at the next question (it would otherwise run 30 s) and the second answer arrives at once. In `claude.jsonl` the second question is preceded by a `control_request` with subtype `interrupt`.
+7. Dig deeper: play `dig-deeper-on-the-deploy` (only the spoken words matter). The answer reads `Digging deeper on <the stronger model>, effort high.` Ask `where-is-the-save-button` next: it is answered on the normal model again (check `claude.jsonl` for `set_model` and `apply_flag_settings` going out and coming back). With ChatGPT selected the answer reads `Digging deeper on <model>, effort high.` from the call's `-m` and `-c model_reasoning_effort` flags (`codex.jsonl` argv shows them).
+8. ChatGPT with passages: select ChatGPT in Settings and ask the port question. The answer starts `From demo-server.md:` followed by the sentence under its heading, which proves the Mac put the passages in the prompt (`codex.jsonl` `prompt` holds a `Notes from the user's own files` block). `codex.jsonl` argv must show no MCP or tool flags.
+
+**Checks from the logs** (run after the walk; `<id>` typed literally):
+
+- The helper ran: `testenv exec <id> -- grep -c '"mcp"' /Users/admin/standin-log/claude.jsonl` is more than 0; `grep '"mcp_config"' /Users/admin/standin-log/claude.jsonl` shows the `ClickyBrainTools` command and its `--folder`; `grep '"dir": "from_helper"'` shows its replies; the init line has `mcp__brain__search_brain` and `mcp__brain__read_brain_file` as its only tools.
+- Secrets never left the Mac: `testenv exec <id> -- grep -c never-shown-8812 /Users/admin/standin-log/claude.jsonl /Users/admin/standin-log/codex.jsonl` and the same for `OUTSIDE-SENTINEL-5531` and `GITDIR-MARKER-2290` must print 0 for every file. A count above 0 is a bug in the app or helper, not in the stand-in: the stand-in logs everything it was sent and everything the helper answered.
+- With brain off, `grep -c '"mcp_config"'` is 0 and no question carries a `Notes from the user's own files` block.
+
+Reset: `testenv exec <id> -- bash /Users/admin/reset-walk.sh` (restores the brain fixture and the outside file too); only the brain: `testenv exec <id> -- bash /Users/admin/reset-brain.sh`.
+
+For a host run of the stand-ins (no test Mac): `STANDIN_LOG_DIR=<dir> STANDIN_TIME_SCALE=0.05 testenv/claude-standin/claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --model m --mcp-config '<json naming a helper>'` and pipe user lines in. `STANDIN_TIME_SCALE` shortens every pause.
+
 ## 7. Read what the app saved
 
 - Sessions: `testenv exec <id> -- ls -R /Users/admin/clicky-data` (each session has its own folder).
@@ -107,8 +149,8 @@ A line with a `stdin` field is a question sent; a line with only `argv` is a pro
 
 ## 8. Reset between walks
 
-- `testenv exec <id> -- bash /Users/admin/reset-walk.sh` quits the app and restores everything: vault, app data (sessions and both stand-in sign-in flags) and the stand-in logs. Then run `launch-app.sh` again.
-- Only the vault: `testenv exec <id> -- bash /Users/admin/reset-vault.sh`.
+- `testenv exec <id> -- bash /Users/admin/reset-walk.sh` quits the app and restores everything: vault, brain fixture, app data (sessions and both stand-in sign-in flags) and the stand-in logs. Then run `launch-app.sh` again.
+- Only the vault: `testenv exec <id> -- bash /Users/admin/reset-vault.sh`. Only the brain fixture: `bash /Users/admin/reset-brain.sh`.
 
 ## 9. Finish
 

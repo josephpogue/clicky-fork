@@ -2,6 +2,13 @@
 # Start Clicky Fork in the test Mac. `open --env` hands the variables to the app itself and keeps the app its own
 # responsible process for permissions. The stand-ins replace claude and codex; the vault and data folder are fixtures.
 mkdir -p /Users/admin/clicky-data /Users/admin/standin-log
+# Search folders for the brain feature: the fixture brain by default; `launch-app.sh brain-off` starts with the list empty
+# (the feature off, Clicky as before). Written while the app is not running, so the app reads it at start.
+if [ "${1:-}" = "brain-off" ]; then
+  defaults delete com.clickyfork.app settings.brainSearchFolderPaths 2>/dev/null || true
+else
+  defaults write com.clickyfork.app settings.brainSearchFolderPaths -array /Users/admin/brain-fixture
+fi
 open --env CLICKY_CLAUDE_BIN=/Users/admin/standin/claude \
      --env CLICKY_CODEX_BIN=/Users/admin/standin/codex \
      --env CLICKY_VAULT_ROOT=/Users/admin/vault \

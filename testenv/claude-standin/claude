@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # Claude stand-in for the test Mac. No login, no network, no credentials. It speaks the parts of the real CLI the app uses:
 #   claude --version | auth status | auth login | auth logout
-#   claude -p --input-format stream-json --output-format stream-json --verbose --model <m> --system-prompt <s> ...
+#   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --model <m> ...
+#   with --mcp-config '<json>' the stand-in starts the brain helper named in it, does the MCP handshake, and answers some
+#   keywords by calling search_brain / read_brain_file the way the real CLI does (stream_event deltas, tool_use, tool result).
 # Every call appends one JSON line per event to $STANDIN_LOG_DIR/claude.jsonl (default /Users/admin/standin-log): the argv,
 # the names of the environment variables it got, and each stdin line with images replaced by their byte counts.
-import base64, json, os, sys, time
+import base64, collections, json, os, queue, re, select, subprocess, sys, threading, time
 
 # ---- THE REPLY TABLE: the one place to edit canned answers. First matching keyword (lower case, in the question) wins. ----
 REPLY_TABLE = [
@@ -13,7 +15,24 @@ REPLY_TABLE = [
     ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
                 "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
     ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
+    # Brain rows (need the helper, so they only act when started with --mcp-config; otherwise DEFAULT_REPLY):
+    ("port", "BRAIN:port"),
+    ("deploy", "BRAIN:deploy"),
+    ("secret", "BRAIN:secret"),
+    ("env", "BRAIN:secret"),
+    ("correction", "BRAIN:correction"),
+    # These two need no helper:
+    ("long", "STREAM:long"),
+    ("slow", "STREAM:slow"),
 ]
+# Checked before every row above: a question starting with these words.
+DIG_DEEPER_PREFIX = "dig deeper"
+LONG_REPLY = " ".join("This is sentence number %d of a long answer that the bubble has to cut to its newest lines." % number
+                      for number in range(1, 21)) + " [POINT:none]"
+SLOW_WORD_SECONDS, SLOW_TOTAL_SECONDS = 0.5, 30.0
+# STANDIN_TIME_SCALE=0.1 makes every pause ten times shorter (host unit runs); the test Mac uses 1.
+TIME_SCALE = float(os.environ.get("STANDIN_TIME_SCALE", "1"))
+FIXTURE_BRAIN = "/Users/admin/brain-fixture"
 SUMMARY_REPLY = "Asked where the save button is and about an earlier error."   # plain-text answer to the summary call
 DEFAULT_REPLY = "I can see your screen. [POINT:none]"
 LIMIT_MESSAGE = "You've hit your limit · resets 3pm (America/New_York)"   # wording of the real CLI
@@ -75,11 +94,359 @@ def question_text(message):
 
 
 def reply_for(question):
-    lowered = question.lower()
+    lowered = question.lower().strip()
+    if lowered.startswith(DIG_DEEPER_PREFIX):
+        return "DIG"
     for keyword, reply in REPLY_TABLE:
         if keyword in lowered:
             return reply
     return DEFAULT_REPLY
+
+
+def pause(seconds):
+    time.sleep(seconds * TIME_SCALE)
+
+
+class BrainHelper:
+    """The MCP server named in --mcp-config, started as a child and spoken to in one JSON line each way."""
+
+    def __init__(self, command, args, env=None):
+        self.process = subprocess.Popen([command] + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, bufsize=0, env=env)
+        self.buffer = b""
+        self.next_id = 1
+        self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                    "clientInfo": {"name": "claude-standin", "version": "1"}})
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        listed = self.request("tools/list", {})
+        self.tool_names = [tool.get("name") for tool in (listed.get("result", {}).get("tools") or [])]
+
+    def send(self, message):
+        log({"mcp": {"dir": "to_helper", "msg": message}})
+        self.process.stdin.write((json.dumps(message) + "\n").encode())
+
+    def read_line(self, timeout=20.0):
+        deadline = time.time() + timeout
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.time()
+            if remaining <= 0 or not select.select([self.process.stdout], [], [], remaining)[0]:
+                raise RuntimeError("brain helper did not answer")
+            chunk = os.read(self.process.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("brain helper closed its output")
+            self.buffer += chunk
+        line, self.buffer = self.buffer.split(b"\n", 1)
+        return line.decode()
+
+    def request(self, method, params):
+        identifier = self.next_id
+        self.next_id += 1
+        self.send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+        while True:
+            reply = json.loads(self.read_line())
+            log({"mcp": {"dir": "from_helper", "msg": reply}})
+            if reply.get("id") == identifier:
+                return reply
+
+    def call(self, tool, arguments):
+        """Returns (text, is_error) of a tools/call."""
+        reply = self.request("tools/call", {"name": tool, "arguments": arguments})
+        result = reply.get("result") or {}
+        text = "\n".join(block.get("text", "") for block in (result.get("content") or []) if block.get("type") == "text")
+        if "error" in reply:
+            return reply["error"].get("message", "error"), True
+        return text, bool(result.get("isError"))
+
+    def stop(self):
+        try:
+            self.process.stdin.close()
+            self.process.terminate()
+        except OSError:
+            pass
+
+
+def start_brain_helper(argv):
+    """Parse --mcp-config (JSON text or a file path) and start its first server. None when the flag is absent."""
+    if "--mcp-config" not in argv:
+        return None, None
+    raw = argv[argv.index("--mcp-config") + 1]
+    config = json.load(open(raw)) if os.path.exists(raw) else json.loads(raw)
+    server = (config.get("mcpServers") or {}).get("brain") or next(iter((config.get("mcpServers") or {}).values()))
+    args = [str(value) for value in server.get("args", [])]
+    folder = args[args.index("--folder") + 1] if "--folder" in args else FIXTURE_BRAIN
+    log({"mcp_config": {"command": server.get("command"), "args": args}})
+    return BrainHelper(server["command"], args, env=os.environ.copy()), folder
+
+
+class Session:
+    def __init__(self, argv, model):
+        self.argv = argv
+        self.model = model
+        self.effort = "medium"
+        self.partial = "--include-partial-messages" in argv
+        self.helper, self.folder = start_brain_helper(argv)
+        self.session_id = "standin-session-%d" % os.getpid()
+        self.messages = queue.Queue()
+        self.pending = collections.deque()
+        self.interrupted = False
+        self.interrupt_request_id = None
+        self.answering = False
+        threading.Thread(target=self.read_stdin, daemon=True).start()
+
+    # ---- stdin: a thread reads so an interrupt can arrive while an answer streams ----
+    def read_stdin(self):
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                log({"stdin_unparsed": raw[:200]})
+                continue
+            log({"stdin": redact(json.loads(raw))})
+            self.messages.put(message)
+        self.messages.put(None)
+
+    def handle_control(self, message):
+        request = message.get("request", {})
+        subtype = request.get("subtype")
+        request_id = message.get("request_id")
+        if subtype == "interrupt":
+            self.interrupt_request_id = request_id
+            if self.answering:
+                self.interrupted = True   # answer_interrupted() sends the response, in the real CLI's order
+            else:
+                say({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
+                                                              "response": {"still_queued": []}}})
+            return
+        response = {}
+        if subtype == "set_model":
+            self.model = request.get("model") or self.model
+        elif subtype == "apply_flag_settings":
+            self.effort = (request.get("settings") or {}).get("effortLevel") or self.effort
+        elif subtype == "get_settings":
+            response = {"effective": {}, "sources": [], "applied": {"model": self.model, "effort": self.effort}}
+        say({"type": "control_response", "response": ({"subtype": "success", "request_id": request_id, "response": response}
+                                                      if response or subtype == "set_model"
+                                                      else {"subtype": "success", "request_id": request_id})})
+
+    def drain(self):
+        """Handle control requests that arrived meanwhile; keep user lines for later. True once an interrupt was seen."""
+        while True:
+            try:
+                message = self.messages.get_nowait()
+            except queue.Empty:
+                break
+            if message is None:
+                self.pending.append(None)
+            elif message.get("type") == "control_request":
+                self.handle_control(message)
+            else:
+                self.pending.append(message)
+        return self.interrupted
+
+    def next_message(self):
+        while True:
+            if self.pending:
+                return self.pending.popleft()
+            message = self.messages.get()
+            if message is not None and message.get("type") == "control_request":
+                self.handle_control(message)
+                continue
+            return message
+
+    # ---- output shapes (copied from the real CLI's stream, see cli-verify/c_nosafe_preamble.jsonl) ----
+    def emit_event(self, event):
+        say({"type": "stream_event", "event": event, "session_id": self.session_id, "parent_tool_use_id": None})
+
+    def stream_text(self, text, message_id, index, words_per_delta=3, delay=0.05, interruptible=False, words_pause=None):
+        """One text block: start, a few words per delta, stop. Returns (text sent, interrupted)."""
+        if self.partial:
+            self.emit_event({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}})
+        words = text.split(" ")
+        sent = []
+        position = 0
+        next_chunk_time = time.time()   # a schedule, not a sleep per chunk, so the total length does not drift under load
+        while position < len(words):
+            if self.drain() and interruptible:
+                return " ".join(sent), True
+            chunk = words[position:position + (1 if words_pause else words_per_delta)]
+            delta = (" " if position else "") + " ".join(chunk)
+            sent.extend(chunk)
+            position += len(chunk)
+            if self.partial:
+                self.emit_event({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": delta}})
+            next_chunk_time += (words_pause or delay) * TIME_SCALE
+            time.sleep(max(0.0, next_chunk_time - time.time()))
+        if self.partial:
+            self.emit_event({"type": "content_block_stop", "index": index})
+        return text, False
+
+    def assistant_line(self, message_id, block):
+        say({"type": "assistant", "session_id": self.session_id,
+             "message": {"model": self.model, "id": message_id, "type": "message", "role": "assistant", "content": [block]}})
+
+    def tool_step(self, message_id, index, tool, arguments, tool_use_id):
+        """tool_use block (partial json deltas), the assistant line, the helper's real answer, the tool_result user line."""
+        full_name = "mcp__brain__" + tool
+        if self.partial:
+            self.emit_event({"type": "content_block_start", "index": index, "content_block": {
+                "type": "tool_use", "id": tool_use_id, "name": full_name, "input": {}}})
+            encoded = json.dumps(arguments)
+            for start in range(0, len(encoded), 8):
+                self.emit_event({"type": "content_block_delta", "index": index,
+                                 "delta": {"type": "input_json_delta", "partial_json": encoded[start:start + 8]}})
+        self.assistant_line(message_id, {"type": "tool_use", "id": tool_use_id, "name": full_name, "input": arguments})
+        if self.partial:
+            self.emit_event({"type": "content_block_stop", "index": index})
+            self.emit_event({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+            self.emit_event({"type": "message_stop"})
+        text, is_error = self.helper.call(tool, arguments)
+        say({"type": "user", "session_id": self.session_id, "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"tool_use_id": tool_use_id, "type": "tool_result", "content": [{"type": "text", "text": text}], "is_error": is_error}]}})
+        return text, is_error
+
+    def new_message(self, message_id):
+        if self.partial:
+            self.emit_event({"type": "message_start", "message": {"id": message_id, "role": "assistant", "content": [],
+                                                                  "model": self.model}})
+
+    def close_message(self):
+        if self.partial:
+            self.emit_event({"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
+            self.emit_event({"type": "message_stop"})
+
+    def finish(self, started, text, turns=1):
+        self.close_message()
+        say({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": self.session_id,
+             "duration_ms": int((time.time() - started) * 1000) + 1, "num_turns": turns,
+             "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    def answer_interrupted(self, started, partial_text, message_id):
+        """Same lines as cli-verify/interrupt.jsonl: success response, the partial assistant line, the interrupt note, a result."""
+        self.interrupted = False
+        say({"type": "control_response", "response": {"subtype": "success", "request_id": self.interrupt_request_id,
+                                                      "response": {"still_queued": []}}})
+        self.assistant_line(message_id, {"type": "text", "text": partial_text})
+        say({"type": "user", "session_id": self.session_id, "parent_tool_use_id": None,
+             "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}})
+        say({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": self.session_id,
+             "duration_ms": int((time.time() - started) * 1000) + 1, "num_turns": 1, "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    # ---- one user line ----
+    def answer(self, message):
+        started = time.time()
+        question = question_text(message)
+        reply = reply_for(question)
+        message_id = "msg_standin_%d" % int(started * 1000)
+        self.new_message(message_id)
+        if reply.startswith("BRAIN:") and self.helper is None:
+            reply = DEFAULT_REPLY
+        if reply == "DIG":
+            text = "Digging deeper on %s, effort %s. [POINT:none]" % (self.model, self.effort)
+            self.stream_text(text, message_id, 0)
+            self.assistant_line(message_id, {"type": "text", "text": text})
+            return self.finish(started, text)
+        if reply == "STREAM:slow":
+            return self.answer_slow(started, message_id)
+        if reply == "STREAM:long":
+            reply = LONG_REPLY
+            self.stream_text(reply, message_id, 0, words_per_delta=4, delay=0.07)
+            self.assistant_line(message_id, {"type": "text", "text": reply})
+            return self.finish(started, reply)
+        if reply.startswith("BRAIN:"):
+            return self.answer_with_brain(started, message_id, reply[len("BRAIN:"):])
+        is_error = reply == "LIMIT"
+        if is_error:
+            reply = LIMIT_MESSAGE
+        elif self.partial:
+            self.stream_text(reply, message_id, 0)
+        self.assistant_line(message_id, {"type": "text", "text": reply})
+        self.close_message()
+        result = {"type": "result", "subtype": "success", "is_error": is_error, "result": reply, "session_id": self.session_id,
+                  "duration_ms": int((time.time() - started) * 1000) + 1, "num_turns": 1,
+                  "usage": {"input_tokens": 1, "output_tokens": 1}}
+        if is_error:
+            result["api_error_status"] = 429
+        say(result)
+
+    def answer_slow(self, started, message_id):
+        total_words = int(SLOW_TOTAL_SECONDS / SLOW_WORD_SECONDS)
+        text = " ".join("slow%d" % number for number in range(1, total_words + 1))
+        sent, interrupted = self.stream_text(text, message_id, 0, interruptible=True, words_pause=SLOW_WORD_SECONDS)
+        if interrupted:
+            return self.answer_interrupted(started, sent, message_id)
+        self.assistant_line(message_id, {"type": "text", "text": text})
+        self.finish(started, text)
+
+    def answer_with_brain(self, started, message_id, kind):
+        tool_use_id = "toolu_standin_%d" % int(started * 1000)
+        index = 0
+        if kind == "port":
+            self.stream_text("Let me check your notes for the demo port.", message_id, index)
+            self.assistant_line(message_id, {"type": "text", "text": "Let me check your notes for the demo port."})
+            index += 1
+            tool, arguments = "search_brain", {"query": "demo server port", "limit": 5}
+        elif kind == "deploy":
+            pause(3.0)   # no preamble: the app shows its own "Checking your notes" during this wait
+            tool, arguments = "search_brain", {"query": "deploy", "limit": 5}
+        elif kind == "correction":
+            first = "From the screen this looks like the Debug build."
+            self.stream_text(first, message_id, index)
+            self.assistant_line(message_id, {"type": "text", "text": first})
+            index += 1
+            tool, arguments = "search_brain", {"query": "test builds use Release", "limit": 5}
+        else:   # secret
+            tool, arguments = "read_brain_file", {"path": os.path.join(self.folder, "projects/demo-app/.env"),
+                                                  "start_line": 1, "line_count": 50}
+        tool_text, is_error = self.tool_step(message_id, index, tool, arguments, tool_use_id)
+        second_id = message_id + "_b"
+        self.new_message(second_id)
+        if kind == "port":
+            found = re.search(r"port\s+(\d+)", tool_text)
+            final = ("Your notes say the demo server listens on port %s. [POINT:none]" % found.group(1) if found
+                     else "I could not find the demo port in your notes. [POINT:none]")
+        elif kind == "deploy":
+            final = "Deploys go through the release script in your notes. [POINT:none]"
+        elif kind == "correction":
+            final = "Correction: your notes say test builds use Release. [POINT:none]"
+        else:
+            final = "I can't open that file: %s [POINT:none]" % tool_text.strip()
+        self.stream_text(final, second_id, 0)
+        self.assistant_line(second_id, {"type": "text", "text": final})
+        self.finish(started, final, turns=2)
+
+
+def run_stream(argv, model):
+    session = Session(argv, model)
+    say({"type": "system", "subtype": "init", "session_id": session.session_id, "model": model, "apiKeySource": "none",
+         "tools": (["mcp__brain__" + name for name in session.helper.tool_names] if session.helper else []),
+         "mcp_servers": ([{"name": "brain", "status": "connected", "source": "dynamic"}] if session.helper else []),
+         "cwd": os.getcwd()})
+    try:
+        while True:
+            message = session.next_message()
+            if message is None:
+                return 0
+            if message.get("type") != "user":
+                continue
+            if not signed_in():
+                say({"type": "result", "subtype": "success", "is_error": True, "result": NOT_SIGNED_IN_MESSAGE,
+                     "session_id": session.session_id, "duration_ms": 1})
+                continue
+            session.answering, session.interrupted = True, False
+            try:
+                session.answer(message)
+            finally:
+                session.answering = False
+            if session.drain() or session.interrupted:   # an interrupt that came after the answer had ended
+                session.interrupted = False
+                say({"type": "control_response", "response": {"subtype": "success", "request_id": session.interrupt_request_id,
+                                                              "response": {"still_queued": []}}})
+    finally:
+        if session.helper:
+            session.helper.stop()
 
 
 def main():
@@ -121,45 +488,7 @@ def main():
             return 1
         print(SUMMARY_REPLY)
         return 0
-    session_id = "standin-session-%d" % os.getpid()
-    say({"type": "system", "subtype": "init", "session_id": session_id, "model": model, "apiKeySource": "none",
-         "tools": [], "cwd": os.getcwd()})
-    for raw in sys.stdin:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            message = json.loads(raw)
-        except ValueError:
-            log({"stdin_unparsed": raw[:200]})
-            continue
-        log({"stdin": redact(json.loads(raw))})
-        if message.get("type") == "control_request":
-            request = message.get("request", {})
-            if request.get("subtype") == "set_model":
-                model = request.get("model") or model
-            say({"type": "control_response", "response": {"subtype": "success", "request_id": message.get("request_id"), "response": {}}})
-            continue
-        if message.get("type") != "user":
-            continue
-        started = time.time()
-        if not signed_in():
-            say({"type": "result", "subtype": "success", "is_error": True, "result": NOT_SIGNED_IN_MESSAGE,
-                 "session_id": session_id, "duration_ms": 1})
-            continue
-        reply = reply_for(question_text(message))
-        is_error = reply == "LIMIT"
-        if is_error:
-            reply = LIMIT_MESSAGE
-        say({"type": "assistant", "session_id": session_id,
-             "message": {"role": "assistant", "model": model, "content": [{"type": "text", "text": reply}]}})
-        result = {"type": "result", "subtype": "success", "is_error": is_error, "result": reply, "session_id": session_id,
-                  "duration_ms": int((time.time() - started) * 1000) + 1, "num_turns": 1,
-                  "usage": {"input_tokens": 1, "output_tokens": 1}}
-        if is_error:
-            result["api_error_status"] = 429
-        say(result)
-    return 0
+    return run_stream(argv, model)
 
 
 sys.exit(main())

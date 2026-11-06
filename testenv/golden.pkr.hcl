@@ -35,7 +35,7 @@ build {
   }
   provisioner "shell" {
     inline = [
-      "mkdir -p /Users/admin/clips /Users/admin/standin /Users/admin/testenv-driver /Users/admin/fixture-vault /Users/admin/blackhole /Users/admin/brew-cache /Users/admin/model-staging",
+      "mkdir -p /Users/admin/clips /Users/admin/standin /Users/admin/testenv-driver /Users/admin/fixture-vault /Users/admin/fixture-brain /Users/admin/blackhole /Users/admin/brew-cache /Users/admin/model-staging",
       "mkdir -p '/Users/admin/Library/Application Support/FluidAudio/Models'",
     ]
   }
@@ -79,6 +79,10 @@ build {
   provisioner "file" {
     source      = "fixture-vault/"
     destination = "/Users/admin/fixture-vault/"
+  }
+  provisioner "file" {
+    source      = "fixture-brain/"
+    destination = "/Users/admin/fixture-brain/"
   }
   provisioner "file" {
     source      = "launch-app.sh"

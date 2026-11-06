@@ -4,7 +4,7 @@
 #   codex exec --json ... "<prompt>" -i a.jpg -i b.jpg        and        codex exec resume --json ... <thread_id> "<prompt>" -i ...
 # Every call appends a JSON line to $STANDIN_LOG_DIR/codex.jsonl (default /Users/admin/standin-log): argv, environment
 # variable names, and the prompt with image arguments listed by file size.
-import json, os, sys, time, uuid
+import json, os, re, sys, time, uuid
 
 # ---- THE REPLY TABLE: the one place to edit canned answers. First matching keyword (lower case, in the question) wins. ----
 REPLY_TABLE = [
@@ -13,7 +13,13 @@ REPLY_TABLE = [
     ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
                 "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
     ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
+    ("slow", "SLOW"),
 ]
+DIG_DEEPER_PREFIX = "dig deeper"          # checked before every row: answers with the model and effort of this call
+NOTES_BLOCK_MARKER = "Notes from the user's own files"
+SLOW_SECONDS = 30.0                       # "slow" waits this long, so a walk can cut it short with the next question
+# STANDIN_TIME_SCALE=0.1 makes the wait ten times shorter (host unit runs); the test Mac uses 1.
+TIME_SCALE = float(os.environ.get("STANDIN_TIME_SCALE", "1"))
 DEFAULT_REPLY = "I can see your screen. [POINT:none]"
 LIMIT_MESSAGE = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits"  # real CLI wording
 VERSION = "codex-cli 0.155.1"
@@ -50,6 +56,43 @@ def set_signed_in(value):
 def say(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def passage_reply(prompt):
+    """When the prompt holds the notes block: the first `File:` file name and the first sentence after its heading."""
+    position = prompt.find(NOTES_BLOCK_MARKER)
+    if position < 0:
+        return None
+    lines = prompt[position:].splitlines()
+    for number, line in enumerate(lines):
+        if not line.startswith("File:"):
+            continue
+        path = line[len("File:"):].strip()
+        path = re.split(r"\s+lines\s+\d", path)[0]
+        sentence = ""
+        seen_heading = False
+        for body in lines[number + 1:]:
+            body = body.strip()
+            if body.startswith("File:"):
+                break
+            if body.startswith("#"):
+                seen_heading = True
+                continue
+            if body and (seen_heading or not sentence):
+                sentence = re.split(r"(?<=[.!?])\s", body)[0]
+                break
+        return "From %s: %s [POINT:none]" % (os.path.basename(path), sentence or "(nothing after the heading)")
+    return None
+
+
+def effort_and_model(argv):
+    model, effort = "the default model", "default"
+    for index, value in enumerate(argv):
+        if value in ("-m", "--model") and index + 1 < len(argv):
+            model = argv[index + 1]
+        if value in ("-c", "--config") and index + 1 < len(argv) and argv[index + 1].startswith("model_reasoning_effort="):
+            effort = argv[index + 1].split("=", 1)[1].strip('"\'')
+    return model, effort
 
 
 def reply_for(question):
@@ -116,6 +159,14 @@ def main():
     say({"type": "thread.started", "thread_id": thread_id})
     say({"type": "turn.started"})
     reply = reply_for(question)
+    if question.lower().strip().startswith(DIG_DEEPER_PREFIX):
+        model, effort = effort_and_model(argv)
+        reply = "Digging deeper on %s, effort %s. [POINT:none]" % (model, effort)
+    elif reply == "SLOW":
+        time.sleep(SLOW_SECONDS * TIME_SCALE)
+        reply = "That took a while. [POINT:none]"
+    elif reply not in ("LIMIT",) and passage_reply(prompt):
+        reply = passage_reply(prompt)
     if reply == "LIMIT":
         say({"type": "error", "message": LIMIT_MESSAGE})
         say({"type": "turn.failed", "error": {"message": LIMIT_MESSAGE}})
