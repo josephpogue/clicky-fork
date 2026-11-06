@@ -18,6 +18,7 @@ struct AnswerBubbleContent: Equatable {
     let isNotice: Bool
     let layout: CursorBubbleLayout.TextLayout
 
+    @MainActor
     init(text: String, isNotice: Bool) {
         fullText = text
         paragraphs = AnswerBubbleMetrics.paragraphs(of: text)
@@ -72,17 +73,17 @@ enum AnswerBubbleMetrics {
         return max(lines, 1)
     }
 
-    /// The body's height as SwiftUI draws it: lines of the font's own height, `extraLineSpacing` between them,
-    /// and 7 pt between paragraphs.
-    static func bodyHeight(lineCounts: [Int]) -> CGFloat {
-        let naturalLineHeight = lineHeight - extraLineSpacing
-        var height: CGFloat = 0
-        for lineCount in lineCounts {
-            height += CGFloat(lineCount) * naturalLineHeight + CGFloat(lineCount - 1) * extraLineSpacing
-        }
-        return height + CGFloat(max(lineCounts.count - 1, 0)) * paragraphSpacing
+    /// The body's height as SwiftUI itself lays it out at `textWidth`: the bubble, its dark ground and its
+    /// panel are all sized from this, so a line SwiftUI wraps differently from `lineCount(of:textWidth:)`
+    /// can never hang outside the ground or be clipped.
+    @MainActor
+    static func bodyHeight(ofParagraphs paragraphs: [String], textWidth: CGFloat) -> CGFloat {
+        let measuringView = NSHostingView(
+            rootView: AnswerBubbleParagraphs(paragraphs: paragraphs).frame(width: textWidth, alignment: .topLeading))
+        return measuringView.fittingSize.height
     }
 
+    @MainActor
     static func textLayout(forParagraphs paragraphs: [String]) -> CursorBubbleLayout.TextLayout {
         let shortTextWidth = CursorBubbleLayout.shortWidth - 2 * horizontalPadding
         let longTextWidth = CursorBubbleLayout.longWidth - 2 * horizontalPadding
@@ -90,8 +91,25 @@ enum AnswerBubbleMetrics {
         let longLineCounts = paragraphs.map { lineCount(of: $0, textWidth: longTextWidth) }
         return CursorBubbleLayout.textLayout(
             lineCountAtShortWidth: shortLineCounts.reduce(0, +),
-            naturalBodyHeightAtShortWidth: bodyHeight(lineCounts: shortLineCounts),
-            naturalBodyHeightAtLongWidth: bodyHeight(lineCounts: longLineCounts))
+            naturalBodyHeightAtShortWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: shortTextWidth),
+            naturalBodyHeightAtLongWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth))
+    }
+}
+
+/// The answer's paragraphs, drawn once for the bubble and measured once for its size.
+struct AnswerBubbleParagraphs: View {
+    let paragraphs: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AnswerBubbleMetrics.paragraphSpacing) {
+            ForEach(0..<paragraphs.count, id: \.self) { paragraphIndex in
+                Text(paragraphs[paragraphIndex])
+                    .font(.system(size: 13.5))
+                    .lineSpacing(AnswerBubbleMetrics.extraLineSpacing)
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
@@ -146,15 +164,7 @@ struct AnswerBubbleView: View {
 
     private var bodyText: some View {
         let bodyHeight = content.layout.bodyHeight
-        return VStack(alignment: .leading, spacing: AnswerBubbleMetrics.paragraphSpacing) {
-            ForEach(0..<content.paragraphs.count, id: \.self) { paragraphIndex in
-                Text(content.paragraphs[paragraphIndex])
-                    .font(.system(size: 13.5))
-                    .lineSpacing(AnswerBubbleMetrics.extraLineSpacing)
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        return AnswerBubbleParagraphs(paragraphs: content.paragraphs)
         .frame(
             width: content.layout.width - 2 * AnswerBubbleMetrics.horizontalPadding,
             height: content.layout.isBodyCut ? bodyHeight : nil,

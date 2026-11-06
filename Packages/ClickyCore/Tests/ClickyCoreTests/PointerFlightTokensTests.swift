@@ -52,4 +52,28 @@ struct PointerFlightTokensTests {
         let next = tokens.begin()
         #expect(tokens.isCurrent(next))
     }
+
+    @Test func askingForAnEarlyReturnNamesTheCurrentFlightOnce() {
+        var tokens = PointerFlightTokens()
+        let flight = tokens.begin()
+        #expect(tokens.requestReturnToCursor() == flight)
+        #expect(tokens.requestReturnToCursor() == nil)
+        #expect(tokens.isCurrent(flight))
+    }
+
+    @Test func askingForAnEarlyReturnWithNoFlightDoesNothing() {
+        var tokens = PointerFlightTokens()
+        #expect(tokens.requestReturnToCursor() == nil)
+        let flight = tokens.begin()
+        _ = tokens.finish(flight)
+        #expect(tokens.requestReturnToCursor() == nil)
+    }
+
+    @Test func aNewFlightCanBeAskedToReturnEvenAfterAnEarlierOneWas() {
+        var tokens = PointerFlightTokens()
+        let first = tokens.begin()
+        #expect(tokens.requestReturnToCursor() == first)
+        let second = tokens.begin()
+        #expect(tokens.requestReturnToCursor() == second)
+    }
 }

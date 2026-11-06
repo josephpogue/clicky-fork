@@ -22,6 +22,10 @@ final class PointerFlightController: ObservableObject {
     /// What the pointer says on arrival. Nil lets the overlay pick its own short phrase.
     @Published private(set) var targetLabel: String?
 
+    /// The token of the flight that was asked to return to the cursor now. The overlay that runs that flight
+    /// starts its normal fly-back when this changes.
+    @Published private(set) var returnToCursorRequestedFlight: Int?
+
     /// Where the pointer's label is while the blue triangle is away from the cursor (flying out, pointing,
     /// flying back), in global AppKit coordinates. The answer bubble rides under it. Nil when the pointer is
     /// with the cursor, so the bubble sits beside the cursor.
@@ -39,7 +43,7 @@ final class PointerFlightController: ObservableObject {
 
     /// The overlay publishes the label's frame on every step of the flight.
     func publishPointerLabelFrame(_ labelGlobalFrame: CGRect?, clearance: CGRect?, flightToken: Int) {
-        guard flightTokens.isCurrent(flightToken) else { return }
+        guard flightTokens.isCurrent(flightToken), returnToCursorRequestedFlight != flightToken else { return }
         pointerLabelGlobalFrame = labelGlobalFrame
         pointerClearanceGlobalFrame = clearance
     }
@@ -77,6 +81,17 @@ final class PointerFlightController: ObservableObject {
         }
     }
 
+    /// A new question: ends the current flight by starting its normal return to the cursor at once, with
+    /// the label and clearance frames cleared so the next answer sits beside the cursor. Unlike `cancelFlight`
+    /// the overlay stays up, so the blue cursor keeps showing. Does nothing when no flight is running.
+    func endCurrentFlightByReturningToCursor() {
+        guard let flightToken = flightTokens.requestReturnToCursor() else { return }
+        pointerLabelGlobalFrame = nil
+        pointerClearanceGlobalFrame = nil
+        targetLabel = nil
+        returnToCursorRequestedFlight = flightToken
+    }
+
     /// Stop and quit: remove the pointer at once.
     func cancelFlight() {
         flightTokens.cancel()
@@ -86,6 +101,7 @@ final class PointerFlightController: ObservableObject {
         targetDisplayFrame = nil
         targetLabel = nil
         pointerLabelGlobalFrame = nil
+        returnToCursorRequestedFlight = nil
         overlayWindowManager.hideOverlay()
     }
 }

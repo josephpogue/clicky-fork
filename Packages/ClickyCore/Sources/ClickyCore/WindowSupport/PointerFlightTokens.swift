@@ -3,6 +3,7 @@
 public struct PointerFlightTokens: Sendable {
     private var latest = 0
     private var currentFlight: Int?
+    private var flightAskedToReturn: Int?
 
     public init() {}
 
@@ -22,6 +23,14 @@ public struct PointerFlightTokens: Sendable {
         guard currentFlight == token else { return false }
         currentFlight = nil
         return true
+    }
+
+    /// Asks the current flight to end by flying back to the cursor now. Returns its token the first time
+    /// only; nil when no flight is current or it was already asked.
+    public mutating func requestReturnToCursor() -> Int? {
+        guard let currentFlight, flightAskedToReturn != currentFlight else { return nil }
+        flightAskedToReturn = currentFlight
+        return currentFlight
     }
 
     /// Stop or quit: no flight is current, so every timer still waiting does nothing.

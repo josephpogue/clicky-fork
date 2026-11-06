@@ -22,7 +22,7 @@ struct CursorBubbleClearanceTests {
             fullLabelWidth: 80,
             screenFrame: screenFrame)
         let clearance = CursorBubbleLayout.pointerClearanceFrame(
-            pointerPosition: pointerPositionTopLeft, screenFrame: screenFrame, target: target)
+            pointerPosition: pointerPositionTopLeft, screenFrame: screenFrame, target: target, isPointerHoldingAtTarget: true)
         let pointer = CGRect(x: pointerGlobal.x - 8, y: pointerGlobal.y - 8, width: 16, height: 16)
         return (label, clearance, pointer)
     }
@@ -90,7 +90,8 @@ struct CursorBubbleClearanceTests {
 
     @Test func clearanceFrameHoldsThePointerAndTheTarget() {
         let frame = CursorBubbleLayout.pointerClearanceFrame(
-            pointerPosition: CGPoint(x: 208, y: 782), screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982), target: CGPoint(x: 200, y: 188 - 128))
+            pointerPosition: CGPoint(x: 208, y: 782), screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982), target: CGPoint(x: 200, y: 188 - 128),
+            isPointerHoldingAtTarget: true)
         #expect(frame.contains(CGPoint(x: 208, y: 200)))
         #expect(frame.contains(CGPoint(x: 200, y: 60)))
     }
@@ -108,8 +109,23 @@ struct CursorBubbleClearanceTests {
         #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 500, y: 800), in: [left, right]) == 0)
     }
 
-    @Test func theRightmostColumnBelongsToTheDisplay() {
+    @Test func theRightmostColumnOfTheLastDisplayBelongsToTheNearestDisplay() {
+        // AppKit's mouse rule is x in [minX, maxX): with no display to the right, x == maxX goes to the nearest.
         #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 2000, y: 400), in: [left, right]) == 1)
+    }
+
+    @Test func theSharedVerticalEdgeBelongsToTheDisplayOnTheRight() {
+        #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 1000, y: 400), in: [left, right]) == 1)
+        #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 1000, y: 400), in: [right, left]) == 0)
+    }
+
+    @Test func theSharedHorizontalEdgeBelongsToTheLowerDisplay() {
+        // A display stacked above: AppKit's rule is y in (minY, maxY], so the lower display's top row is its own.
+        let lower = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let upper = CGRect(x: 0, y: 800, width: 1000, height: 600)
+        #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 500, y: 800), in: [lower, upper]) == 0)
+        #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 500, y: 800), in: [upper, lower]) == 1)
+        #expect(CursorBubbleLayout.displayIndex(containing: CGPoint(x: 500, y: 1400), in: [lower, upper]) == 1)
     }
 
     @Test func aPointInAGapBetweenDisplaysPicksTheNearerOne() {
@@ -125,5 +141,75 @@ struct CursorBubbleClearanceTests {
 
     @Test func noDisplaysPicksNothing() {
         #expect(CursorBubbleLayout.displayIndex(containing: .zero, in: []) == nil)
+    }
+
+    // MARK: Flight start and end: the target does not count yet
+
+    @Test func whileFlyingOnlyThePointerIsInTheClearanceFrame() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let pointerPosition = CGPoint(x: 200, y: 900)
+        let flying = CursorBubbleLayout.pointerClearanceFrame(
+            pointerPosition: pointerPosition, screenFrame: screen, target: CGPoint(x: 700, y: 940), isPointerHoldingAtTarget: false)
+        #expect(flying.size == CGSize(width: CursorBubbleLayout.pointerSize, height: CursorBubbleLayout.pointerSize))
+        let holding = CursorBubbleLayout.pointerClearanceFrame(
+            pointerPosition: pointerPosition, screenFrame: screen, target: CGPoint(x: 700, y: 940), isPointerHoldingAtTarget: true)
+        #expect(holding.contains(CGPoint(x: 700, y: 940)))
+    }
+
+    @Test func atTheStartOfAFlightNearTheBottomTheBubbleStaysByThePointerNotOnTheFarTarget() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let pointerPosition = CGPoint(x: 200, y: 930)  // top-left coordinates: 52 pt above the bottom edge
+        let label = CursorBubbleLayout.pointerLabelFrame(
+            pointerPosition: pointerPosition, labelSize: CGSize(width: 0, height: 22), fullLabelWidth: 0, screenFrame: screen)
+        let target = CGPoint(x: 400, y: 950)
+        let clearance = CursorBubbleLayout.pointerClearanceFrame(
+            pointerPosition: pointerPosition, screenFrame: screen, target: target, isPointerHoldingAtTarget: false)
+        let placement = CursorBubbleLayout.placement(
+            anchor: .belowLabel(label, clearing: clearance), bubbleSize: bubbleSize, visibleFrame: visibleFrame)
+        let bubble = CGRect(origin: placement.origin, size: bubbleSize)
+        #expect(bubble.minY < 200)
+        #expect(!bubble.contains(target))
+    }
+
+    // MARK: A bubble that fits neither above nor below
+
+    @Test func aTallBubbleOnAShortFrameGoesBesideTheClearanceFrame() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 300)
+        let tall = CGSize(width: 300, height: 200)
+        let s = scene(target: CGPoint(x: 200, y: 150), screen: screen)
+        let placement = CursorBubbleLayout.placement(
+            anchor: .belowLabel(s.label, clearing: s.clearance), bubbleSize: tall, visibleFrame: screen)
+        let bubble = CGRect(origin: placement.origin, size: tall)
+        #expect(screen.contains(bubble))
+        #expect(!bubble.intersects(s.label))
+        #expect(!bubble.intersects(s.clearance))
+    }
+
+    @Test func aTargetNearTheTopWithTheLabelLowPutsTheBubbleBesideThem() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 300)
+        let tall = CGSize(width: 300, height: 200)
+        let label = CGRect(x: 600, y: 20, width: 80, height: 22)
+        let clearance = CGRect(x: 590, y: 20, width: 30, height: 270)
+        let placement = CursorBubbleLayout.placement(
+            anchor: .belowLabel(label, clearing: clearance), bubbleSize: tall, visibleFrame: screen)
+        let bubble = CGRect(origin: placement.origin, size: tall)
+        #expect(screen.contains(bubble))
+        #expect(!bubble.intersects(label))
+        #expect(!bubble.intersects(clearance))
+    }
+
+    @Test func withNoRoomBesideItTheBubbleTakesTheSideWithMoreRoomAndClampsOnlyThere() {
+        let screen = CGRect(x: 0, y: 0, width: 320, height: 300)
+        let tall = CGSize(width: 300, height: 200)
+        // Room below the label is 94; room above the clearance frame is 172.
+        let aboveWins = CursorBubbleLayout.placement(
+            anchor: .belowLabel(CGRect(x: 10, y: 100, width: 80, height: 22), clearing: CGRect(x: 10, y: 100, width: 16, height: 10)),
+            bubbleSize: tall, visibleFrame: screen)
+        #expect(aboveWins.origin.y + tall.height == screen.maxY)
+        // Room below the label is 14; room above the clearance frame is 4.
+        let belowWins = CursorBubbleLayout.placement(
+            anchor: .belowLabel(CGRect(x: 10, y: 20, width: 80, height: 22), clearing: CGRect(x: 10, y: 20, width: 16, height: 270)),
+            bubbleSize: tall, visibleFrame: screen)
+        #expect(belowWins.origin.y == screen.minY)
     }
 }

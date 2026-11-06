@@ -13,6 +13,8 @@ public enum CursorBubbleLayout {
     public static let flippedUpGap: CGFloat = 8
     /// The gap between the pointer's label and a bubble riding under it.
     public static let gapBelowPointerLabel: CGFloat = 6
+    /// The gap between the clearance frame and a bubble placed beside it.
+    public static let gapBesideClearance: CGFloat = 8
 
     public static let shortWidth: CGFloat = 300
     public static let longWidth: CGFloat = 340
@@ -36,6 +38,15 @@ public enum CursorBubbleLayout {
         public let defaultTopLeft: CGPoint
         public let flippedRightEdgeX: CGFloat
         public let flippedBottomEdgeY: CGFloat
+        /// The label, pointer and target a bubble must stay off, when the anchor hangs from a pointer label.
+        public let avoidFrame: CGRect?
+
+        public init(defaultTopLeft: CGPoint, flippedRightEdgeX: CGFloat, flippedBottomEdgeY: CGFloat, avoidFrame: CGRect? = nil) {
+            self.defaultTopLeft = defaultTopLeft
+            self.flippedRightEdgeX = flippedRightEdgeX
+            self.flippedBottomEdgeY = flippedBottomEdgeY
+            self.avoidFrame = avoidFrame
+        }
 
         /// Beside the cursor: the default spot, the left flip and the up flip.
         public static func cursor(at cursorLocation: CGPoint) -> Anchor {
@@ -53,7 +64,8 @@ public enum CursorBubbleLayout {
             return Anchor(
                 defaultTopLeft: CGPoint(x: labelFrame.minX, y: labelFrame.minY - gapBelowPointerLabel),
                 flippedRightEdgeX: labelFrame.maxX,
-                flippedBottomEdgeY: top + gapBelowPointerLabel)
+                flippedBottomEdgeY: top + gapBelowPointerLabel,
+                avoidFrame: clearing.map { labelFrame.union($0) } ?? labelFrame)
         }
     }
 
@@ -70,6 +82,10 @@ public enum CursorBubbleLayout {
             originY = anchor.flippedBottomEdgeY
             flippedUp = true
         }
+        if flippedUp, let avoidFrame = anchor.avoidFrame, originY + bubbleSize.height > visibleFrame.maxY {
+            return placementWhenFlippedBubbleOverflowsTop(
+                anchor: anchor, avoidFrame: avoidFrame, bubbleSize: bubbleSize, visibleFrame: visibleFrame, flippedLeft: flippedLeft)
+        }
         originX = min(max(originX, visibleFrame.minX), visibleFrame.maxX - bubbleSize.width)
         originY = min(max(originY, visibleFrame.minY), visibleFrame.maxY - bubbleSize.height)
 
@@ -81,6 +97,38 @@ public enum CursorBubbleLayout {
         case (true, true): nearCorner = .bottomTrailing
         }
         return Placement(origin: CGPoint(x: originX, y: originY), nearCorner: nearCorner)
+    }
+
+    /// The bubble fits neither below the label nor above the clearance frame. Put it beside the frame (right
+    /// first, then left) when there is room, so it covers nothing; otherwise pin it to the screen edge on the
+    /// side (above or below) with more room, and let the clamp act only there.
+    private static func placementWhenFlippedBubbleOverflowsTop(
+        anchor: Anchor,
+        avoidFrame: CGRect,
+        bubbleSize: CGSize,
+        visibleFrame: CGRect,
+        flippedLeft: Bool
+    ) -> Placement {
+        let sideOriginY = min(max(anchor.defaultTopLeft.y - bubbleSize.height, visibleFrame.minY), visibleFrame.maxY - bubbleSize.height)
+        let rightOriginX = avoidFrame.maxX + gapBesideClearance
+        if rightOriginX + bubbleSize.width <= visibleFrame.maxX {
+            return Placement(origin: CGPoint(x: rightOriginX, y: sideOriginY), nearCorner: .topLeading)
+        }
+        let leftOriginX = avoidFrame.minX - gapBesideClearance - bubbleSize.width
+        if leftOriginX >= visibleFrame.minX {
+            return Placement(origin: CGPoint(x: leftOriginX, y: sideOriginY), nearCorner: .topTrailing)
+        }
+
+        let roomAbove = visibleFrame.maxY - anchor.flippedBottomEdgeY
+        let roomBelow = anchor.defaultTopLeft.y - visibleFrame.minY
+        let clampedOriginX = min(max(
+            flippedLeft ? anchor.flippedRightEdgeX - bubbleSize.width : anchor.defaultTopLeft.x,
+            visibleFrame.minX), visibleFrame.maxX - bubbleSize.width)
+        if roomAbove >= roomBelow {
+            let originY = max(visibleFrame.maxY - bubbleSize.height, visibleFrame.minY)
+            return Placement(origin: CGPoint(x: clampedOriginX, y: originY), nearCorner: flippedLeft ? .bottomTrailing : .bottomLeading)
+        }
+        return Placement(origin: CGPoint(x: clampedOriginX, y: visibleFrame.minY), nearCorner: flippedLeft ? .topTrailing : .topLeading)
     }
 
     /// The pointer label's frame in AppKit global coordinates, from the pointer's position in the
@@ -114,28 +162,37 @@ public enum CursorBubbleLayout {
     public static func pointerClearanceFrame(
         pointerPosition: CGPoint,
         screenFrame: CGRect,
-        target: CGPoint?
+        target: CGPoint?,
+        isPointerHoldingAtTarget: Bool
     ) -> CGRect {
         let pointerFrame = CGRect(
             x: screenFrame.minX + pointerPosition.x - pointerSize / 2,
             y: screenFrame.maxY - pointerPosition.y - pointerSize / 2,
             width: pointerSize,
             height: pointerSize)
-        guard let target else { return pointerFrame }
+        // While the pointer flies, only it counts: the target is far off, and clearing it would throw the bubble across the screen.
+        guard isPointerHoldingAtTarget, let target else { return pointerFrame }
         let targetFrame = CGRect(x: target.x, y: target.y, width: 0, height: 0)
             .insetBy(dx: -targetClearance, dy: -targetClearance)
         return pointerFrame.union(targetFrame)
     }
 
-    /// The index of the display holding `point`: edges count as inside (the top pixel row and the rightmost
-    /// column are where the mouse can rest), and a point on no display goes to the nearest one.
+    /// The index of the display holding `point` by AppKit's mouse rule (x in [minX, maxX), y in (minY, maxY],
+    /// as `NSMouseInRect(point, frame, false)`), so a shared edge belongs to one display only. A point on no
+    /// display goes to the nearest one, edges counting as inside.
     public static func displayIndex(containing point: CGPoint, in frames: [CGRect]) -> Int? {
+        for index in frames.indices {
+            let frame = frames[index]
+            if point.x >= frame.minX, point.x < frame.maxX, point.y > frame.minY, point.y <= frame.maxY {
+                return index
+            }
+        }
         var best: (index: Int, distance: CGFloat)?
-        for (index, frame) in frames.enumerated() {
+        for index in frames.indices {
+            let frame = frames[index]
             let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
             let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
             let distance = hypot(dx, dy)
-            if distance == 0 { return index }
             if best == nil || distance < best!.distance { best = (index, distance) }
         }
         return best?.index

@@ -329,6 +329,9 @@ struct BlueCursorView: View {
         .onChange(of: pointerFlight.targetLocation) { _ in
             navigateToPointerFlightTargetIfOnThisScreen()
         }
+        .onChange(of: pointerFlight.returnToCursorRequestedFlight) { requestedFlightToken in
+            endFlightEarlyWhenRequested(requestedFlightToken)
+        }
         // The answer bubble rides under the pointer's label while the triangle is away from the cursor.
         .onChange(of: cursorPosition) { _ in
             publishPointerLabelFrameForAnswerBubble()
@@ -354,7 +357,8 @@ struct BlueCursorView: View {
             clearance: CursorBubbleLayout.pointerClearanceFrame(
                 pointerPosition: cursorPosition,
                 screenFrame: screenFrame,
-                target: pointerFlight.targetLocation),
+                target: pointerFlight.targetLocation,
+                isPointerHoldingAtTarget: buddyNavigationMode == .pointingAtTarget),
             flightToken: flightToken)
     }
 
@@ -666,6 +670,20 @@ struct BlueCursorView: View {
             activeFlightToken = nil
             pointerFlight.finishFlight(flightToken: flightToken)
         }
+    }
+
+    /// A new question ended the answer: the flight this overlay runs returns to the cursor now instead of
+    /// holding at its target. Does nothing on a display that is not flying it, or when it is already returning.
+    private func endFlightEarlyWhenRequested(_ requestedFlightToken: Int?) {
+        guard let requestedFlightToken, requestedFlightToken == activeFlightToken,
+              isCurrentFlight(requestedFlightToken) else { return }
+        guard buddyNavigationMode == .pointingAtTarget || (buddyNavigationMode == .navigatingToTarget && !isReturningToCursor) else { return }
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+        navigationBubbleScale = 1.0
+        startFlyingBackToCursor()
     }
 
     /// Whether the flight this overlay started is still the one running.
