@@ -22,5 +22,6 @@ let package = Package(
             ]
         ),
         .testTarget(name: "ClickyCoreTests", dependencies: ["ClickyCore"]),
+        .testTarget(name: "ClickySpeechTests", dependencies: ["ClickySpeech", "ClickyCore"]),
     ]
 )
