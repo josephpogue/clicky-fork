@@ -39,6 +39,15 @@ final class AppSettings: ObservableObject {
         didSet { userDefaults.set(summaryAtStopEnabled, forKey: Keys.summaryAtStopEnabled) }
     }
 
+    /// Seconds the last answer took, per provider raw value, shown in Settings.
+    @Published private(set) var measuredAnswerSeconds: [String: Double] {
+        didSet { userDefaults.set(measuredAnswerSeconds, forKey: Keys.measuredAnswerSeconds) }
+    }
+
+    func recordMeasuredAnswerSeconds(_ seconds: Double, for provider: ProviderID) {
+        measuredAnswerSeconds[provider.rawValue] = seconds
+    }
+
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         selectedProvider = userDefaults.string(forKey: Keys.selectedProvider).flatMap(ProviderID.init(rawValue:)) ?? .claude
@@ -46,6 +55,7 @@ final class AppSettings: ObservableObject {
         chatgptModel = userDefaults.string(forKey: Keys.chatgptModel) ?? ""
         notesFolderPath = userDefaults.string(forKey: Keys.notesFolderPath)
         summaryAtStopEnabled = userDefaults.object(forKey: Keys.summaryAtStopEnabled) as? Bool ?? true
+        measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 
     private enum Keys {
@@ -54,5 +64,6 @@ final class AppSettings: ObservableObject {
         static let chatgptModel = "settings.chatgptModel"
         static let notesFolderPath = "settings.notesFolderPath"
         static let summaryAtStopEnabled = "settings.summaryAtStopEnabled"
+        static let measuredAnswerSeconds = "settings.measuredAnswerSeconds"
     }
 }
