@@ -15,6 +15,8 @@ import SwiftUI
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject private var sessionCoordinator = SessionCoordinator.shared
+    /// The conversation the Open chat row summarises; observed so the row updates while the panel is open.
+    @ObservedObject private var chatWindowState = SessionCoordinator.shared.chatWindowState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,6 +37,15 @@ struct CompanionPanelView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 8)
                     .padding(.horizontal, 16)
+            }
+
+            if let offer = chatWindowState.usageLimitOffer {
+                PanelUsageLimitOffer(offer: offer) {
+                    chatWindowState.onSwitchProvider()
+                    dismissPanel()
+                }
+                .padding(.top, 8)
+                .padding(.horizontal, 16)
             }
 
             windowRows
@@ -129,7 +140,7 @@ struct CompanionPanelView: View {
 
     private var windowRows: some View {
         VStack(spacing: 2) {
-            windowRow(label: "Open chat", iconName: "bubble.left.and.bubble.right") {
+            PanelOpenChatRow(content: chatWindowState.panelChatSummary) {
                 AppWindowRouter.shared.showChat()
                 dismissPanel()
             }
