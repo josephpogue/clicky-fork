@@ -20,6 +20,7 @@ REPLY_TABLE = [
     ("deploy", "BRAIN:deploy"),
     ("secret", "BRAIN:secret"),
     ("env", "BRAIN:secret"),
+    ("nv file", "BRAIN:secret"),   # the test Mac's speech model sometimes hears the env clip as "NV file"
     ("correction", "BRAIN:correction"),
     # These two need no helper:
     ("long", "STREAM:long"),
