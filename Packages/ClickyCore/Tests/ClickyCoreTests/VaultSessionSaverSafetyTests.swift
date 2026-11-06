@@ -134,6 +134,30 @@ struct VaultSessionSaverSafetyTests {
         #expect(retry.notePath.lastPathComponent == "\(stem).md")
     }
 
+    @Test func aShotsFolderThatCannotBeMadeLeavesNoEmptyFolderAndTheRetryKeepsTheName() throws {
+        let vault = try VaultTestSupport.makeVault(withGit: true)
+        let good = try VaultTestSupport.makeShots(count: 1)
+        let sessions = vault.appendingPathComponent("_sources/sessions", isDirectory: true)
+        // The render step runs just before the shots folder is made. Putting a plain file where
+        // `<stem>/shots` goes makes that step fail with `<stem>/` already on disk.
+        let outcome = VaultSessionSaver.save(
+            input(vault: vault, project: nil, shots: good),
+            renderLog: { renderedStem in
+                let stemFolder = sessions.appendingPathComponent(renderedStem, isDirectory: true)
+                try? FileManager.default.createDirectory(at: stemFolder, withIntermediateDirectories: true)
+                try? "in the way".write(
+                    to: stemFolder.appendingPathComponent("shots"), atomically: true, encoding: .utf8)
+                return "a"
+            })
+
+        guard case .failure(.writeFailed) = outcome else { Issue.record("expected writeFailed, got \(outcome)"); return }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessions.path).isEmpty)
+
+        let retry = try VaultSessionSaver.save(
+            input(vault: vault, project: nil, shots: good), renderLog: { _ in "a" }).get()
+        #expect(retry.notePath.lastPathComponent == "\(stem).md")
+    }
+
     @Test func aFailedSaveLeavesShotFilesAlreadyInPlaceFromEarlierSavesAlone() throws {
         let vault = try VaultTestSupport.makeVault(withGit: true)
         let shots = try VaultTestSupport.makeShots(count: 1)

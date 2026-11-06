@@ -92,6 +92,8 @@ Every call is logged, one JSON line each, in `/Users/admin/standin-log/claude.js
 - `testenv exec <id> -- wc -l /Users/admin/standin-log/claude.jsonl`
 - `testenv exec <id> -- tail -3 /Users/admin/standin-log/claude.jsonl`
 
+The summary call (plain `claude -p`, no `--input-format`, prompt on stdin, plain text back) logs one line whose `stdin` is `{"kind":"summary","text":...}` and prints one plain sentence (`Asked where the save button is and about an earlier error.`), which becomes the session title. Questions use `--input-format stream-json` and log one `stdin` line per message.
+
 A line with a `stdin` field is a question sent; a line with only `argv` is a process start or a status/sign-in call.
 
 ## 7. Read what the app saved

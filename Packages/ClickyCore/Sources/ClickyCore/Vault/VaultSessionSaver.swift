@@ -100,8 +100,9 @@ public enum VaultSessionSaver {
                 pathsToCommit.append(pagePath)
             }
             if !input.questionShotFiles.isEmpty {
-                try fileManager.createDirectory(at: shotsFolder, withIntermediateDirectories: true)
+                // Set before the call: a failure after it made `<stem>/` still has to remove that folder.
                 wroteShotsFolder = true
+                try fileManager.createDirectory(at: shotsFolder, withIntermediateDirectories: true)
                 for shot in input.questionShotFiles {
                     let destination = shotsFolder.appendingPathComponent(shot.lastPathComponent)
                     if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }

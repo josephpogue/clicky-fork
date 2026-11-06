@@ -14,6 +14,7 @@ REPLY_TABLE = [
                 "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
     ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
 ]
+SUMMARY_REPLY = "Asked where the save button is and about an earlier error."   # plain-text answer to the summary call
 DEFAULT_REPLY = "I can see your screen. [POINT:none]"
 LIMIT_MESSAGE = "You've hit your limit · resets 3pm (America/New_York)"   # wording of the real CLI
 NOT_SIGNED_IN_MESSAGE = "Not logged in · Please run /login"                  # wording of the real CLI
@@ -111,6 +112,15 @@ def main():
     for index, value in enumerate(argv):
         if value == "--model" and index + 1 < len(argv):
             model = argv[index + 1]
+    if "--input-format" not in argv:
+        # The summary call: plain `-p` with the prompt on stdin, plain text back (no --input-format stream-json).
+        prompt = sys.stdin.read()
+        log({"stdin": {"kind": "summary", "text": prompt}})
+        if not signed_in():
+            print(NOT_SIGNED_IN_MESSAGE)
+            return 1
+        print(SUMMARY_REPLY)
+        return 0
     session_id = "standin-session-%d" % os.getpid()
     say({"type": "system", "subtype": "init", "session_id": session_id, "model": model, "apiKeySource": "none",
          "tools": [], "cwd": os.getcwd()})

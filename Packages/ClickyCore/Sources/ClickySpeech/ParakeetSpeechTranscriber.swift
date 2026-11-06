@@ -46,6 +46,7 @@ public final class ParakeetSpeechTranscriber: SpeechTranscriber {
             models = try await loadFromCache()
         } catch {
             // Not in the cache (first run on this Mac): fetch it once, then load.
+            // FluidAudio 0.18.2 honours this cancel: FileDownloader cancels its URLSession task, RetryPolicy's backoff sleep throws, and retries stop at 4 attempts.
             models = try await FirstResult<AsrModels>.run(
                 withinSeconds: downloadTimeoutSeconds,
                 timeoutError: SpeechError.speechModelDownloadTimedOut(seconds: downloadTimeoutSeconds),
