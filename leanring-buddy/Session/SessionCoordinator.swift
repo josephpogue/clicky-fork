@@ -870,13 +870,13 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         await MainActor.run { coordinator?.showPhase(phase) }
     }
 
-    func questionAsked(_ text: String) async {
+    func questionAsked(_ text: String, answerNumber: Int) async {
         await MainActor.run { coordinator?.showQuestion(text) }
     }
 
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
-        notesRead: [String]
+        answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double,
+        pointLabel: String?, notesRead: [String]
     ) async {
         await MainActor.run {
             coordinator?.showAnswer(
@@ -886,16 +886,17 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         }
     }
 
-    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {
+    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
         await MainActor.run { coordinator?.showAnswerText(visibleText: visibleText, provider: provider, model: model) }
     }
 
-    func checkingNotesShown() async {
+    func checkingNotesShown(answerNumber: Int) async {
         await MainActor.run { coordinator?.showCheckingNotes() }
     }
 
     func answerCutShort(
-        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+        answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
+        reason: AnswerCutReason
     ) async {
         await MainActor.run {
             coordinator?.showAnswerCutShort(
@@ -903,7 +904,7 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         }
     }
 
-    func toolCallStarted() async {
+    func toolCallStarted(answerNumber: Int) async {
         await MainActor.run { coordinator?.showToolCallStarted() }
     }
 

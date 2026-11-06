@@ -25,6 +25,7 @@ public struct GrowingAnswerChatState: Equatable, Sendable {
         case .newerQuestion: return "(Cut short by your next question.)"
         case .failed: return "(Cut short.)"
         case .stopped: return "(Stopped.)"
+        case .completedAfterNewerQuestion: return ""
         }
     }
 
@@ -32,6 +33,7 @@ public struct GrowingAnswerChatState: Equatable, Sendable {
     public static func cutShortText(_ visibleText: String, reason: AnswerCutReason) -> String {
         let trimmed = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
         let line = line(for: reason)
+        if line.isEmpty { return trimmed }
         return trimmed.isEmpty ? line : trimmed + "\n" + line
     }
 

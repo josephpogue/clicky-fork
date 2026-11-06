@@ -338,19 +338,28 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
 
     func recordTimeline(_ entry: String) { lock.lock(); timeline.append(entry); lock.unlock() }
 
-    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {
-        lock.lock(); textChanges.append(visibleText); callOrder.append("text"); lock.unlock()
+    /// The answer number each answer report carried, in order, by report kind.
+    private(set) var askedAnswerNumbers: [Int] = []
+    private(set) var textAnswerNumbers: [Int] = []
+    private(set) var cutAnswerNumbers: [Int] = []
+    private(set) var finalAnswerNumbers: [Int] = []
+
+    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+        lock.lock(); textChanges.append(visibleText); textAnswerNumbers.append(answerNumber); callOrder.append("text")
+        lock.unlock()
     }
-    func checkingNotesShown() async {
+    func checkingNotesShown(answerNumber: Int) async {
         lock.lock(); checkingNotesCount += 1; callOrder.append("checking"); lock.unlock()
     }
     func answerCutShort(
-        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+        answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
+        reason: AnswerCutReason
     ) async {
         lock.lock(); cutShorts.append((visibleText, notesRead)); cutReasons.append(reason); callOrder.append("cut")
+        cutAnswerNumbers.append(answerNumber)
         timeline.append("cut"); lock.unlock()
     }
-    func toolCallStarted() async {
+    func toolCallStarted(answerNumber: Int) async {
         lock.lock(); toolCallStartedCount += 1; lock.unlock()
     }
 
@@ -359,9 +368,10 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
         if phase == .listening { timeline.append("listening") }
         lock.unlock()
     }
-    func questionAsked(_ text: String) async {
+    func questionAsked(_ text: String, answerNumber: Int) async {
         lock.lock()
         questions.append(text)
+        askedAnswerNumbers.append(answerNumber)
         let gate = questionAskedGate
         lock.unlock()
         await gate?.pass()
@@ -370,10 +380,11 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     /// The next questionAsked call waits at this gate, which is the moment between capture and ask.
     func holdQuestionAsked(at gate: TestGate) { lock.lock(); questionAskedGate = gate; lock.unlock() }
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
-        notesRead: [String]
+        answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double,
+        pointLabel: String?, notesRead: [String]
     ) async {
         lock.lock()
+        finalAnswerNumbers.append(answerNumber)
         answers.append(Answer(spokenText: spokenText, provider: provider, model: model,
                               secondsToAnswer: secondsToAnswer, pointLabel: pointLabel))
         answerNotesRead.append(notesRead)
