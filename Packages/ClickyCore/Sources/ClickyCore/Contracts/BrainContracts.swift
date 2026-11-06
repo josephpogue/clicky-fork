@@ -89,9 +89,14 @@ public struct BrainToolServer: Sendable, Equatable {
         self.arguments = arguments
     }
 
-    /// The helper's command line: `--index <database> --folder <a> --folder <b> ...`.
+    /// The helper's command line: `--index <database> --folders-file <folders.json> --folder <a> --folder <b> ...`.
+    /// The folders file sits beside the database; the app rewrites it when the folder list changes, and the helper
+    /// re-reads it on every tool call, so a folder removed mid-session stops being searchable and readable at once.
     public static func helperArguments(indexDatabaseURL: URL, searchFolders: [URL]) -> [String] {
-        var arguments = ["--index", indexDatabaseURL.path]
+        var arguments = [
+            "--index", indexDatabaseURL.path,
+            "--folders-file", BrainServiceFolderListFile.url(besideIndexDatabase: indexDatabaseURL).path,
+        ]
         for folder in searchFolders {
             arguments += ["--folder", folder.path]
         }

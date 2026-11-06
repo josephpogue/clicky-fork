@@ -54,11 +54,15 @@ final class BrainIndexService: @unchecked Sendable {
         _ = requestRefreshOnMain()
     }
 
-    /// Brings the index up to date before a session's first question (by modification time, well under a second when
-    /// little changed). Session Start awaits it; it never throws, a failure only leaves the old index in place.
+    /// Brings the index up to date at session Start (by modification time, well under a second when little changed).
+    /// Start waits for it at most `BrainServiceStartWait.defaultSeconds`: a first build of a big folder keeps running
+    /// and later questions use what it has written (their passages are filtered by the current folder list, so a
+    /// stale index never shows a removed folder). Never throws, never hangs; a failed refresh only leaves the old index.
     func refreshForSessionStart() async {
         let run = await MainActor.run { self.requestRefreshOnMain() }
-        await waitForCompletion(of: run)
+        await BrainServiceStartWait.waitUntilDone { [self] in
+            await waitForCompletion(of: run)
+        }
     }
 
     /// The passages for one question; empty while the brain is off or nothing clears the floor.
@@ -67,10 +71,13 @@ final class BrainIndexService: @unchecked Sendable {
         let projectNames = await projectNamesForPassages()
         return await Task.detached(priority: .userInitiated) { [self] () -> [BrainPassage] in
             guard let index = openIndex() else { return [] }
+            // The list as Settings has it right now, read at question time: a folder removed a moment ago is out
+            // even while a build still holds its rows.
+            let currentSearchFolders = BrainServiceFolders.expand(paths: lockedFolderPaths())
             do {
                 return try index.passages(
                     forQuestion: question, frontAppName: frontAppName, frontWindowTitle: frontWindowTitle,
-                    projectNames: projectNames)
+                    projectNames: projectNames, searchFolders: currentSearchFolders)
             } catch {
                 return []
             }
@@ -98,7 +105,12 @@ final class BrainIndexService: @unchecked Sendable {
             (AppSettings.shared.brainSearchFolderPaths, Self.notesFolderURL())
         }
         return await Task.detached(priority: .userInitiated) { [self] () -> [String] in
-            let registryPaths = (try? openIndex()?.indexedFiles(named: "registry.md")) ?? []
+            let currentSearchFolders = BrainServiceFolders.expand(paths: lockedFolderPaths())
+            let fileReader = BrainFileReader(searchFolders: currentSearchFolders)
+            // A registry of a folder removed in Settings is not named, even while its row is still indexed.
+            let registryPaths = ((try? openIndex()?.indexedFiles(named: "registry.md")) ?? []).filter {
+                (try? fileReader.resolveReadableFile($0)) != nil
+            }
             return BrainServiceMapPaths.make(
                 notesFolder: notesFolder, searchFolders: BrainServiceFolders.expand(paths: folderPaths),
                 registryPaths: registryPaths)
@@ -116,9 +128,21 @@ final class BrainIndexService: @unchecked Sendable {
         currentSearchFolderPaths = folderPaths
         let request = coalescer.request(folders: folderPaths)
         lock.unlock()
+        // Before any build starts or queues, so a removal reaches a running session's helper at once.
+        writeFolderListFile(folderPaths: folderPaths)
         publishStatus()
         if request.shouldStartNow { startRun(folderPaths: folderPaths) }
         return request.run
+    }
+
+    /// `<data>/brain-index/folders.json`: the current list, for the helper to re-read on every tool call. Written at
+    /// every list change and every refresh. With the brain off and no index folder yet, nothing is created.
+    private func writeFolderListFile(folderPaths: [String]) {
+        let databaseURL = AppDataLocations.standard().brainIndexDatabaseURL
+        let listFileURL = BrainServiceFolderListFile.url(besideIndexDatabase: databaseURL)
+        if folderPaths.isEmpty,
+           !FileManager.default.fileExists(atPath: databaseURL.deletingLastPathComponent().path) { return }
+        try? BrainServiceFolderListFile.write(folders: BrainServiceFolders.expand(paths: folderPaths), to: listFileURL)
     }
 
     private func startRun(folderPaths: [String]) {

@@ -28,11 +28,28 @@ public final class BrainIndex: @unchecked Sendable {
     /// bm25 column weights: path 0 (unindexed), title 10, heading 5, body 1.
     static let rankExpression = "bm25(chunks, 0, 10.0, 5.0, 1.0)"
 
-    /// A passage must score at least this much (after the project boost) to go with a question. The score is
-    /// `-bm25`, so it grows with rarer matching words and with title and heading hits. Tuned on a fixture of 300
-    /// filler notes plus four real-looking ones: questions about the notes scored 12 to 35 or more, screen-only
-    /// questions built from common words scored 2 to 4. The real notes are far bigger, so the bench moves it.
-    public nonisolated(unsafe) static var passageScoreFloor: Double = 6.0
+    /// An override of the score floor, for tests. Nil (the default) means the curve `scoreFloor(forChunkCount:)`.
+    public nonisolated(unsafe) static var passageScoreFloor: Double? = nil
+    /// The floor never goes below this. A tiny corpus (the test Mac's five-chunk fixture brain) gives every word a
+    /// low rarity: its port note scores 2.7 and its release note 2.6 for their questions, while a question that
+    /// matches no word scores nothing, so 2.0 keeps those attached. From about 7 chunks the curve is above it.
+    public nonisolated(unsafe) static var minimumScoreFloor: Double = 2.0
+    /// The floor curve `a + b * ln(N)` for `N` chunks. BM25 scores grow with corpus size (idf), so one fixed floor
+    /// cannot fit a small and a large corpus. Fitted to the bench on the real notes (2026-11-06): about 14 at 27,527
+    /// chunks (all of `~/brain`) and about 11.5 at 4,680 (`~/brain/wiki`).
+    public static let scoreFloorIntercept = -0.4
+    public static let scoreFloorSlope = 1.41
+
+    /// The override when set, else the curve.
+    static func effectiveScoreFloor(override: Double?, chunkCount: Int) -> Double {
+        override ?? scoreFloor(forChunkCount: chunkCount)
+    }
+
+    /// The score a passage must reach (after the project boost) for an index of `chunkCount` chunks.
+    public static func scoreFloor(forChunkCount chunkCount: Int) -> Double {
+        guard chunkCount > 1 else { return minimumScoreFloor }
+        return max(minimumScoreFloor, scoreFloorIntercept + scoreFloorSlope * log(Double(chunkCount)))
+    }
     /// A passage below this share of the best passage's score is dropped.
     public nonisolated(unsafe) static var relativeScoreFloor: Double = 0.35
     /// Multiplier for a passage inside the project the front window names.
@@ -45,10 +62,16 @@ public final class BrainIndex: @unchecked Sendable {
     static let minimumUsefulCutCharacters = 200
     static let candidateCount = 20
 
+    /// The connection updates write through (in a read-only index, the one connection there is).
     private let database: SQLiteDatabase
+    /// The connection every read goes through. WAL lets it read the last committed index while `update` is mid-build,
+    /// so a question never waits for a build.
+    private let readDatabase: SQLiteDatabase
     private let readOnly: Bool
-    /// One caller at a time: the app updates while question handling searches.
-    private let lock = NSLock()
+    /// One update at a time.
+    private let writeLock = NSLock()
+    /// One read at a time on the read connection (a prepared statement is not shared between threads).
+    private let readLock = NSLock()
 
     /// `readOnly` is for the helper, which only searches while the app keeps the index up to date.
     public init(databaseURL: URL, readOnly: Bool = false) throws {
@@ -59,18 +82,21 @@ public final class BrainIndex: @unchecked Sendable {
                 throw BrainIndexError.databaseMissing(path: databaseURL.path)
             }
             database = try SQLiteDatabase(url: databaseURL, readOnly: true)
+            readDatabase = database
         } else {
             try FileManager.default.createDirectory(
                 at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            database = try SQLiteDatabase(url: databaseURL, readOnly: false)
-            // WAL lets the helper read while the app updates.
-            try database.execute("PRAGMA journal_mode = WAL")
-            try database.execute("PRAGMA synchronous = NORMAL")
-            try createSchemaIfNeeded()
+            let writeDatabase = try SQLiteDatabase(url: databaseURL, readOnly: false)
+            // WAL lets the helper and our own read connection read while the app updates.
+            try writeDatabase.execute("PRAGMA journal_mode = WAL")
+            try writeDatabase.execute("PRAGMA synchronous = NORMAL")
+            try Self.createSchemaIfNeeded(in: writeDatabase)
+            database = writeDatabase
+            readDatabase = try SQLiteDatabase(url: databaseURL, readOnly: true)
         }
     }
 
-    private func createSchemaIfNeeded() throws {
+    private static func createSchemaIfNeeded(in database: SQLiteDatabase) throws {
         try database.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         var storedVersion: String?
         try database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").rows { row in
@@ -108,8 +134,8 @@ public final class BrainIndex: @unchecked Sendable {
     /// or no longer under any search folder.
     @discardableResult
     public func update(searchFolders: [URL]) throws -> BrainIndexUpdateSummary {
-        lock.lock()
-        defer { lock.unlock() }
+        writeLock.lock()
+        defer { writeLock.unlock() }
         let startedAt = Date()
         // Every stored path is a resolved path, so the folders are resolved too (`/var` is `/private/var`).
         let resolvedFolders = searchFolders.map { Self.fullyResolved($0) }
@@ -164,8 +190,8 @@ public final class BrainIndex: @unchecked Sendable {
                 if let stored = storedFiles[foundFile.path], let first = stored.firstRowID, let last = stored.lastRowID {
                     try deleteChunks.run([.integer(first), .integer(last)])
                 }
-                guard let data = FileManager.default.contents(atPath: foundFile.path) else {
-                    // Unreadable now: leave it out; the next update tries again.
+                guard let data = Self.readIndexableFile(atPath: foundFile.path) else {
+                    // Unreadable now, or no longer a plain file: leave it out; the next update tries again.
                     try deleteFile.run([.text(foundFile.path)])
                     continue
                 }
@@ -200,6 +226,9 @@ public final class BrainIndex: @unchecked Sendable {
                 try insertRepository.run([.text(repositoryRoot), .text((repositoryRoot as NSString).lastPathComponent)])
             }
             summary.chunkCount = totalChunkCount
+            // N for the score floor, computed once per update; readers pick it up with the commit.
+            try database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('chunk_count', ?)")
+                .run([.text(String(totalChunkCount))])
             try database.execute("COMMIT")
         } catch {
             try? database.execute("ROLLBACK")
@@ -247,20 +276,51 @@ public final class BrainIndex: @unchecked Sendable {
         }
     }
 
+    /// Notes a file for indexing only when it is a plain file with one name: a FIFO, a socket, a device or a file
+    /// with a second hard link (which could be a link to a file outside the search folders) is left out.
     private func recordFile(
         at fileURL: URL, repositoryRoot: String?, visitedPaths: inout Set<String>, foundFiles: inout [FoundFile]
     ) {
         let path = fileURL.path
         guard !visitedPaths.contains(path) else { return }
-        guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-            let size = values.fileSize, let modificationDate = values.contentModificationDate
-        else { return }
+        // `lstat`: the path is already a resolved one, so a symlink here is a file that changed since the listing.
+        var fileStatus = stat()
+        guard lstat(path, &fileStatus) == 0, Self.isPlainSingleNameFile(fileStatus) else { return }
+        let size = Int(fileStatus.st_size)
         guard BrainFileRules.isIndexableFile(path: path, byteCount: size) else { return }
+        let modificationTime = Double(fileStatus.st_mtimespec.tv_sec) + Double(fileStatus.st_mtimespec.tv_nsec) / 1e9
         visitedPaths.insert(path)
         foundFiles.append(
-            FoundFile(
-                path: path, modificationTime: modificationDate.timeIntervalSince1970, size: size,
-                repositoryRoot: repositoryRoot))
+            FoundFile(path: path, modificationTime: modificationTime, size: size, repositoryRoot: repositoryRoot))
+    }
+
+    private static func isPlainSingleNameFile(_ fileStatus: stat) -> Bool {
+        (fileStatus.st_mode & S_IFMT) == S_IFREG && fileStatus.st_nlink == 1
+    }
+
+    /// The bytes of one indexable file, read from the descriptor the checks ran on, so a path swapped for a link or
+    /// a FIFO between the check and the read cannot put other text under this path. `O_NOFOLLOW` refuses a symlink,
+    /// `O_NONBLOCK` keeps the open of a FIFO from waiting for a writer. Nil when the file is not a plain file with
+    /// one name, is over the size cap, or cannot be read.
+    static func readIndexableFile(atPath path: String) -> Data? {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var fileStatus = stat()
+        guard fstat(descriptor, &fileStatus) == 0, isPlainSingleNameFile(fileStatus),
+            Int(fileStatus.st_size) <= BrainFileRules.maximumIndexedFileBytes
+        else { return nil }
+        var contents = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let readCount = read(descriptor, &buffer, buffer.count)
+            if readCount < 0 { return nil }
+            if readCount == 0 { break }
+            contents.append(buffer, count: readCount)
+            // The file grew after the check: still over the cap.
+            if contents.count > BrainFileRules.maximumIndexedFileBytes { return nil }
+        }
+        return contents
     }
 
     /// `realpath`, because Foundation's `resolvingSymlinksInPath` drops the `/private` prefix (`/var` stays `/var`),
@@ -280,15 +340,15 @@ public final class BrainIndex: @unchecked Sendable {
 
     /// The search behind `search_brain`: best passages first, at most `limit`.
     public func search(query: String, limit: Int) throws -> [BrainPassage] {
-        lock.lock()
-        defer { lock.unlock() }
+        readLock.lock()
+        defer { readLock.unlock() }
         return try searchLocked(query: query, limit: limit)
     }
 
     private func searchLocked(query: String, limit: Int) throws -> [BrainPassage] {
         guard let matchExpression = BrainSearchQuery.matchExpression(for: query) else { return [] }
         var passages: [BrainPassage] = []
-        try database.prepare(
+        try readDatabase.prepare(
             """
             SELECT path, heading, start_line, end_line, body, -\(Self.rankExpression) AS score
             FROM chunks WHERE chunks MATCH ? ORDER BY \(Self.rankExpression) LIMIT ?
@@ -305,12 +365,21 @@ public final class BrainIndex: @unchecked Sendable {
     /// The passages sent with a question: only those above the score floor, within the passage and size budget,
     /// boosted toward the project the front window names (`projectNames` adds the notes folder's project pages to
     /// the git repo folder names found while indexing). Empty when nothing clears the floor.
+    ///
+    /// `searchFolders` is the CURRENT folder list: a passage whose file is not readable under it (a folder removed in
+    /// Settings whose rows are still in the index, or a path that should never have been stored) is dropped. Nil skips
+    /// that check, for callers that have no list.
     public func passages(
-        forQuestion question: String, frontAppName: String?, frontWindowTitle: String?, projectNames: [String]
+        forQuestion question: String, frontAppName: String?, frontWindowTitle: String?, projectNames: [String],
+        searchFolders: [URL]? = nil
     ) throws -> [BrainPassage] {
-        lock.lock()
-        defer { lock.unlock() }
+        readLock.lock()
+        defer { readLock.unlock() }
         var candidates = try searchLocked(query: question, limit: Self.candidateCount)
+        if let searchFolders {
+            let reader = BrainFileReader(searchFolders: searchFolders)
+            candidates = candidates.filter { (try? reader.resolveReadableFile($0.path)) != nil }
+        }
         guard !candidates.isEmpty else { return [] }
 
         let allProjectNames = Set(projectNames + (try repositoryProjectNamesLocked()))
@@ -325,13 +394,14 @@ public final class BrainIndex: @unchecked Sendable {
             candidates.sort { $0.score > $1.score }
         }
 
-        guard let topScore = candidates.first?.score, topScore >= Self.passageScoreFloor else { return [] }
+        let scoreFloor = Self.effectiveScoreFloor(override: Self.passageScoreFloor, chunkCount: try storedChunkCountLocked())
+        guard let topScore = candidates.first?.score, topScore >= scoreFloor else { return [] }
         var chosen: [BrainPassage] = []
         var passagesPerFile: [String: Int] = [:]
         var charactersLeft = Self.maximumPassageCharacters
         for candidate in candidates {
             if chosen.count >= Self.maximumPassages { break }
-            if candidate.score < Self.passageScoreFloor || candidate.score < topScore * Self.relativeScoreFloor { continue }
+            if candidate.score < scoreFloor || candidate.score < topScore * Self.relativeScoreFloor { continue }
             if passagesPerFile[candidate.path, default: 0] >= Self.maximumPassagesPerFile { continue }
             var passage = candidate
             if passage.text.count > charactersLeft {
@@ -371,10 +441,10 @@ public final class BrainIndex: @unchecked Sendable {
 
     /// Absolute paths of indexed files with exactly this file name (the routing list is found as `registry.md`).
     public func indexedFiles(named fileName: String) throws -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
+        readLock.lock()
+        defer { readLock.unlock() }
         var paths: [String] = []
-        try database.prepare("SELECT path FROM files").rows { row in
+        try readDatabase.prepare("SELECT path FROM files").rows { row in
             let path = row.text(at: 0) ?? ""
             if (path as NSString).lastPathComponent.caseInsensitiveCompare(fileName) == .orderedSame { paths.append(path) }
         }
@@ -383,16 +453,32 @@ public final class BrainIndex: @unchecked Sendable {
 
     /// Folder names of the git repos found while indexing.
     public func repositoryProjectNames() throws -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
+        readLock.lock()
+        defer { readLock.unlock() }
         return try repositoryProjectNamesLocked()
     }
 
     private func repositoryProjectNamesLocked() throws -> [String] {
         var names = Set<String>()
-        try database.prepare("SELECT name FROM repositories").rows { row in
+        try readDatabase.prepare("SELECT name FROM repositories").rows { row in
             if let name = row.text(at: 0) { names.insert(name) }
         }
         return names.sorted()
+    }
+
+    /// The floor in force now: the override, or the curve at the chunk count the last update stored.
+    func currentScoreFloor() -> Double {
+        readLock.lock()
+        defer { readLock.unlock() }
+        return Self.effectiveScoreFloor(override: Self.passageScoreFloor, chunkCount: (try? storedChunkCountLocked()) ?? 0)
+    }
+
+    /// N for the score floor: the chunk count the last update stored. 0 for an index built before it was stored.
+    private func storedChunkCountLocked() throws -> Int {
+        var chunkCount = 0
+        try readDatabase.prepare("SELECT value FROM meta WHERE key = 'chunk_count'").rows { row in
+            chunkCount = Int(row.text(at: 0) ?? "") ?? 0
+        }
+        return chunkCount
     }
 }
