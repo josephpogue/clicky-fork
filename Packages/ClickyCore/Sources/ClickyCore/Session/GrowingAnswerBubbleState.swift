@@ -5,7 +5,7 @@ import Foundation
 ///
 /// The bubble hides only on the user's click or key (`userDismissed`), never on a timer. After that dismissal a
 /// later report brings it back only when it carries something new: text that arrives after a checking line or a
-/// tool call started since the dismissal (a later finding), or a final answer that differs from what had been shown.
+/// tool call started since the dismissal (a later finding). The final answer follows the same rule.
 /// Plain growth of the same sentence never re-shows it, so a click during streaming is not undone within a token.
 public struct GrowingAnswerBubbleState: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
@@ -57,7 +57,8 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
     public mutating func finalAnswerReported(_ text: String) -> Action {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .nothing }
         if isDismissed {
-            guard text != shownText else { return .nothing }
+            // The same rule as streaming: a final answer that merely grew from the text at the click does not undo it.
+            guard hasNewFindingSinceDismissal, text != shownText else { return .nothing }
         } else if isOnScreen, text == shownText, !showsCheckingLine {
             return .nothing
         }
@@ -69,11 +70,9 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         guard isOnScreen else { return }
         isOnScreen = false
         isDismissed = true
-        // A bubble that held only "Checking your notes" had no finding yet: the search it announced is still under
-        // way, so the first text after it is that search's finding and brings the bubble back.
-        let heldOnlyTheCheckingLine = showsCheckingLine
-            && shownText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        hasNewFindingSinceDismissal = heldOnlyTheCheckingLine
+        // A bubble that showed "Checking your notes" (alone or under text) had no finding yet: the search it announced
+        // is still under way, so the next text that differs from what was shown is that search's finding.
+        hasNewFindingSinceDismissal = showsCheckingLine
         showsCheckingLine = false
     }
 

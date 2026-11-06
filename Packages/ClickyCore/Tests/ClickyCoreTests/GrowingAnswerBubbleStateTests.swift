@@ -73,13 +73,12 @@ struct GrowingAnswerBubbleStateTests {
             == .show(text: "One. Two. Three. Four.", showsCheckingLine: false))
     }
 
-    @Test func clickThenMoreTextThenDifferentFinalShowsTheFinal() {
+    @Test func clickThenMoreTextThenDifferentFinalOnAPlainAnswerStaysHidden() {
         var state = GrowingAnswerBubbleState()
         _ = state.textReported("One.")
         state.userDismissed()
         _ = state.textReported("One. Two.")
-        #expect(state.finalAnswerReported("One. Two. Three.")
-            == .show(text: "One. Two. Three.", showsCheckingLine: false))
+        #expect(state.finalAnswerReported("One. Two. Three.") == .nothing)
     }
 
     @Test func dismissedThenSameFinalAnswerStaysHidden() {
@@ -89,10 +88,18 @@ struct GrowingAnswerBubbleStateTests {
         #expect(state.finalAnswerReported("It is Tuesday.") == .nothing)
     }
 
-    @Test func dismissedThenDifferentFinalAnswerShowsAgain() {
+    @Test func dismissedThenDifferentFinalAnswerWithNoNewFindingStaysHidden() {
         var state = GrowingAnswerBubbleState()
         _ = state.textReported("It is Tuesday.")
         state.userDismissed()
+        #expect(state.finalAnswerReported("It is Tuesday, the 4th.") == .nothing)
+    }
+
+    @Test func dismissedThenToolCallThenDifferentFinalShowsAgain() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("It is Tuesday.")
+        state.userDismissed()
+        state.toolCallStartedReported()
         #expect(state.finalAnswerReported("It is Tuesday, the 4th.") == .show(text: "It is Tuesday, the 4th.", showsCheckingLine: false))
     }
 
@@ -139,11 +146,76 @@ struct GrowingAnswerBubbleStateTests {
         #expect(state.finalAnswerReported("   ") == .nothing)
     }
 
-    @Test func clickOnTextWithTheCheckingLineStillNeedsALaterFindingToReshow() {
+    @Test func clickOnTextWithTheCheckingLineReshowsAtTheNextDifferingText() {
         var state = GrowingAnswerBubbleState()
         _ = state.textReported("Let me look.")
         _ = state.checkingLineReported()
         state.userDismissed()
-        #expect(state.textReported("Let me look. And") == .nothing)
+        #expect(state.textReported("Let me look.") == .nothing)
+        #expect(state.textReported("Let me look. Found it.")
+            == .show(text: "Let me look. Found it.", showsCheckingLine: false))
+    }
+
+    // Wave 3 V4: when a dismissed bubble comes back, one row per scenario, each from a fresh state.
+    @Test func row1_plainStreamClickMoreTextFinal_hiddenThroughout() {
+        var state = GrowingAnswerBubbleState()
+        #expect(state.textReported("It is") == .show(text: "It is", showsCheckingLine: false))
+        state.userDismissed()
+        #expect(state.textReported("It is Tuesday") == .nothing)
+        #expect(state.finalAnswerReported("It is Tuesday.") == .nothing)
+    }
+
+    @Test func row2_plainStreamClickToolCallFindingFinal_reshowsAtTheFinding() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("Let me check.")
+        state.userDismissed()
+        state.toolCallStartedReported()
+        #expect(state.textReported("Let me check. Your lease ends May 1.")
+            == .show(text: "Let me check. Your lease ends May 1.", showsCheckingLine: false))
+        #expect(state.finalAnswerReported("Let me check. Your lease ends May 1.") == .nothing)
+    }
+
+    @Test func row3_checkingLineOnlyClickFindingText_reshows() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.checkingLineReported()
+        state.userDismissed()
+        #expect(state.textReported("Your lease ends May 1.")
+            == .show(text: "Your lease ends May 1.", showsCheckingLine: false))
+    }
+
+    @Test func row4_textPlusCheckingLineClickFindingText_reshows() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("Let me check.")
+        _ = state.checkingLineReported()
+        state.userDismissed()
+        #expect(state.textReported("Let me check. Your lease ends May 1.")
+            == .show(text: "Let me check. Your lease ends May 1.", showsCheckingLine: false))
+    }
+
+    @Test func row5_textPlusCheckingLineClickFinalWithTheSameText_staysHidden() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("Let me check.")
+        _ = state.checkingLineReported()
+        state.userDismissed()
+        #expect(state.finalAnswerReported("Let me check.") == .nothing)
+    }
+
+    @Test func row6_noClick_showsEveryStepAndTheFinalShowsTheFirstLines() {
+        var state = GrowingAnswerBubbleState()
+        #expect(state.textReported("Let me") == .show(text: "Let me", showsCheckingLine: false))
+        #expect(state.textReported("Let me check.") == .update(text: "Let me check.", showsCheckingLine: false))
+        #expect(state.checkingLineReported() == .update(text: "Let me check.", showsCheckingLine: true))
+        #expect(state.textReported("Let me check. Found it.")
+            == .update(text: "Let me check. Found it.", showsCheckingLine: false))
+        #expect(state.finalAnswerReported("Let me check. Found it.") == .nothing)
+        #expect(state.finalAnswerReported("Found it.") == .update(text: "Found it.", showsCheckingLine: false))
+    }
+
+    @Test func row7_clickThenANewQuestion_showsTheNewAnswer() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("Old answer.")
+        state.userDismissed()
+        state.reset()
+        #expect(state.textReported("New") == .show(text: "New", showsCheckingLine: false))
     }
 }
