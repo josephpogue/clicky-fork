@@ -19,16 +19,28 @@ public enum SessionSignalOutcome: Equatable, Sendable {
 public protocol SessionFlowOutput: Sendable {
     func phaseChanged(_ phase: SessionFlowPhase) async
     func questionAsked(_ text: String) async
-    /// `spokenText` has the POINT tag removed. `pointLabel` is nil when the answer pointed nowhere.
+    /// The answer is complete (or was cut short). `spokenText` has the POINT tag removed. `pointLabel` is nil when
+    /// the answer pointed nowhere. `notesRead` are the files the answer drew on (passages sent and tool results).
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
+        notesRead: [String]
     ) async
+    /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag hidden.
+    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async
+    /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
+    func checkingNotesShown() async
     func noticeShown(_ text: String) async
     func usageLimitOffered(message: String, switchTo: ProviderID) async
     func usageLimitOfferCleared() async
     func providerChanged(to provider: ProviderID, model: String) async
     /// `globalPoint` is in AppKit global coordinates on the display whose frame is `displayFrameInPoints`.
     func pointerRequested(globalPoint: CGPoint, displayFrameInPoints: CGRect, label: String?) async
+}
+
+/// Defaults so an output that does not show streaming yet still compiles; the final answer still arrives.
+public extension SessionFlowOutput {
+    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {}
+    func checkingNotesShown() async {}
 }
 
 /// The outside world the flow works through: the providers, the microphone's speech, the screen and the log.
@@ -44,6 +56,14 @@ public struct SessionQuestionFlowDependencies: Sendable {
     public var shotsDirectory: URL
     public var timeZone: TimeZone
     public var now: @Sendable () -> Date
+    /// The passages from the user's notes for a question, found on the Mac. Always empty while the brain is off.
+    public var findPassages: @Sendable (_ question: String, _ frontAppName: String?, _ frontWindowTitle: String?) async -> [BrainPassage]
+    /// True when at least one search folder is set at session start (passages and, where supported, the tools).
+    public var isBrainOn: Bool
+    /// Paths of the maps the instructions name (the knowledge base index, the routing list), read at session start.
+    public var brainMapPaths: @Sendable () async -> [String]
+    /// The stronger model and effort for a "dig deeper" question; nil keeps the normal model for it.
+    public var digDeeperRequest: (@Sendable (ProviderID) async -> AnswerRequest)?
 
     public init(
         makeProvider: @escaping @Sendable (ProviderID) -> AnswerProvider,
@@ -55,7 +75,11 @@ public struct SessionQuestionFlowDependencies: Sendable {
         logEvent: @escaping @Sendable (SessionEvent) async -> Void,
         shotsDirectory: URL,
         timeZone: TimeZone,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        findPassages: @escaping @Sendable (String, String?, String?) async -> [BrainPassage] = { _, _, _ in [] },
+        isBrainOn: Bool = false,
+        brainMapPaths: @escaping @Sendable () async -> [String] = { [] },
+        digDeeperRequest: (@Sendable (ProviderID) async -> AnswerRequest)? = nil
     ) {
         self.makeProvider = makeProvider
         self.model = model
@@ -67,6 +91,10 @@ public struct SessionQuestionFlowDependencies: Sendable {
         self.shotsDirectory = shotsDirectory
         self.timeZone = timeZone
         self.now = now
+        self.findPassages = findPassages
+        self.isBrainOn = isBrainOn
+        self.brainMapPaths = brainMapPaths
+        self.digDeeperRequest = digDeeperRequest
     }
 }
 
@@ -273,7 +301,7 @@ public actor SessionQuestionFlow {
         )))
         await output.answerReceived(
             spokenText: parsed.spokenText, provider: providerID, model: answer.model,
-            secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel
+            secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel, notesRead: answer.notesRead
         )
         if let mapped = PointMapper.globalPoint(for: parsed, shots: group.shots) {
             await output.pointerRequested(

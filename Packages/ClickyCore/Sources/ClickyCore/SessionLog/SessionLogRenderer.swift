@@ -101,6 +101,9 @@ public enum SessionLogRenderer {
                 if screenshotIndexesOnFocusLines.contains(index) || questionShotGroupIDs.contains(shotGroupID) { break }
                 let images = imageMarkdown(forGroupID: shotGroupID)
                 if !images.isEmpty { lines.append(entry(clock, "Screen changed.", images: images)) }
+            case .digDeeperAsked, .passagesAttached, .brainToolCalled, .answerTiming:
+                // Rendered by the brain log slice.
+                break
             }
         }
 

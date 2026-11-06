@@ -202,7 +202,8 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     /// The next questionAsked call waits at this gate, which is the moment between capture and ask.
     func holdQuestionAsked(at gate: TestGate) { lock.lock(); questionAskedGate = gate; lock.unlock() }
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
+        notesRead: [String]
     ) async {
         lock.lock()
         answers.append(Answer(spokenText: spokenText, provider: provider, model: model,

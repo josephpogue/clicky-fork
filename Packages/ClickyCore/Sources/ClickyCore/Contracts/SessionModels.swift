@@ -12,6 +12,15 @@ public enum SessionEventKind: Codable, Equatable, Sendable {
     case providerSwitched(from: ProviderID, to: ProviderID)
     case screenshot(shotGroupID: Int)
     case sessionStopped
+    /// Logged just before a question whose transcript started with "dig deeper"; `effort` is nil when unchanged.
+    case digDeeperAsked(model: String, effort: String?)
+    /// Files of the passages found on the Mac and sent with the question that follows.
+    case passagesAttached(paths: [String])
+    /// One brain tool call inside an answer: `tool` is the tool name, `argument` the query or path.
+    case brainToolCalled(tool: String, argument: String)
+    /// Timing of the answer that follows, for measuring: seconds to the first text (nil when none came early),
+    /// how many brain tool calls it made, and whether it was cut short.
+    case answerTiming(secondsToFirstText: Double?, toolCallCount: Int, wasCutShort: Bool)
 }
 
 /// A log event with the time it happened.

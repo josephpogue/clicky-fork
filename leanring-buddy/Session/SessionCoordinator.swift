@@ -729,7 +729,8 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
     }
 
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
+        notesRead: [String]
     ) async {
         await MainActor.run {
             coordinator?.showAnswer(
