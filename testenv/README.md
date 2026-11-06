@@ -43,7 +43,7 @@ Screen controls have identifiers. Click by text for the menu panel and by identi
 
 Use `D read` to see the real names on the current screen; wait for a control with `D wait` before clicking it.
 
-The start/stop state shows in the menu-bar icon (a red dot while a session runs). The pointer and its labels are drawn by the app in a transparent full-screen window: they show in `testenv shot` and not in `D read`.
+The start/stop state shows in the menu-bar icon (an amber ring while it starts, a red dot while it runs). While it starts, the panel button reads `Starting...` and pressing it cancels; while it stops, it reads `Stopping...` and is disabled. Sessions does not offer Save while a session runs. The pointer and its labels are drawn by the app in a transparent full-screen window: they show in `testenv shot` and not in `D read`.
 
 ## 4. Ask a question with the right Command key
 

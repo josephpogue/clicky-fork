@@ -239,6 +239,20 @@ final class SessionCoordinator: ObservableObject {
             return
         }
 
+        // 4b. Apple Speech needs its own Speech Recognition permission. Ask now, while nothing is on,
+        // so the prompt never lands in the middle of the first question.
+        if usesAppleSpeech {
+            advanceStart(to: .waitingForSpeechRecognitionPermission)
+            guard let isSpeechRecognitionGranted = await CancellableWait.result(of: { await AppleSpeechTranscriber.requestAuthorization() }) else {
+                await discardStart(failure: nil)
+                return
+            }
+            if !isSpeechRecognitionGranted {
+                await discardStart(failure: "Turn on Speech Recognition for Clicky Fork in System Settings, under Privacy and Security, then start the session again.")
+                return
+            }
+        }
+
         // 5. The log and the provider. The provider starts its helper process; it reads no screen or sound.
         advanceStart(to: .startingProvider(providerName: providerName))
         let startedSessionID: String

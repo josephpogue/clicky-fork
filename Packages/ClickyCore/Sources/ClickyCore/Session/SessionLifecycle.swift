@@ -15,6 +15,7 @@ public enum SessionStartStep: Equatable, Sendable {
     case preparingSessionLog
     case gettingSpeechReady
     case waitingForMicrophonePermission
+    case waitingForSpeechRecognitionPermission
     case startingProvider(providerName: String)
 
     public var statusText: String {
@@ -22,6 +23,7 @@ public enum SessionStartStep: Equatable, Sendable {
         case .preparingSessionLog: return "Getting the session log ready"
         case .gettingSpeechReady: return "Getting speech ready"
         case .waitingForMicrophonePermission: return "Waiting for microphone permission"
+        case .waitingForSpeechRecognitionPermission: return "Waiting for speech recognition permission"
         case .startingProvider(let providerName): return "Starting \(providerName)"
         }
     }
