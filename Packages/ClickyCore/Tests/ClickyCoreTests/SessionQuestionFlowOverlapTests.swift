@@ -363,7 +363,34 @@ struct SessionQuestionFlowOverlapTests {
         #expect(kinds.contains(.answerTiming(secondsToFirstText: 0.4, toolCallCount: 0, wasCutShort: false)))
         #expect(!kinds.contains(.answerTiming(secondsToFirstText: 0.4, toolCallCount: 0, wasCutShort: true)))
         #expect(harness.output.answers.map(\.spokenText) == ["Second."])
-        #expect(harness.output.cutShorts.isEmpty)
+        // Still one ended report, so the app pairs it with the card it retired (and not a later answer's report).
+        #expect(harness.output.cutShorts.map(\.visibleText) == ["The whole answer."])
+        #expect(harness.output.cutReasons == [.newerQuestion])
+    }
+
+    @Test func anAnswerThatFailsAfterANewerQuestionEndedItStillReportsOnceWithNoNotice() async throws {
+        let harness = try await startedHarness(questions: ["first question", "second question", "third question"])
+        harness.claude.scriptStreams([
+            Stream(
+                progress: [.textSoFar("Partial one")], pausesAfterProgress: true,
+                failureAfterProgress: .failed(message: "Claude stopped before answering.")
+            ),
+            Stream(progress: [.textSoFar("Partial two")], pausesAfterProgress: true),
+            Stream(progress: [.textSoFar("Third.")], finalText: "Third."),
+        ])
+        let first = Task { await harness.askQuestion() }
+        try await waitUntil { harness.output.textChanges.count >= 1 }
+        let second = Task { await harness.askQuestion() }
+        _ = await first.value
+        try await waitUntil { harness.output.textChanges.count >= 2 }
+        await harness.askQuestion()
+        _ = await second.value
+
+        // One report per ended answer, in question order: the failed first (no text known) then the cut second.
+        #expect(harness.output.cutShorts.map(\.visibleText) == ["", "Partial two"])
+        #expect(harness.output.cutReasons == [.newerQuestion, .newerQuestion])
+        #expect(harness.output.notices.isEmpty)
+        #expect(harness.output.answers.map(\.spokenText) == ["Third."])
     }
 
     @Test func anAnswerCutByANewerQuestionIsStillLoggedAsCutShort() async throws {

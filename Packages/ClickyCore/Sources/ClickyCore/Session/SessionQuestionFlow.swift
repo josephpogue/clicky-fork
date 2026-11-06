@@ -41,6 +41,9 @@ public protocol SessionFlowOutput: Sendable {
     func checkingNotesShown() async
     /// An answer ended before it was complete. `visibleText` is what had arrived; the app finishes the chat message
     /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own).
+    /// Sent exactly once, in question order, for every answer a newer question ended (also when that answer then
+    /// completed anyway or failed, with an empty `visibleText` when nothing is known), because the app pairs each
+    /// report with the oldest answer it retired. Never sent after Stop began.
     func answerCutShort(
         visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
     ) async
@@ -521,7 +524,9 @@ public actor SessionQuestionFlow {
         )))
         // The images, passages and tool results of a cut answer stayed in the conversation, so they count.
         recordTurnInBudget(turn, answer: answer)
-        guard answer.wasCutShort, !isStopping, !isFinished else { return }
+        // Every answer a newer question ended reports once, even one that completed after the stop, so the app's
+        // pairing of reports to retired answers stays in step.
+        guard !isStopping, !isFinished else { return }
         await output.answerCutShort(
             visibleText: StreamingAnswerText.visible(rawTextSoFar: answer.text).visibleText,
             provider: providerID, model: answer.model, notesRead: notesRead, reason: .newerQuestion
@@ -603,7 +608,16 @@ public actor SessionQuestionFlow {
         await noteEvent(SessionEvent(time: dependencies.now(), kind: .answerFailed(
             message: notice, provider: providerID, model: model, usageLimitReached: isUsageLimit
         )))
-        guard showsNotice else { return }
+        guard showsNotice else {
+            // A newer question already replaced this answer: no notice, but its one ended report still goes out so
+            // the app's pairing of reports to retired answers stays in step (it keeps the text it already has).
+            if !isStopping, !isFinished {
+                await output.answerCutShort(
+                    visibleText: "", provider: providerID, model: model, notesRead: notesRead, reason: .newerQuestion
+                )
+            }
+            return
+        }
         if let streamedText = streamingAnswer?.visibleText, !streamedText.isEmpty {
             streamingAnswer = nil
             await output.answerCutShort(
