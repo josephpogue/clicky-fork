@@ -16,11 +16,16 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
   - Acceptance: When the question key is pressed together with another key, the app shall not start a question.
 - **Answers about my screen:** As a user, I want answers that use what is on my screen, so that I get help with what I am doing right now.
   - Acceptance: When a question is sent, the app shall include the current view of every display.
-  - Acceptance: When an answer arrives, the app shall show it as text in the chat window.
+  - Acceptance: When an answer arrives and text answers are on, the app shall show it as text beside the cursor.
+  - Acceptance: When the user clicks or types after an answer appears, the app shall hide the answer text.
   - Acceptance: When the user asks about something seen earlier in the session, the app shall include the view from that moment.
 - **Show me where:** As a user, I want to be shown where on the screen to look or click, so that I can follow the guidance without searching for it.
   - Acceptance: When an answer refers to a spot on the screen, the app shall move a pointer to that spot.
   - Acceptance: When the spot is on another display, the app shall point on that display.
+- **Hear it or read it:** As a user, I want to choose whether answers are spoken, shown as text, or both, so that I can take them in the way that suits what I am doing.
+  - Acceptance: When the user opens Settings, the app shall offer spoken answers, text answers, or both.
+  - Acceptance: When spoken answers are on, the app shall read each answer aloud.
+  - Acceptance: When the user asks a new question while an answer is being read, the app shall stop reading.
 - **Short answers first:** As a user, I want short answers unless I ask for more, so that I can take them in at a glance while I work.
   - Acceptance: When the user asks a question, the app shall answer in one or two sentences.
   - Acceptance: When the user asks it to explain more, the app shall give the longer answer.
@@ -44,6 +49,8 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 
 - Sessions start and stop only by the user's action; the app never launches at login.
 - The question key is right Command by default.
+- No window opens during a session unless the user opens it; the chat window holding the whole conversation opens only from the menu-bar panel.
+- Spoken answers use the voices built into macOS.
 - Screenshots, speech-to-text, change detection and cleanup run on the Mac with no AI request.
 - The app does not read text off screenshots.
 - The only AI requests are one per question and one optional text-only summary at Stop.
@@ -69,5 +76,4 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 ## Later
 
 - Clicking and typing for the user.
-- Spoken answers.
 - Other people installing it with their own Claude or ChatGPT login, once that use is confirmed to fit Anthropic's and OpenAI's terms.
