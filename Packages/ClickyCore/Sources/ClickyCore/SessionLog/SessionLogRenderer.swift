@@ -101,9 +101,23 @@ public enum SessionLogRenderer {
                 if screenshotIndexesOnFocusLines.contains(index) || questionShotGroupIDs.contains(shotGroupID) { break }
                 let images = imageMarkdown(forGroupID: shotGroupID)
                 if !images.isEmpty { lines.append(entry(clock, "Screen changed.", images: images)) }
-            case .digDeeperAsked, .passagesAttached, .brainToolCalled, .answerTiming:
-                // Rendered by the brain log slice.
-                break
+            case .digDeeperAsked(let model, let effort):
+                let effortPart = effort.map { ", \(SessionLogText.singleLine($0)) effort" } ?? ""
+                lines.append("- \(clock) Dig deeper on \(SessionLogText.singleLine(model))\(effortPart).")
+            case .passagesAttached(let paths):
+                if !paths.isEmpty {
+                    lines.append("- \(clock) Notes attached: \(paths.map { SessionLogText.singleLine($0) }.joined(separator: ", ")).")
+                }
+            case .brainToolCalled(let tool, let argument):
+                let plainArgument = SessionLogText.singleLine(argument)
+                if tool == BrainToolName.searchBrain.rawValue {
+                    lines.append("- \(clock) Searched notes: \"\(plainArgument)\".")
+                } else if tool == BrainToolName.readBrainFile.rawValue {
+                    lines.append("- \(clock) Read note: \(plainArgument).")
+                }
+            case .answerTiming(_, _, let wasCutShort):
+                // Timing numbers are not for the reader; only a cut-short answer is worth a line.
+                if wasCutShort { lines.append("- \(clock) Answer cut short.") }
             }
         }
 

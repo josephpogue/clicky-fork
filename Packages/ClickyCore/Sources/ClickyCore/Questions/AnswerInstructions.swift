@@ -33,4 +33,55 @@ public enum AnswerInstructions {
     - The user asks how to commit in Xcode: "Open the Source Control menu at the top and choose Commit, or press command option C. [POINT:285,11:source control:screen1]"
     - The element is on screen 2: "That is on your other monitor, in the Terminal window. [POINT:400,300:terminal:screen2]"
     """
+
+    /// How much of the user's notes the AI can see for this question.
+    public enum BrainAccess: Equatable, Sendable {
+        /// No search folders: Clicky behaves exactly as before.
+        case off
+        /// The question carries note passages, and the AI has no tools.
+        case passagesOnly
+        /// The question carries note passages and the AI can search and read the notes itself.
+        /// `mapPaths` are overview files it should read first when the passages do not cover the question.
+        case passagesAndTools(mapPaths: [String])
+    }
+
+    /// The instructions for a question, with a "Notes:" section added when the user's notes are in play.
+    public static func questionInstructions(brainAccess: BrainAccess) -> String {
+        let notesSection: String
+        switch brainAccess {
+        case .off:
+            return questionInstructions
+        case .passagesOnly:
+            notesSection = commonNotesRules + """
+
+            - When the screen and the notes you were given do not answer the question, say in a few words that the notes you were given do not cover it, and answer only what you know for certain.
+            """
+        case .passagesAndTools(let mapPaths):
+            var toolRules = """
+
+            - You have two tools, search_brain and read_brain_file, over the user's notes and project files. When the screen and the notes you were given do not answer the question, first say in a few words that you are checking and what, for example "Let me check your notes for the demo port.", then search. Search as much as you need to be accurate.
+            - When a finding changes something you already said, start that sentence with "Correction:". Keep each part to one or two sentences unless the user asked for more.
+            - When the question begins with "dig deeper", search thoroughly and give the fuller answer.
+            """
+            if !mapPaths.isEmpty {
+                toolRules += "\n- When the notes given do not cover the question, read these map files first: \(mapPaths.joined(separator: ", "))."
+            }
+            notesSection = commonNotesRules + toolRules
+        }
+
+        var instructions = questionInstructions.replacingOccurrences(of: "Images:\n", with: notesSection + "\n\nImages:\n")
+        // With notes in play the tag still goes at the end, but a "Correction:" part may carry its own earlier tag.
+        instructions = instructions.replacingOccurrences(
+            of: "add a tag at the very end of your answer, after your sentences.",
+            with: "add a tag at the end of the answer, after your sentences. A tag may come earlier only inside a \"Correction:\" part."
+        )
+        return instructions
+    }
+
+    private static let commonNotesRules = """
+    Notes:
+    - Notes from the user's own files may come with the question. Answer from the screen and those notes first.
+    - Never state a guess as fact. Say what you know for certain, and say plainly what you are unsure of.
+    - Never put file paths or file names in the answer text, because the chat lists the notes you read.
+    """
 }

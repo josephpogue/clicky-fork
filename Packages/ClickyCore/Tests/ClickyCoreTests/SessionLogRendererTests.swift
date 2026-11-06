@@ -165,4 +165,30 @@ struct SessionLogRendererTests {
         #expect(rendered.contains("- 14:02:11 Finder.\n"))
         #expect(!rendered.contains("Screen changed"))
     }
+
+    @Test func brainEventsRenderTheirLines() {
+        let events = [
+            event("14:02:10", .sessionStarted),
+            event("14:02:11", .digDeeperAsked(model: "opus", effort: "high")),
+            event("14:02:12", .digDeeperAsked(model: "opus", effort: nil)),
+            event("14:02:13", .passagesAttached(paths: ["/b/a.md", "/b/c.md"])),
+            event("14:02:14", .passagesAttached(paths: [])),
+            event("14:02:15", .brainToolCalled(tool: "search_brain", argument: "demo\nport")),
+            event("14:02:16", .brainToolCalled(tool: "read_brain_file", argument: "/b/a.md")),
+            event("14:02:17", .answerTiming(secondsToFirstText: 0.8, toolCallCount: 2, wasCutShort: false)),
+            event("14:02:18", .answerTiming(secondsToFirstText: nil, toolCallCount: 0, wasCutShort: true)),
+        ]
+        let rendered = SessionLogRenderer.render(
+            metadata: sampleMetadata(), events: events, shotGroups: [],
+            timeZone: Support.newYork, shotLink: defaultLink
+        )
+        #expect(rendered.contains("- 14:02:11 Dig deeper on opus, high effort.\n"))
+        #expect(rendered.contains("- 14:02:12 Dig deeper on opus.\n"))
+        #expect(rendered.contains("- 14:02:13 Notes attached: /b/a.md, /b/c.md.\n"))
+        #expect(!rendered.contains("14:02:14"))
+        #expect(rendered.contains("- 14:02:15 Searched notes: \"demo port\".\n"))
+        #expect(rendered.contains("- 14:02:16 Read note: /b/a.md.\n"))
+        #expect(!rendered.contains("14:02:17"))
+        #expect(rendered.contains("- 14:02:18 Answer cut short.\n"))
+    }
 }

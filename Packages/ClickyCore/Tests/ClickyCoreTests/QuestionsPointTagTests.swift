@@ -5,6 +5,12 @@ import Testing
 
 @Suite("Point tag parser")
 struct QuestionsPointTagParserTests {
+    @Test func removesTagsFromBothACorrectionPartAndTheEnd() {
+        let result = PointTagParser.parse("Open Gear. [POINT:1,2:gear:screen1] Correction: it is Menu. [POINT:3,4:menu:screen1]")
+        #expect(result.spokenText == "Open Gear. Correction: it is Menu.")
+        #expect(result.coordinate == CGPoint(x: 3, y: 4))
+    }
+
     @Test func parsesTagWithLabelAndScreen() {
         let result = PointTagParser.parse("Click Save. [POINT:1180,40:save button:screen2]")
         #expect(result.spokenText == "Click Save.")
