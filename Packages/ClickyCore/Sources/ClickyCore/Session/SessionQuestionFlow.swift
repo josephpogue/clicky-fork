@@ -379,7 +379,7 @@ public actor SessionQuestionFlow {
             await showAnswer(
                 answer, for: turn, group: currentGroup, provider: askedProviderID,
                 eventsInContextNote: eventsInContextNote, notesRead: notesRead,
-                hasStreamedPointer: hasStreamedPointer
+                hasStreamedPointer: hasStreamedPointer, serial: serial
             )
         } catch let failure as ProviderFailure {
             guard !isFinished else { return }
@@ -466,7 +466,7 @@ public actor SessionQuestionFlow {
 
     private func showAnswer(
         _ answer: ProviderAnswer, for turn: QuestionTurn, group: ShotGroup, provider providerID: ProviderID,
-        eventsInContextNote: Int, notesRead: [String], hasStreamedPointer: Bool
+        eventsInContextNote: Int, notesRead: [String], hasStreamedPointer: Bool, serial: Int
     ) async {
         let parsed = PointTagParser.parse(answer.text)
         // An answer with nothing to say once the tag is gone (an unparsed reply, or only [POINT:none]) is a
@@ -491,7 +491,8 @@ public actor SessionQuestionFlow {
             spokenText: parsed.spokenText, provider: providerID, model: answer.model,
             secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead
         )
-        if !hasStreamedPointer, let mapped = PointMapper.globalPoint(for: parsed, shots: group.shots) {
+        // A newer question may have begun while the answer was logged and shown; its pointer must not be moved.
+        if !hasStreamedPointer, isCurrent(serial), let mapped = PointMapper.globalPoint(for: parsed, shots: group.shots) {
             await output.pointerRequested(
                 globalPoint: mapped.point, displayFrameInPoints: mapped.shot.displayFrameInPoints, label: pointLabel
             )
