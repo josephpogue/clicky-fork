@@ -4,6 +4,8 @@ import Testing
 
 @Suite("Session question flow: nothing reaches the app after Stop began")
 struct SessionQuestionFlowAfterStopTests {
+    private typealias Stream = FakeAnswerProvider.ScriptedStream
+
     private func startedHarness(questions: [String]) async throws -> FlowHarness {
         let harness = FlowHarness(questions: questions)
         try await harness.flow.begin()
@@ -76,6 +78,80 @@ struct SessionQuestionFlowAfterStopTests {
         #expect(harness.output.providerChanges.isEmpty)
         #expect(harness.output.offerClearCount == 0)
         #expect(logEndsWithStop(harness))
+    }
+
+    @Test func aSwitchThatStopInterruptsIsLoggedBeforeTheStopLine() async throws {
+        let harness = try await startedHarness(questions: ["first"])
+        await harness.askQuestion()
+        let endGate = TestGate()
+        harness.claude.holdNextEnd(at: endGate)
+
+        let switching = Task { await harness.flow.switchProvider(to: .chatgpt) }
+        await endGate.waitUntilReached()
+        let stopping = Task { await harness.flow.finish(summaryEnabled: true) }
+        for _ in 0..<200 where harness.chatgpt.summaries.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        endGate.open()
+        await switching.value
+        _ = await stopping.value
+
+        let kinds = harness.log.kinds
+        let switchIndex = try #require(kinds.firstIndex(of: .providerSwitched(from: .claude, to: .chatgpt)))
+        let stopIndex = try #require(kinds.firstIndex(of: .sessionStopped))
+        #expect(switchIndex < stopIndex)
+        #expect(logEndsWithStop(harness))
+    }
+
+    // MARK: Stop while a new question is announcing itself
+
+    /// A new question ends a running answer; Stop lands while the new question's listening report is still going out.
+    /// Stop stops the old answer itself, so the new question's own stop of it must not run again (on ChatGPT a second
+    /// stop ends the summary's process).
+    @Test func stopDuringANewQuestionsListeningReportStopsTheOldAnswerOnlyOnce() async throws {
+        let harness = try await startedHarness(questions: ["first question", "second question"])
+        harness.claude.scriptStreams([Stream(progress: [.textSoFar("Partial answer")], pausesAfterProgress: true)])
+        let first = Task { await harness.askQuestion() }
+        for _ in 0..<200 where harness.output.textChanges.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        let listeningGate = TestGate()
+        harness.output.holdNextPhaseChange(to: .listening, at: listeningGate)
+
+        let tap = Task { await harness.flow.handle(.questionStarted(at: FlowHarness.startTime.addingTimeInterval(5))) }
+        await listeningGate.waitUntilReached()
+        _ = await harness.flow.finish(summaryEnabled: false)
+        let stopsByStop = harness.claude.stopRequestCount
+        listeningGate.open()
+        _ = await tap.value
+        _ = await first.value
+        // Room for the new question's stop task to run, if it were going to.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(stopsByStop == 1)
+        #expect(harness.claude.stopRequestCount == 1)
+        #expect(logEndsWithStop(harness))
+    }
+
+    /// The old answer's stop does not wait for the new question's log line: a slow log write never keeps the ended
+    /// answer running.
+    @Test func aSlowQuestionStartedLogWriteDoesNotHoldTheOldAnswersStop() async throws {
+        let harness = try await startedHarness(questions: ["first question", "second question"])
+        harness.claude.scriptStreams([
+            Stream(progress: [.textSoFar("Partial answer")], pausesAfterProgress: true),
+            Stream(progress: [.textSoFar("Second answer.")], finalText: "Second answer."),
+        ])
+        let first = Task { await harness.askQuestion() }
+        for _ in 0..<200 where harness.output.textChanges.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        let logGate = TestGate()
+        harness.logHold.holdNextWrite(where: { $0 == .questionStarted }, at: logGate)
+
+        let tap = Task { await harness.flow.handle(.questionStarted(at: FlowHarness.startTime.addingTimeInterval(5))) }
+        await logGate.waitUntilReached()
+        for _ in 0..<200 where harness.claude.stopRequestCount == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        let stoppedWhileTheLogWriteWasHeld = harness.claude.stopRequestCount == 1
+        logGate.open()
+        _ = await tap.value
+        _ = await first.value
+
+        #expect(stoppedWhileTheLogWriteWasHeld)
+        _ = await harness.flow.finish(summaryEnabled: false)
     }
 
     // MARK: A phase change after Stop

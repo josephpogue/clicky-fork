@@ -364,10 +364,15 @@ public final class BrainIndex: @unchecked Sendable {
         let wantedCount = max(wantedCount, 1)
         let pageSize = wantedCount * Self.overFetchFactor
         var readable: [BrainPassage] = []
+        // Each page is its own statement, so an index update committing between two pages can shift rows by one: a
+        // passage seen on an earlier page is not taken twice.
+        var takenPassageKeys = Set<String>()
         var offset = 0
         while readable.count < wantedCount {
             let page = try searchLocked(query: query, limit: pageSize, offset: offset)
             for passage in page where (try? reader.resolveReadableFile(passage.path)) != nil {
+                let passageKey = "\(passage.path)\n\(passage.startLine)"
+                guard takenPassageKeys.insert(passageKey).inserted else { continue }
                 readable.append(passage)
                 if readable.count == wantedCount { break }
             }

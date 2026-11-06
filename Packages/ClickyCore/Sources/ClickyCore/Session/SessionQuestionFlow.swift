@@ -250,17 +250,19 @@ public actor SessionQuestionFlow {
                 phase = .listening
                 // The listening report and the marker go out as one unit, as a task the old answer's stop waits for:
                 // the ended answer's cut-short report can then never land between them, and the marker follows the
-                // listening report at once.
+                // listening report at once. The log line is written after it, so a slow log write never holds the
+                // old answer's stop back.
                 let announcement = Task { [self] () -> Bool in
                     await output.phaseChanged(.listening)
                     guard !isFinished else { return false }
                     await dependencies.markQuestionStarted(date)
-                    await noteEvent(SessionEvent(time: date, kind: .questionStarted))
                     return true
                 }
                 // The stop starts before the first await, so a send that arrives during any of them waits for it.
                 stopEndedAnswerOffTheListeningPath(after: announcement)
-                return await announcement.value ? .accepted : .ignoredBecauseBusy
+                guard await announcement.value, !isFinished else { return .ignoredBecauseBusy }
+                await noteEvent(SessionEvent(time: date, kind: .questionStarted))
+                return .accepted
             case .listening, .transcribing:
                 return .ignoredBecauseBusy
             }
@@ -280,6 +282,9 @@ public actor SessionQuestionFlow {
         let stoppingProvider = provider
         pendingAnswerStop = Task { [self] in
             _ = await announcement.value
+            // Stop landed meanwhile: it stops the answer itself and may already be summarizing on this provider, so a
+            // second stop here would cut the summary.
+            guard !isStopping, !isFinished else { return }
             await stoppingProvider.stopCurrentAnswer()
             await waitForEndedAnswersToBeLogged()
         }
@@ -745,11 +750,12 @@ public actor SessionQuestionFlow {
         provider = newProvider
         activeProviderID = newProviderID
         budget.reset()
-        await oldProvider.endConversation()
-        guard !isFinished else { return }
+        // Logged at the swap, so a Stop that lands during the old conversation's end shows the switch before the
+        // stop line and the summary it then writes on the new provider.
         await noteEvent(SessionEvent(
             time: dependencies.now(), kind: .providerSwitched(from: oldProviderID, to: newProviderID)
         ))
+        await oldProvider.endConversation()
         guard !isFinished else { return }
         await output.usageLimitOfferCleared()
         guard !isFinished else { return }
