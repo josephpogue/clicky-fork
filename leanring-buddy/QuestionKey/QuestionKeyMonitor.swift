@@ -93,8 +93,15 @@ final class QuestionKeyMonitor {
         questionKeyStateMachine.reset()
     }
 
+    /// Forgets a first tap that was not used to start a question, so the next tap starts one.
+    func forgetPendingQuestion() {
+        questionKeyStateMachine.reset()
+    }
+
     private func handleEventTap(eventType: CGEventType, event: CGEvent) {
         if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
+            // Events were missed while the tap was off, so a half-seen key press must not complete a tap.
+            tapDetector = LoneModifierTapDetector()
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }

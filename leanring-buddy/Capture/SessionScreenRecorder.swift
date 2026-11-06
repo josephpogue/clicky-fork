@@ -48,6 +48,7 @@ actor SessionScreenRecorder {
         nextGroupID = 1
         lastSavedGroup = nil
         lastSaveTime = nil
+        isAutomaticSaveInFlight = false
 
         do {
             _ = try await saveFullCapture(reason: .sessionStart)
@@ -175,8 +176,8 @@ actor SessionScreenRecorder {
         let capturedDisplays = try await CompanionScreenCaptureUtility.captureAllDisplays(
             longSidePixels: CompanionScreenCaptureUtility.sentImageLongSidePixels
         )
-        // Questions are allowed while a stop races; automatic saves must not deliver after stop.
-        if reason != .question && reason != .sessionStart && !isRunning { throw SessionScreenRecorderError.notRunning }
+        // A capture that finishes after stop() is thrown away, so nobody gets a group that is never logged.
+        if !isRunning { throw SessionScreenRecorderError.notRunning }
 
         // The id is taken only now, after the capture, so ids run in save order.
         let groupID = nextGroupID

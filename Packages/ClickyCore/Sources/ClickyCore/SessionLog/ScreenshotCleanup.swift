@@ -33,7 +33,7 @@ public enum ScreenshotCleanup {
                 || questionLinkedGroupIDs.contains(group.id)
                 || isFirstOfVisit
             let differsEnough = lastKeptGroup.map {
-                maximumThumbnailDifference(from: $0, to: group) >= nearDuplicateThreshold
+                group.maximumDifference(from: $0) >= nearDuplicateThreshold
             } ?? true
 
             if mustKeep || differsEnough {
@@ -44,33 +44,5 @@ public enum ScreenshotCleanup {
             }
         }
         return (keptIDs, deletedIDs)
-    }
-
-    /// Largest mean absolute grayscale difference (0...1) over displays matched by screen number.
-    /// A different display count, an unmatched screen or a different thumbnail size counts as 1.0.
-    /// Private on purpose: the capture slice has its own copy as `ShotGroup.maximumDifference(from:)`.
-    private static func maximumThumbnailDifference(from earlier: ShotGroup, to later: ShotGroup) -> Double {
-        guard earlier.shots.count == later.shots.count else { return 1.0 }
-
-        var largestDifference = 0.0
-        for laterShot in later.shots {
-            guard let earlierShot = earlier.shots.first(where: { $0.screenNumber == laterShot.screenNumber }) else {
-                return 1.0
-            }
-            let earlierBytes = earlierShot.thumbnail.grayscaleBytes
-            let laterBytes = laterShot.thumbnail.grayscaleBytes
-            guard earlierBytes.count == laterBytes.count,
-                  earlierShot.thumbnail.width == laterShot.thumbnail.width,
-                  earlierShot.thumbnail.height == laterShot.thumbnail.height else { return 1.0 }
-            guard !laterBytes.isEmpty else { continue }
-
-            var totalAbsoluteDifference = 0
-            for index in laterBytes.indices {
-                totalAbsoluteDifference += abs(Int(earlierBytes[index]) - Int(laterBytes[index]))
-            }
-            let meanDifference = Double(totalAbsoluteDifference) / Double(laterBytes.count) / 255.0
-            largestDifference = max(largestDifference, meanDifference)
-        }
-        return largestDifference
     }
 }

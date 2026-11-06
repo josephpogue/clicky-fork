@@ -43,7 +43,7 @@ final class MenuBarPanelManager: NSObject {
 
         // While a session runs the menu bar icon shows a red dot, so the user
         // can see at a glance that the app is watching.
-        sessionRunningCancellable = companionManager.$isSessionRunning
+        sessionRunningCancellable = SessionCoordinator.shared.$isSessionRunning
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isSessionRunning in
                 self?.updateStatusItemIcon(isSessionRunning: isSessionRunning)
@@ -74,7 +74,7 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        updateStatusItemIcon(isSessionRunning: companionManager.isSessionRunning)
+        updateStatusItemIcon(isSessionRunning: SessionCoordinator.shared.isSessionRunning)
         button.action = #selector(statusItemClicked)
         button.target = self
     }

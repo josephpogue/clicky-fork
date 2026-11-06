@@ -108,12 +108,23 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     }
 
     public func endConversation() async {
-        withState {
+        let threadToDelete = withState { () -> String? in
+            let finishedThreadID = threadID
             threadID = nil
             hasCheckedLoginThisConversation = false
             conversationGeneration += 1
+            return finishedThreadID
         }
         runner.terminateEverything()
+        // Codex keeps every thread, with its screenshots, in the app's CODEX_HOME. Remove this one so they do not pile up.
+        guard let threadToDelete, let executableURL = try? setup.resolveExecutable() else { return }
+        _ = await runner.run(
+            executableURL: executableURL,
+            arguments: ["delete", "--force", threadToDelete],
+            environment: setup.childEnvironment,
+            workingDirectory: setup.locations.providerWorkingDirectory,
+            timeoutSeconds: 15
+        )
     }
 
     // MARK: Running a turn
@@ -193,7 +204,10 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
         if !keepsThread {
             arguments.append("--ephemeral")
         }
-        arguments += ["-m", model]
+        // An empty model name is the settings default: leave the choice to Codex.
+        if !model.isEmpty {
+            arguments += ["-m", model]
+        }
         // Low effort answers screen questions as well as medium, with no reasoning tokens spent.
         arguments += ["-c", "model_reasoning_effort=low"]
         if !instructions.isEmpty {

@@ -32,6 +32,10 @@ public final class MicrophoneSampleSource: AudioSampleSource, @unchecked Sendabl
             let converter = AVAudioConverter(from: inputFormat, to: PCMSampleConverter.targetFormat)
         else { throw SpeechError.microphoneUnavailable("no usable input device") }
 
+        // A multi-channel interface (more than a stereo pair) would be mixed down across every channel, which
+        // can cancel the voice to silence. Take the first channel, where a microphone's signal sits.
+        if inputFormat.channelCount > 2 { converter.channelMap = [0] }
+
         let targetFormat = PCMSampleConverter.targetFormat
         let sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in

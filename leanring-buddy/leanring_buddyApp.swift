@@ -40,10 +40,22 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
+        // Loading the speech model reads no audio; a session starts only from the panel.
+        SessionCoordinator.shared.prepareSpeech()
         // Auto-open the panel when permissions are missing so the user sees what to grant.
         if !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
+    }
+
+    /// Quitting mid-session stops the session first (log written, screenshots cleaned up), without the summary.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard SessionCoordinator.shared.isSessionRunning else { return .terminateNow }
+        Task { @MainActor in
+            await SessionCoordinator.shared.stopSessionForQuit()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -125,6 +125,24 @@ struct SessionLogStoreTests {
         #expect(finished.endedAt != nil)
     }
 
+    @Test func finishingAgainWithoutASummaryKeepsTheStoredSummary() async throws {
+        let locations = Support.temporaryLocations()
+        defer { try? FileManager.default.removeItem(at: locations.root) }
+        let store = SessionStore(locations: locations)
+        let start = Support.date("2026-11-05T14:02:10-05:00")
+        let id = try await store.startSession(at: start, timeZone: Support.newYork).id
+
+        _ = try await store.finishSession(
+            sessionID: id, at: start.addingTimeInterval(20), summary: "You asked about Save.", timeZone: Support.newYork
+        )
+        let again = try await store.finishSession(
+            sessionID: id, at: start.addingTimeInterval(30), summary: nil, timeZone: Support.newYork
+        )
+
+        #expect(again.summary == "You asked about Save.")
+        #expect(try await store.loadSession(id: id).metadata.summary == "You asked about Save.")
+    }
+
     @Test func updateMetadataPersistsTheSavedFields() async throws {
         let locations = Support.temporaryLocations()
         defer { try? FileManager.default.removeItem(at: locations.root) }

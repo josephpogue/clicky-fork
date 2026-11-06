@@ -388,6 +388,44 @@ struct CodexCLIProviderTests {
         #expect(await pendingAsk.value)
     }
 
+    @Test func anEmptyModelNameLeavesTheModelToCodexItself() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "", recap: nil)
+
+        let answer = try await provider.ask(textOnlyTurn(), model: "")
+
+        let execCall = try #require(standIn.recordedExecCalls().first)
+        #expect(!execCall.contains("-m"))
+        #expect(answer.text.hasPrefix("Open the File menu"))
+    }
+
+    @Test func endConversationDeletesTheConversationsThread() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        _ = try await provider.ask(textOnlyTurn(), model: "a")
+        _ = try await provider.ask(textOnlyTurn(), model: "a")
+
+        await provider.endConversation()
+
+        // Call 1 is the login check, call 2 the first exec, whose thread id is thread-standin-2.
+        let deleteCalls = standIn.recordedCalls().filter { $0.first == "delete" }
+        #expect(deleteCalls == [["delete", "--force", "thread-standin-2"]])
+        let deleteCallNumber = try #require(standIn.recordedCalls().firstIndex { $0.first == "delete" }) + 1
+        #expect(standIn.recordedEnvironment(callNumber: deleteCallNumber)["CODEX_HOME"] == standIn.locations.codexHomeDirectory.path)
+    }
+
+    @Test func endConversationWithNoThreadDeletesNothing() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+
+        await provider.endConversation()
+
+        #expect(standIn.recordedCalls().filter { $0.first == "delete" }.isEmpty)
+    }
+
     @Test func nothingTheProviderRunsEverUsesAnApiKey() async throws {
         let standIn = try CodexStandIn()
         let provider = standIn.makeProvider(environment: ["CODEX_API_KEY": "x", "OPENAI_API_KEY": "sk-test"])

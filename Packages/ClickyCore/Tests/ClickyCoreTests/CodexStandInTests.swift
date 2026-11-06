@@ -159,6 +159,7 @@ final class CodexStandIn {
         *) echo "Successfully logged in"; exit 0 ;;
       esac
     fi
+    if [ "$1" = "delete" ]; then echo "Deleted"; exit 0; fi
     if [ "$1" = "logout" ]; then echo "Successfully logged out"; exit 0; fi
     if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
       cat "$dir/models.json" 2>/dev/null || echo '{"models":[]}'

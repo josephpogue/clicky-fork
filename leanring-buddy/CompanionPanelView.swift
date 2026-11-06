@@ -13,6 +13,7 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+    @ObservedObject private var sessionCoordinator = SessionCoordinator.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,6 +25,16 @@ struct CompanionPanelView: View {
             sessionButton
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
+
+            if let panelNotice = sessionCoordinator.panelNotice {
+                Text(panelNotice)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+                    .padding(.horizontal, 16)
+            }
 
             windowRows
                 .padding(.top, 12)
@@ -98,20 +109,20 @@ struct CompanionPanelView: View {
     /// starts or stops from this button, never at launch or login.
     private var sessionButton: some View {
         Button(action: {
-            if companionManager.isSessionRunning {
-                companionManager.stopSession()
+            if sessionCoordinator.isSessionRunning {
+                sessionCoordinator.stopSession()
             } else {
-                companionManager.startSession()
+                sessionCoordinator.startSession()
             }
         }) {
-            Text(companionManager.isSessionRunning ? "Stop session" : "Start session")
+            Text(sessionCoordinator.isSessionRunning ? "Stop session" : "Start session")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(DS.Colors.textOnAccent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                        .fill(companionManager.isSessionRunning ? DS.Colors.destructive : DS.Colors.accent)
+                        .fill(sessionCoordinator.isSessionRunning ? DS.Colors.destructive : DS.Colors.accent)
                 )
         }
         .buttonStyle(.plain)
@@ -168,10 +179,6 @@ struct CompanionPanelView: View {
             accessibilityPermissionRow
 
             screenRecordingPermissionRow
-
-            if companionManager.hasScreenRecordingPermission {
-                screenContentPermissionRow
-            }
 
         }
     }
@@ -303,52 +310,6 @@ struct CompanionPanelView: View {
         .padding(.vertical, 6)
     }
 
-    private var screenContentPermissionRow: some View {
-        let isGranted = companionManager.hasScreenContentPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "eye")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Screen Content")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    companionManager.requestScreenContentPermission()
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
     private var microphonePermissionRow: some View {
         let isGranted = companionManager.hasMicrophonePermission
         return HStack {
@@ -436,11 +397,11 @@ struct CompanionPanelView: View {
     }
 
     private var statusDotColor: Color {
-        companionManager.isSessionRunning ? DS.Colors.destructive : DS.Colors.textTertiary
+        sessionCoordinator.isSessionRunning ? DS.Colors.destructive : DS.Colors.textTertiary
     }
 
     private var statusText: String {
-        companionManager.isSessionRunning ? "Session running" : "No session"
+        sessionCoordinator.isSessionRunning ? "Session running" : "No session"
     }
 
 }

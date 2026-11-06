@@ -126,7 +126,7 @@ public actor SessionStore {
         try writeDeletedGroupIDs(deletedGroupIDs, in: directory)
 
         metadata.endedAt = endTime
-        metadata.summary = summary
+        if let summary { metadata.summary = summary }
         metadata.cleanedUp = true
 
         let keptGroups = allGroups.filter { !deletedGroupIDs.contains($0.id) }

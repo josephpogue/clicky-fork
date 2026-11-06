@@ -33,8 +33,4 @@ public enum AnswerInstructions {
     - The user asks how to commit in Xcode: "Open the Source Control menu at the top and choose Commit, or press command option C. [POINT:285,11:source control:screen1]"
     - The element is on screen 2: "That is on your other monitor, in the Terminal window. [POINT:400,300:terminal:screen2]"
     """
-
-    public static let summaryInstructions = """
-    You will be given the timeline of a work session as plain text. Write a summary of it in two or three plain sentences: what the user worked on and what they asked about. No markdown, no lists, no headings. Use only what the timeline says.
-    """
 }

@@ -147,10 +147,4 @@ struct QuestionsAnswerInstructionsTests {
         #expect(!text.lowercased().contains("spoken"))
         #expect(!text.lowercased().contains("text-to-speech"))
     }
-
-    @Test func summaryInstructionsAreShortAndPlain() {
-        let text = AnswerInstructions.summaryInstructions
-        #expect(text.contains("summary"))
-        #expect(!text.contains("\u{2014}"))
-    }
 }
