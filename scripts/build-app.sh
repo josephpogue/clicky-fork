@@ -73,6 +73,36 @@ rm -f "$build_log"
 built_app_path="$derived_data_path/Build/Products/$configuration/$product_file_name"
 [ -d "$built_app_path" ] || { echo "error: built app not found at $built_app_path" >&2; exit 1; }
 
+# Build the brain helper (the MCP program the Claude CLI starts to serve the two brain tools) and put it in the bundle.
+# It is signed with the identity the app was signed with, then the app is re-signed so its seal covers the helper
+# while its designated requirement stays the same (macOS permissions survive rebuilds).
+package_path="$repository_root/Packages/ClickyCore"
+helper_swift_configuration="release"
+[ "$configuration" = "Debug" ] && helper_swift_configuration="debug"
+helper_build_log="$(mktemp -t clicky-fork-helper-build)"
+if ! swift build -c "$helper_swift_configuration" --package-path "$package_path" --product ClickyBrainTools >"$helper_build_log" 2>&1; then
+  echo "Helper build failed. First errors:" >&2
+  grep -m 10 'error:' "$helper_build_log" >&2 || tail -n 20 "$helper_build_log" >&2
+  echo "Full log: $helper_build_log" >&2
+  exit 1
+fi
+rm -f "$helper_build_log"
+helper_binary_path="$(swift build -c "$helper_swift_configuration" --package-path "$package_path" --show-bin-path)/ClickyBrainTools"
+[ -f "$helper_binary_path" ] || { echo "error: built helper not found at $helper_binary_path" >&2; exit 1; }
+bundled_helper_path="$built_app_path/Contents/MacOS/ClickyBrainTools"
+cp -f "$helper_binary_path" "$bundled_helper_path"
+
+# The signing identity of the app: its authority line, or ad hoc when it was signed that way.
+app_signature_details="$(codesign -dvv "$built_app_path" 2>&1 || true)"
+signing_identity="-"
+if ! printf '%s\n' "$app_signature_details" | grep -q '^Signature=adhoc'; then
+  signing_identity="$(printf '%s\n' "$app_signature_details" | sed -n 's/^Authority=\(Apple Development:.*\)$/\1/p' | head -n 1)"
+  [ -n "$signing_identity" ] || signing_identity="-"
+fi
+codesign --force --sign "$signing_identity" --options runtime "$bundled_helper_path"
+codesign --force --sign "$signing_identity" \
+  --preserve-metadata=identifier,entitlements,requirements,flags,runtime "$built_app_path"
+
 if [ "$should_install" = "yes" ]; then
   installed_app_path="/Applications/$product_file_name"
   if pgrep -f "$installed_app_path/Contents/MacOS/" >/dev/null 2>&1 \
