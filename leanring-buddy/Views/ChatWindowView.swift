@@ -339,7 +339,8 @@ struct ChatWindowView: View {
     private func answerMetaLine(_ answerMessage: ChatMessage) -> String {
         var metaParts: [String] = []
         if let providerName = answerMessage.providerName { metaParts.append(providerName) }
-        if let model = answerMessage.model { metaParts.append(model) }
+        // An empty model is the CLI's own default, named as in the header.
+        if let model = answerMessage.model { metaParts.append(model.isEmpty ? "default" : model) }
         if let secondsToAnswer = answerMessage.secondsToAnswer { metaParts.append(WindowTimeFormatting.seconds(secondsToAnswer)) }
         return metaParts.joined(separator: " · ")
     }
