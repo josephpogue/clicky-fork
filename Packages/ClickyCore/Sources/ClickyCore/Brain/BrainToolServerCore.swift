@@ -9,6 +9,7 @@ public struct BrainToolServerCore: Sendable {
     private static let supportedProtocolVersions: Set<String> = ["2025-06-18", "2025-03-26", "2024-11-05"]
     private static let searchLimitRange = 1...20
     private static let defaultSearchLimit = 8
+    private static let startLineRange = 1...1_000_000_000
     private static let lineCountRange = 1...BrainFileReader.maximumLinesPerCall
     private static let indexNotReadyText =
         "The notes index is not ready yet. Answer from the screen and say the notes could not be searched."
@@ -74,7 +75,11 @@ public struct BrainToolServerCore: Sendable {
         guard let query = arguments["query"] as? String, !query.isEmpty else {
             return ("search_brain needs a query.", true)
         }
-        let limit = Self.clamped(Self.integer(from: arguments["limit"]) ?? Self.defaultSearchLimit, to: Self.searchLimitRange)
+        let parsedLimit: Int?
+        do { parsedLimit = try Self.optionalInteger(named: "limit", in: arguments) } catch let problem as NumberArgumentProblem {
+            return (problem.message, true)
+        } catch { return (Self.indexNotReadyText, true) }
+        let limit = Self.clamped(parsedLimit ?? Self.defaultSearchLimit, to: Self.searchLimitRange)
         do {
             let passages = try backend.search(query: query, limit: limit)
             if passages.isEmpty {
@@ -99,9 +104,16 @@ public struct BrainToolServerCore: Sendable {
         guard let path = arguments["path"] as? String, !path.isEmpty else {
             return ("read_brain_file needs a path.", true)
         }
-        let startLine = max(1, Self.integer(from: arguments["start_line"]) ?? 1)
-        let lineCount = Self.clamped(
-            Self.integer(from: arguments["line_count"]) ?? BrainFileReader.maximumLinesPerCall, to: Self.lineCountRange)
+        let parsedStartLine: Int?
+        let parsedLineCount: Int?
+        do {
+            parsedStartLine = try Self.optionalInteger(named: "start_line", in: arguments)
+            parsedLineCount = try Self.optionalInteger(named: "line_count", in: arguments)
+        } catch let problem as NumberArgumentProblem {
+            return (problem.message, true)
+        } catch { return (Self.indexNotReadyText, true) }
+        let startLine = Self.clamped(parsedStartLine ?? 1, to: Self.startLineRange)
+        let lineCount = Self.clamped(parsedLineCount ?? BrainFileReader.maximumLinesPerCall, to: Self.lineCountRange)
         do {
             let excerpt = try backend.readFile(path: path, startLine: startLine, lineCount: lineCount)
             if excerpt.lines.isEmpty {
@@ -127,19 +139,36 @@ public struct BrainToolServerCore: Sendable {
         case .neverReadable: return "That file is never readable: it may hold secrets."
         case .outsideSearchFolders: return "That path is outside the folders Clicky can search."
         case .notFound: return "No such file in the folders Clicky can search."
-        case .notText: return "That file is not text."
+        case .notText: return "That file is not text, or it is larger than 8 MB."
         }
     }
 
-    /// Numbers arrive as JSON numbers or as strings holding numbers.
-    private static func integer(from value: Any?) -> Int? {
-        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() { return number.intValue }
+    /// A number argument that is present but is not a usable number (text, a boolean, an object, NaN, infinity).
+    private struct NumberArgumentProblem: Error {
+        let message: String
+    }
+
+    /// Nil when the argument is absent or null (the caller uses its default); a number clamped into the Int range
+    /// otherwise; throws `NumberArgumentProblem` for anything that is not a number. Numbers arrive as JSON numbers or
+    /// as strings holding numbers. Never traps: `1e300` becomes a huge Int that the caller then clamps to its range.
+    private static func optionalInteger(named name: String, in arguments: [String: Any]) throws -> Int? {
+        guard let value = arguments[name], !(value is NSNull) else { return nil }
+        let problem = NumberArgumentProblem(message: "\(name) must be a whole number.")
+        let numericValue: Double
         if let text = value as? String {
-            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if let whole = Int(trimmed) { return whole }
-            if let fractional = Double(trimmed), fractional.isFinite { return Int(fractional) }
+            guard let parsed = Double(trimmed) else { throw problem }
+            numericValue = parsed
+        } else if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            numericValue = number.doubleValue
+        } else {
+            throw problem
         }
-        return nil
+        guard !numericValue.isNaN, numericValue.isFinite else { throw problem }
+        // Int(Double) traps outside the Int range, so limit the value first. 1e15 is far above every range used here.
+        let limitedValue = min(max(numericValue.rounded(.towardZero), -1e15), 1e15)
+        return Int(limitedValue)
     }
 
     private static func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {

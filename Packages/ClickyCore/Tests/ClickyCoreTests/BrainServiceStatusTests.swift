@@ -92,4 +92,31 @@ struct BrainServiceFoldersTests {
         #expect(BrainServiceFolders.firstUnreadable([aFile])?.path == aFile.path)
         #expect(BrainServiceFolders.readable([good, missing, aFile]).map(\.path) == [good.path])
     }
+
+    @Test("the root folder and the home folder are refused as search folders, with a reason")
+    func rootAndHomeAreRefused() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("svc-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let notes = home.appendingPathComponent("notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let homeAlias = root.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: homeAlias, withDestinationURL: home)
+
+        #expect(BrainServiceFolders.refusalReason(for: URL(fileURLWithPath: "/"), homeDirectory: home) != nil)
+        #expect(BrainServiceFolders.refusalReason(for: home, homeDirectory: home) != nil)
+        #expect(BrainServiceFolders.refusalReason(for: home.appendingPathComponent("notes/.."), homeDirectory: home) != nil)
+        #expect(BrainServiceFolders.refusalReason(for: homeAlias, homeDirectory: home) != nil)
+        #expect(BrainServiceFolders.refusalReason(for: URL(fileURLWithPath: home.path + "/"), homeDirectory: home) != nil)
+        #expect(BrainServiceFolders.refusalReason(for: notes, homeDirectory: home) == nil)
+        let expanded = BrainServiceFolders.expand(paths: ["~", "/", "~/notes"], homeDirectory: home)
+        #expect(BrainServiceFolders.allowed(expanded, homeDirectory: home).map(\.path) == [notes.path])
+    }
+
+    @Test("isReadableFolder is false for the root folder, so the status line names it")
+    func rootIsNotReadableFolder() {
+        #expect(!BrainServiceFolders.isReadableFolder(URL(fileURLWithPath: "/")))
+        #expect(!BrainServiceFolders.isReadableFolder(URL(fileURLWithPath: NSHomeDirectory())))
+        #expect(BrainServiceFolders.firstUnreadable([URL(fileURLWithPath: "/")])?.path == "/")
+    }
 }

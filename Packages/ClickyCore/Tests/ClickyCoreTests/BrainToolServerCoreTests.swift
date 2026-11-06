@@ -175,6 +175,52 @@ struct BrainToolServerCoreTests {
         #expect(backend.lastSearch?.limit == expected)
     }
 
+    @Test(arguments: [
+        (#""1e300""#, 20), (#""-1e300""#, 1), ("1e300", 20), ("-1e300", 1), ("1e19", 20), (#""9223372036854775807""#, 20),
+        (#""99999999999999999999""#, 20), (#"" 7 ""#, 7), (#""2.9""#, 2),
+    ])
+    func searchLimitHugeNumbersClampWithoutCrashing(rawLimit: String, expected: Int) {
+        let (server, backend) = makeServer()
+        let result = toolResult(server.response(toLine: callLine("search_brain", #"{"query":"q","limit":\#(rawLimit)}"#)))
+        #expect(result.isError == false)
+        #expect(backend.lastSearch?.limit == expected)
+    }
+
+    @Test(arguments: [#""NaN""#, #""inf""#, #""-inf""#, #""Infinity""#, #""""#, #""abc""#, "true", "false", #"{"a":1}"#, "[1,2]"])
+    func badNumbersAreToolErrors(rawValue: String) {
+        for argumentName in ["limit"] {
+            let (server, backend) = makeServer()
+            let result = toolResult(server.response(toLine: callLine("search_brain", #"{"query":"q","\#(argumentName)":\#(rawValue)}"#)))
+            #expect(result.isError == true)
+            #expect(backend.lastSearch == nil)
+        }
+        for argumentName in ["start_line", "line_count"] {
+            let (server, backend) = makeServer()
+            let result = toolResult(server.response(toLine: callLine("read_brain_file", #"{"path":"/n/a.md","\#(argumentName)":\#(rawValue)}"#)))
+            #expect(result.isError == true)
+            #expect(backend.lastRead == nil)
+        }
+    }
+
+    @Test(arguments: [#""1e300""#, #""-1e300""#, "1e300", "-1e300", #""9223372036854775807""#])
+    func readNumbersHugeValuesClampWithoutCrashing(rawValue: String) {
+        for argumentName in ["start_line", "line_count"] {
+            let (server, backend) = makeServer()
+            let result = toolResult(server.response(toLine: callLine("read_brain_file", #"{"path":"/n/a.md","\#(argumentName)":\#(rawValue)}"#)))
+            #expect(result.isError == false)
+            let read = backend.lastRead
+            #expect(read != nil)
+            #expect((read?.startLine ?? 0) >= 1)
+            #expect((1...200).contains(read?.lineCount ?? 0))
+        }
+    }
+
+    @Test func nullNumberUsesTheDefault() {
+        let (server, backend) = makeServer()
+        _ = server.response(toLine: callLine("search_brain", #"{"query":"q","limit":null}"#))
+        #expect(backend.lastSearch?.limit == 8)
+    }
+
     @Test func missingQueryIsAnError() {
         let (server, backend) = makeServer()
         let result = toolResult(server.response(toLine: callLine("search_brain", "{}")))
@@ -230,7 +276,7 @@ struct BrainToolServerCoreTests {
         (BrainFileRefusal.neverReadable, "That file is never readable: it may hold secrets."),
         (BrainFileRefusal.outsideSearchFolders, "That path is outside the folders Clicky can search."),
         (BrainFileRefusal.notFound, "No such file in the folders Clicky can search."),
-        (BrainFileRefusal.notText, "That file is not text."),
+        (BrainFileRefusal.notText, "That file is not text, or it is larger than 8 MB."),
     ])
     func refusalsExplainThemselves(refusal: BrainFileRefusal, expectedText: String) {
         let (server, backend) = makeServer()

@@ -19,11 +19,15 @@ public enum BrainFileRules {
     /// File names that hold logins on their own, whatever their extension.
     static let neverReadableExactFileNames: Set<String> = [
         ".netrc", ".npmrc", ".pgpass", ".pypirc", ".git-credentials", ".htpasswd",
+        // Tool logins and editor/agent configs that carry tokens
+        ".mcp.json", "auth.json", "hosts.yml", "hosts.yaml", ".dev.vars",
     ]
 
     /// Extensions of key, certificate store, keychain and password vault files.
     static let neverReadableExtensions: Set<String> = [
         "pem", "key", "p12", "pfx", "jks", "keystore", "p8", "ppk", "der", "gpg", "kdbx", "keychain", "keychain-db",
+        // Terraform variable and state files hold provider keys and passwords in the clear
+        "tfvars", "tfstate",
     ]
 
     /// Words that mark a file as holding a secret when they appear anywhere in its name (`*token*`, `credentials*`,
@@ -44,8 +48,9 @@ public enum BrainFileRules {
         for componentIndex in 0..<pathComponents.count {
             let component = pathComponents[componentIndex]
             if neverReadableFolderNames.contains(component) { return true }
-            // `.env`, `.env.local`, `.env.production.local`, and a folder of that name (a Python environment)
-            if component == ".env" || component.hasPrefix(".env.") { return true }
+            // Every name that starts with `.env`: `.env`, `.env.local`, `.envrc`, `.env-local`, `.env_prod`, and a
+            // folder of that name (a Python environment). `environment.md` and `envoy.md` do not start with a dot.
+            if component.hasPrefix(".env") { return true }
         }
         return isNeverReadableFileName(fileName)
     }
@@ -55,6 +60,8 @@ public enum BrainFileRules {
         if neverReadableExactFileNames.contains(lowercasedFileName) { return true }
         // `prod.env`, `staging.env`
         if lowercasedFileName.hasSuffix(".env") { return true }
+        // `terraform.tfstate.backup`, `terraform.tfstate.1700000000.backup`
+        if lowercasedFileName.contains(".tfstate.") { return true }
         let fileExtension = (lowercasedFileName as NSString).pathExtension
         if neverReadableExtensions.contains(fileExtension) { return true }
         // SSH keys: `id_rsa`, `id_ed25519`, `id_ecdsa.pub`

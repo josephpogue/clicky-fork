@@ -167,4 +167,109 @@ struct BrainFileReaderTests {
         let excerpt = try reader.read(path: "huge.md", startLine: 1, lineCount: 1)
         #expect(excerpt.lines.count == 1 && excerpt.lines[0].count == 16_000 && excerpt.wasCappedByLimit)
     }
+
+    // MARK: fix wave 1 (FX1)
+
+    @Test(arguments: [".claude/settings.local.json", ".config/gh/hosts.yml", ".hidden/notes.md", "notes/.private/deep/a.md"])
+    func filesUnderHiddenFoldersAreNeverReadable(relativePath: String) throws {
+        let fixture = try makeFixture()
+        try write("secret\n", to: fixture.folder.appendingPathComponent(relativePath))
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        #expect(refusal(reader, fixture.folder.appendingPathComponent(relativePath).path) == .neverReadable)
+        #expect(refusal(reader, relativePath) == .neverReadable)
+    }
+
+    @Test func hiddenFolderLinkedFromVisibleNameIsRefused() throws {
+        let fixture = try makeFixture()
+        try write("secret\n", to: fixture.folder.appendingPathComponent(".private/a.md"))
+        try link(fixture.folder.appendingPathComponent("shown"), to: fixture.folder.appendingPathComponent(".private"))
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        #expect(refusal(reader, fixture.folder.appendingPathComponent("shown/a.md").path) == .neverReadable)
+    }
+
+    @Test func searchFolderInsideAHiddenFolderStaysReadable() throws {
+        let fixture = try makeFixture()
+        let hiddenSearchFolder = fixture.root.appendingPathComponent(".claude/routing", isDirectory: true)
+        try write("registry\n", to: hiddenSearchFolder.appendingPathComponent("registry.md"))
+        try write("hidden leaf\n", to: hiddenSearchFolder.appendingPathComponent(".leaf.md"))
+        try write("x\n", to: hiddenSearchFolder.appendingPathComponent(".sub/b.md"))
+        let reader = BrainFileReader(searchFolders: [hiddenSearchFolder])
+        #expect(refusal(reader, hiddenSearchFolder.appendingPathComponent("registry.md").path) == nil)
+        #expect(refusal(reader, "registry.md") == nil)
+        #expect(refusal(reader, hiddenSearchFolder.appendingPathComponent(".leaf.md").path) == nil)
+        #expect(refusal(reader, hiddenSearchFolder.appendingPathComponent(".sub/b.md").path) == .neverReadable)
+    }
+
+    @Test func searchFolderNestedInsideAnotherKeepsItsHiddenFolderReadable() throws {
+        let fixture = try makeFixture()
+        let nested = fixture.folder.appendingPathComponent(".claude/routing", isDirectory: true)
+        try write("registry\n", to: nested.appendingPathComponent("registry.md"))
+        let reader = BrainFileReader(searchFolders: [fixture.folder, nested])
+        #expect(refusal(reader, nested.appendingPathComponent("registry.md").path) == nil)
+    }
+
+    @Test func namedPipeReturnsPromptlyAsNotFound() throws {
+        let fixture = try makeFixture()
+        let pipePath = fixture.folder.appendingPathComponent("pipe.md").path
+        #expect(mkfifo(pipePath, 0o644) == 0)
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        let started = Date()
+        #expect(refusal(reader, pipePath) == .notFound)
+        #expect(throwsRefusal { _ = try reader.read(path: pipePath, startLine: 1, lineCount: 5) } == .notFound)
+        #expect(Date().timeIntervalSince(started) < 5)
+    }
+
+    @Test func fileOverTheSizeCapIsRefused() throws {
+        let fixture = try makeFixture()
+        let bigURL = fixture.folder.appendingPathComponent("big.md")
+        try write(String(repeating: "first line\n", count: 2_000), to: bigURL)  // text in the sniffed head, zeros after the truncate
+        let handle = try FileHandle(forWritingTo: bigURL)
+        try handle.truncate(atOffset: UInt64(BrainFileReader.maximumFileBytes + 1))
+        try handle.close()
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        #expect(throwsRefusal { _ = try reader.read(path: bigURL.path, startLine: 1, lineCount: 5) } == .notText)
+    }
+
+    @Test func fileAtTheSizeCapIsStillRead() throws {
+        let fixture = try makeFixture()
+        let url = fixture.folder.appendingPathComponent("edge.md")
+        try write(String(repeating: "first line\n", count: 2_000), to: url)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(BrainFileReader.maximumFileBytes))
+        try handle.close()
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        let excerpt = try reader.read(path: url.path, startLine: 1, lineCount: 1)
+        #expect(excerpt.lines.first == "first line")
+    }
+
+    @Test func hardLinkIsNeverReadable() throws {
+        let fixture = try makeFixture()
+        let linkURL = fixture.folder.appendingPathComponent("notes.md")
+        #expect(Foundation.link(fixture.outsideFile.path, linkURL.path) == 0)
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        #expect(refusal(reader, linkURL.path) == .neverReadable)
+        #expect(throwsRefusal { _ = try reader.read(path: linkURL.path, startLine: 1, lineCount: 5) } == .neverReadable)
+        // The in-folder original of a link made inside the folder is also refused: two names, one secret.
+        let original = fixture.folder.appendingPathComponent("notes/a.md")
+        let second = fixture.folder.appendingPathComponent("notes/b.md")
+        #expect(Foundation.link(original.path, second.path) == 0)
+        #expect(refusal(reader, original.path) == .neverReadable)
+    }
+
+    @Test func ordinaryFileStillReads() throws {
+        let fixture = try makeFixture()
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        let excerpt = try reader.read(path: "notes/a.md", startLine: 1, lineCount: 5)
+        #expect(excerpt.lines == ["alpha", "beta"])
+    }
+
+    @Test func rootAndHomeAreNotSearchFolders() throws {
+        let reader = BrainFileReader(searchFolders: [URL(fileURLWithPath: "/"), URL(fileURLWithPath: NSHomeDirectory())])
+        #expect(refusal(reader, "/etc/hosts") == .outsideSearchFolders)
+        #expect(refusal(reader, NSHomeDirectory() + "/Library/anything.md") == .outsideSearchFolders)
+    }
+
+    private func throwsRefusal(_ work: () throws -> Void) -> BrainFileRefusal? {
+        do { try work(); return nil } catch let error as BrainFileRefusal { return error } catch { return nil }
+    }
 }

@@ -7,12 +7,15 @@ struct BrainFileRulesTests {
         "/f/.env", "/f/app/.env.production.local", "/f/prod.env", "/f/keys/server.pem", "/f/id_ed25519",
         "/f/aws-credentials.json", "/f/notes/api-token.txt", "/f/.git/config", "/f/node_modules/x/README.md",
         "/f/.ssh/config", "/f/notes/tokenizer-design.md",
+        "/f/.envrc", "/f/.env-local", "/f/.env_prod", "/f/.ENVRC", "/f/.env-files/a.md",
+        "/f/.mcp.json", "/f/proj/.MCP.json", "/f/auth.json", "/f/gh/hosts.yml", "/f/infra/prod.tfvars",
+        "/f/infra/terraform.tfstate", "/f/infra/terraform.tfstate.backup", "/f/web/.dev.vars", "/f/INFRA/PROD.TFVARS",
     ])
     func neverReadablePathsAreRefused(path: String) {
         #expect(BrainFileRules.isNeverReadable(path: path))
     }
 
-    @Test(arguments: ["/f/README.md", "/f/Wiki/index.md", "/f/projects/app/Sources/Main.swift"])
+    @Test(arguments: ["/f/notes/environment.md", "/f/envoy.md", "/f/notes/env.md", "/f/README.md", "/f/Wiki/index.md", "/f/projects/app/Sources/Main.swift"])
     func ordinaryPathsAreReadable(path: String) {
         #expect(!BrainFileRules.isNeverReadable(path: path))
     }

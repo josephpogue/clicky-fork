@@ -19,8 +19,31 @@ public enum BrainServiceFolders {
         return folders
     }
 
-    /// True when the path is an existing folder this app can list.
+    /// Why a folder may not be a search folder, or nil when it may. The root folder and the home folder are refused
+    /// (after `~` expansion, `..` folding and symlink resolution): either one would put every key, login and mail
+    /// file the user owns inside the boundary the file reader protects.
+    public static func refusalReason(for folder: URL, homeDirectory: URL? = nil) -> String? {
+        let folderPath = resolvedPath(of: folder.path)
+        let homePath = resolvedPath(of: (homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory())).path)
+        if folderPath == "/" { return "The whole disk cannot be a search folder. Pick a folder inside it." }
+        if let folderPath, let homePath, folderPath == homePath {
+            return "The home folder cannot be a search folder. Pick a folder inside it."
+        }
+        return nil
+    }
+
+    /// The folders that may be search folders: the root and home folders are dropped.
+    public static func allowed(_ folders: [URL], homeDirectory: URL? = nil) -> [URL] {
+        folders.filter { refusalReason(for: $0, homeDirectory: homeDirectory) == nil }
+    }
+
+    private static func resolvedPath(of path: String) -> String? {
+        BrainFileReader.resolvedPath(of: path)
+    }
+
+    /// True when the path is an existing folder this app can list and may search (not the root or home folder).
     public static func isReadableFolder(_ folder: URL) -> Bool {
+        guard refusalReason(for: folder) == nil else { return false }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             return false
