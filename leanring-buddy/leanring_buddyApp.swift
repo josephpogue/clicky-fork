@@ -7,6 +7,7 @@
 //  opens a floating panel with the session controls.
 //
 
+import ClickyCore
 import SwiftUI
 
 @main
@@ -42,20 +43,33 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         companionManager.start()
         // Loading the speech model reads no audio; a session starts only from the panel.
         SessionCoordinator.shared.prepareSpeech()
+        // Finish any session folder an earlier crash left open, off the main actor; Start waits for it.
+        SessionCoordinator.shared.finishAbandonedSessionsAtLaunch()
         // Auto-open the panel when permissions are missing so the user sees what to grant.
         if !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
     }
 
-    /// Quitting mid-session stops the session first (log written, screenshots cleaned up), without the summary.
+    /// Quitting in any phase but idle waits for the session work: a Start is cancelled, a running session
+    /// stops without the summary, and a Stop in progress finishes with its summary skipped. Sign-in processes
+    /// Settings started always end.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard SessionCoordinator.shared.isSessionRunning else { return .terminateNow }
-        Task { @MainActor in
-            await SessionCoordinator.shared.stopSessionForQuit()
-            NSApp.reply(toApplicationShouldTerminate: true)
+        AppWindowRouter.shared.endRunningSignIns()
+        let quitDecision = SessionCoordinator.shared.requestQuit()
+        switch quitDecision {
+        case .terminateNow:
+            return .terminateNow
+        case .alreadyHandled:
+            // The first quit request is already doing the work and will reply when it is done.
+            return .terminateLater
+        case .cancelStartThenTerminate, .stopWithoutSummaryThenTerminate, .skipSummaryAndWaitForStopThenTerminate:
+            Task { @MainActor in
+                await SessionCoordinator.shared.carryOutQuit(quitDecision)
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         }
-        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

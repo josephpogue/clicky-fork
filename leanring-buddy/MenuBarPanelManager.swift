@@ -11,6 +11,7 @@
 //
 
 import AppKit
+import ClickyCore
 import Combine
 import SwiftUI
 
@@ -43,10 +44,12 @@ final class MenuBarPanelManager: NSObject {
 
         // While a session runs the menu bar icon shows a red dot, so the user
         // can see at a glance that the app is watching.
-        sessionRunningCancellable = SessionCoordinator.shared.$isSessionRunning
+        sessionRunningCancellable = SessionCoordinator.shared.$lifecycle
+            .map(\.phase)
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] isSessionRunning in
-                self?.updateStatusItemIcon(isSessionRunning: isSessionRunning)
+            .sink { [weak self] phase in
+                self?.updateStatusItemIcon(phase: phase)
             }
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
@@ -74,26 +77,31 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        updateStatusItemIcon(isSessionRunning: SessionCoordinator.shared.isSessionRunning)
+        updateStatusItemIcon(phase: SessionCoordinator.shared.lifecycle.phase)
         button.action = #selector(statusItemClicked)
         button.target = self
     }
 
     /// Idle: the plain triangle as a template image (the system tints it).
     /// Running: the triangle with a red dot badge, drawn per appearance because
-    /// a template image cannot carry a colour.
-    private func updateStatusItemIcon(isSessionRunning: Bool) {
+    /// a template image cannot carry a colour. Starting and stopping: the triangle with an
+    /// amber ring instead of the dot, so the red dot always means the app is watching.
+    private func updateStatusItemIcon(phase: SessionLifecyclePhase) {
         guard let button = statusItem?.button else { return }
-        if isSessionRunning {
-            button.image = makeSessionRunningMenuBarIcon()
+        switch phase {
+        case .running:
+            button.image = makeSessionRunningMenuBarIcon(showsWatchingDot: true)
             button.image?.isTemplate = false
-        } else {
+        case .starting, .stopping:
+            button.image = makeSessionRunningMenuBarIcon(showsWatchingDot: false)
+            button.image?.isTemplate = false
+        case .idle:
             button.image = makeClickyMenuBarIcon()
             button.image?.isTemplate = true
         }
     }
 
-    private func makeSessionRunningMenuBarIcon() -> NSImage {
+    private func makeSessionRunningMenuBarIcon(showsWatchingDot: Bool) -> NSImage {
         let iconSize: CGFloat = 18
         let triangleImage = makeClickyMenuBarIcon()
         return NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { drawingRect in
@@ -104,8 +112,15 @@ final class MenuBarPanelManager: NSObject {
 
             let badgeDiameter: CGFloat = 8
             let badgeRect = NSRect(x: iconSize - badgeDiameter, y: iconSize - badgeDiameter, width: badgeDiameter, height: badgeDiameter)
-            NSColor.systemRed.setFill()
-            NSBezierPath(ovalIn: badgeRect).fill()
+            if showsWatchingDot {
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: badgeRect).fill()
+            } else {
+                let ringPath = NSBezierPath(ovalIn: badgeRect.insetBy(dx: 1, dy: 1))
+                ringPath.lineWidth = 1.5
+                NSColor.systemOrange.setStroke()
+                ringPath.stroke()
+            }
             return true
         }
     }

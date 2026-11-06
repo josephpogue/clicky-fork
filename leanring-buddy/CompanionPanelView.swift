@@ -9,6 +9,7 @@
 //
 
 import AVFoundation
+import ClickyCore
 import SwiftUI
 
 struct CompanionPanelView: View {
@@ -109,23 +110,20 @@ struct CompanionPanelView: View {
     /// starts or stops from this button, never at launch or login.
     private var sessionButton: some View {
         Button(action: {
-            if sessionCoordinator.isSessionRunning {
-                sessionCoordinator.stopSession()
-            } else {
-                sessionCoordinator.startSession()
-            }
+            sessionCoordinator.handleSessionButton()
         }) {
-            Text(sessionCoordinator.isSessionRunning ? "Stop session" : "Start session")
+            Text(sessionCoordinator.lifecycle.buttonTitle)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(DS.Colors.textOnAccent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                        .fill(sessionCoordinator.isSessionRunning ? DS.Colors.destructive : DS.Colors.accent)
+                        .fill(sessionButtonColor)
                 )
         }
         .buttonStyle(.plain)
+        .disabled(!sessionCoordinator.lifecycle.isButtonEnabled)
         .pointerCursor()
     }
 
@@ -133,14 +131,22 @@ struct CompanionPanelView: View {
         VStack(spacing: 2) {
             windowRow(label: "Open chat", iconName: "bubble.left.and.bubble.right") {
                 AppWindowRouter.shared.showChat()
+                dismissPanel()
             }
             windowRow(label: "Sessions", iconName: "clock.arrow.circlepath") {
                 AppWindowRouter.shared.showSessions()
+                dismissPanel()
             }
             windowRow(label: "Settings", iconName: "gearshape") {
                 AppWindowRouter.shared.showSettings()
+                dismissPanel()
             }
         }
+    }
+
+    /// The window the row opened would otherwise sit under this panel.
+    private func dismissPanel() {
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
     }
 
     private func windowRow(label: String, iconName: String, action: @escaping () -> Void) -> some View {
@@ -396,12 +402,26 @@ struct CompanionPanelView: View {
             .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
     }
 
+    /// Red means the app is watching. Starting and stopping use amber, idle uses grey.
     private var statusDotColor: Color {
-        sessionCoordinator.isSessionRunning ? DS.Colors.destructive : DS.Colors.textTertiary
+        switch sessionCoordinator.lifecycle.phase {
+        case .running: return DS.Colors.destructive
+        case .starting, .stopping: return DS.Colors.warning
+        case .idle: return DS.Colors.textTertiary
+        }
     }
 
     private var statusText: String {
-        sessionCoordinator.isSessionRunning ? "Session running" : "No session"
+        sessionCoordinator.lifecycle.statusLine
+    }
+
+    /// Starting and Stopping read as waiting (muted); Stop is red; Start is the accent.
+    private var sessionButtonColor: Color {
+        switch sessionCoordinator.lifecycle.phase {
+        case .running: return DS.Colors.destructive
+        case .starting, .stopping: return DS.Colors.textTertiary
+        case .idle: return DS.Colors.accent
+        }
     }
 
 }

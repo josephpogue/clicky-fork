@@ -18,14 +18,14 @@ enum SessionScreenRecorderError: Error {
 actor SessionScreenRecorder {
 
     private let shotsDirectory: URL
-    private let savePolicy = CaptureSavePolicy()
     private let samplingIntervalSeconds: Double = 1.0
 
     private var onShotGroup: (@Sendable (ShotGroup) -> Void)?
     private var isRunning = false
     private var nextGroupID = 1
     private var lastSavedGroup: ShotGroup?
-    private var lastSaveTime: Date?
+    /// The 2 s save limit; the save time is taken when a save starts.
+    private var saveSchedule = CaptureSaveSchedule()
     private var currentAppName = ""
     private var currentWindowTitle: String?
     /// Bumped on every focus change so a deferred save can tell whether focus moved on.
@@ -47,7 +47,7 @@ actor SessionScreenRecorder {
         isRunning = true
         nextGroupID = 1
         lastSavedGroup = nil
-        lastSaveTime = nil
+        saveSchedule.reset()
         isAutomaticSaveInFlight = false
 
         do {
@@ -83,19 +83,12 @@ actor SessionScreenRecorder {
         guard isRunning else { return }
 
         let reason: ShotReason = isAppSwitch ? .appSwitch : .windowSwitch
-        let decision = savePolicy.decide(reason: reason, now: Date(), lastSaveTime: lastSaveTime,
-                                         differenceFromLastSaved: nil)
+        let decision = saveSchedule.decide(reason: reason, now: Date(), differenceFromLastSaved: nil)
         switch decision {
         case .saveNow:
             saveAutomatically(reason: reason)
         case .saveAt(let saveDate):
-            let focusCountWhenScheduled = focusChangeCount
-            deferredSaveTask = Task { [weak self] in
-                let secondsToWait = max(0, saveDate.timeIntervalSinceNow)
-                try? await Task.sleep(nanoseconds: UInt64(secondsToWait * 1_000_000_000))
-                if Task.isCancelled { return }
-                await self?.runDeferredSave(reason: reason, focusCountWhenScheduled: focusCountWhenScheduled)
-            }
+            scheduleDeferredSave(reason: reason, at: saveDate)
         case .skip:
             break
         }
@@ -113,9 +106,29 @@ actor SessionScreenRecorder {
 
     // MARK: - Saving
 
+    /// Runs `runDeferredSave` at `saveDate`, unless focus moves on first.
+    private func scheduleDeferredSave(reason: ShotReason, at saveDate: Date) {
+        let focusCountWhenScheduled = focusChangeCount
+        deferredSaveTask?.cancel()
+        deferredSaveTask = Task { [weak self] in
+            let secondsToWait = max(0, saveDate.timeIntervalSinceNow)
+            try? await Task.sleep(nanoseconds: UInt64(secondsToWait * 1_000_000_000))
+            if Task.isCancelled { return }
+            await self?.runDeferredSave(reason: reason, focusCountWhenScheduled: focusCountWhenScheduled)
+        }
+    }
+
+    /// A deferred save asks the 2 s limit again when it wakes, and waits longer if a save began in between.
     private func runDeferredSave(reason: ShotReason, focusCountWhenScheduled: Int) {
         guard isRunning, focusChangeCount == focusCountWhenScheduled else { return }
-        saveAutomatically(reason: reason)
+        switch saveSchedule.decide(reason: reason, now: Date(), differenceFromLastSaved: nil) {
+        case .saveNow:
+            saveAutomatically(reason: reason)
+        case .saveAt(let saveDate):
+            scheduleDeferredSave(reason: reason, at: saveDate)
+        case .skip:
+            break
+        }
     }
 
     /// Runs a save in the background without blocking the caller; a failure is dropped
@@ -124,13 +137,7 @@ actor SessionScreenRecorder {
         guard !isAutomaticSaveInFlight else {
             // A save is already under way; a switch must not be lost, so retry shortly.
             if reason != .screenChange {
-                let focusCountWhenScheduled = focusChangeCount
-                deferredSaveTask?.cancel()
-                deferredSaveTask = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    if Task.isCancelled { return }
-                    await self?.runDeferredSave(reason: reason, focusCountWhenScheduled: focusCountWhenScheduled)
-                }
+                scheduleDeferredSave(reason: reason, at: Date().addingTimeInterval(0.5))
             }
             return
         }
@@ -144,8 +151,7 @@ actor SessionScreenRecorder {
     private func checkForScreenChange() async {
         guard isRunning, !isAutomaticSaveInFlight, let lastSavedGroup else { return }
         // Cheap early exit inside the quiet period: no capture needed to know it would be skipped.
-        let quietPeriodDecision = savePolicy.decide(reason: .screenChange, now: Date(), lastSaveTime: lastSaveTime,
-                                                    differenceFromLastSaved: 1.0)
+        let quietPeriodDecision = saveSchedule.decide(reason: .screenChange, now: Date(), differenceFromLastSaved: 1.0)
         guard quietPeriodDecision != .skip else { return }
 
         isAutomaticSaveInFlight = true
@@ -165,14 +171,15 @@ actor SessionScreenRecorder {
             }
         )
         let difference = sampledGroup.maximumDifference(from: lastSavedGroup)
-        let decision = savePolicy.decide(reason: .screenChange, now: Date(), lastSaveTime: lastSaveTime,
-                                         differenceFromLastSaved: difference)
+        let decision = saveSchedule.decide(reason: .screenChange, now: Date(), differenceFromLastSaved: difference)
         guard decision == .saveNow else { return }
         _ = try? await saveFullCapture(reason: .screenChange)
     }
 
     /// Captures every display at the size sent to the AI, writes the JPEGs and reports the group.
     private func saveFullCapture(reason: ShotReason) async throws -> ShotGroup {
+        // The save time is taken now, not when the capture finishes, so a second change cannot slip inside the 2 s.
+        saveSchedule.noteSaveStarted(at: Date())
         let capturedDisplays = try await CompanionScreenCaptureUtility.captureAllDisplays(
             longSidePixels: CompanionScreenCaptureUtility.sentImageLongSidePixels
         )
@@ -202,7 +209,6 @@ actor SessionScreenRecorder {
         let group = ShotGroup(id: groupID, capturedAt: Date(), reason: reason, appName: currentAppName,
                               windowTitle: currentWindowTitle, shots: displayShots)
         lastSavedGroup = group
-        lastSaveTime = group.capturedAt
         onShotGroup?(group)
         return group
     }

@@ -2,7 +2,8 @@
 //  SessionCoordinator.swift
 //  leanring-buddy
 //
-//  Owns one Clicky Fork session from Start to Stop: microphone, screen
+//  Owns one Clicky Fork session from Start to Stop (phases idle, starting, running,
+//  stopping, ruled by `SessionLifecycle` in ClickyCore): microphone, screen
 //  recording, window tracking, the question key, the session log and the AI
 //  provider. The windows read its state and call startSession and stopSession.
 //
@@ -14,6 +15,7 @@
 //
 
 import AppKit
+import AVFoundation
 import ClickyCore
 import ClickySpeech
 import Combine
@@ -30,7 +32,11 @@ final class SessionCoordinator: ObservableObject {
     /// The chat window shows this state; the coordinator fills it during a session.
     let chatWindowState = ChatWindowState()
 
-    @Published private(set) var isSessionRunning = false
+    /// The phase rules (idle, starting, running, stopping) live in ClickyCore, where every phase and action is tested.
+    @Published private(set) var lifecycle = SessionLifecycle()
+
+    /// True only while the session runs and everything that captures is on.
+    var isSessionRunning: Bool { lifecycle.isRunning }
 
     /// A short line for the menu bar panel when a session could not start.
     @Published private(set) var panelNotice: String?
@@ -48,7 +54,20 @@ final class SessionCoordinator: ObservableObject {
     private var speechTranscriberTask: Task<SpeechTranscriber, Never>?
     private var isSpeechTranscriberReady = false
 
-    private var isStartingOrStopping = false
+    /// Finishes the session folders a crash left open, once at launch. Start waits for it, so it can never
+    /// finish the session that is about to begin.
+    private var abandonedSessionsTask: Task<Void, Never>?
+
+    private var startTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    /// The summary request while Stop waits for it; Quit cancels it.
+    private var summaryTask: Task<String?, Never>?
+    private var isSummarySkipped = false
+    /// The one chat line that names what Start is waiting for; removed when Start ends.
+    private var startStatusMessageID: UUID?
+    /// True once the screen, microphone or key tap was switched on for the session being started.
+    private var didStartCapture = false
+
     private var sessionID: String?
     private var screenRecorder: SessionScreenRecorder?
     private var speechPipeline: SessionSpeechPipeline?
@@ -78,7 +97,7 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Speech model
+    // MARK: - Work at launch
 
     /// Starts loading the speech model. Loading reads no audio and opens no microphone.
     func prepareSpeech() {
@@ -90,18 +109,73 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Start
-
-    func startSession() {
-        guard !isSessionRunning, !isStartingOrStopping else { return }
-        isStartingOrStopping = true
-        panelNotice = nil
-        Task {
-            await performStart()
-            isStartingOrStopping = false
+    /// Finishes session folders an earlier crash or force quit left open. Runs off the main actor.
+    func finishAbandonedSessionsAtLaunch() {
+        guard abandonedSessionsTask == nil else { return }
+        let sessionStore = self.sessionStore
+        abandonedSessionsTask = Task.detached(priority: .utility) {
+            _ = try? await sessionStore.finishAbandonedSessions(exceptSessionID: nil)
         }
     }
 
+    // MARK: - The Start / Stop button
+
+    /// What the panel's button does in the current phase: start, cancel a start, stop, or nothing.
+    func handleSessionButton() {
+        switch lifecycle.decideButtonPress() {
+        case .startSession: startSession()
+        case .cancelStart: cancelStart()
+        case .stopSession: beginStop(askForSummary: settings.summaryAtStopEnabled)
+        case .ignore: break
+        }
+    }
+
+    // MARK: - Start
+
+    func startSession() {
+        guard lifecycle.beginStart() else { return }
+        panelNotice = nil
+        didStartCapture = false
+        // A new session replaces the finished conversation in the chat window.
+        chatWindowState.messages = []
+        chatWindowState.usageLimitOffer = nil
+        chatWindowState.questionPhase = .idle
+        AppWindowRouter.shared.showChat()
+        startTask = Task {
+            await performStart()
+            startTask = nil
+        }
+    }
+
+    /// Cancels a Start in progress. Nothing was captured: the half-made session folder is removed.
+    func cancelStart() {
+        guard lifecycle.phase == .starting else { return }
+        startTask?.cancel()
+    }
+
+    private func advanceStart(to step: SessionStartStep) {
+        lifecycle.advanceStart(to: step)
+        showStartStatus(step.statusText)
+    }
+
+    private func showStartStatus(_ text: String) {
+        if let startStatusMessageID, let index = chatWindowState.messages.firstIndex(where: { $0.id == startStatusMessageID }) {
+            chatWindowState.messages[index].text = text
+        } else {
+            let message = ChatMessage(role: .notice, text: text)
+            startStatusMessageID = message.id
+            chatWindowState.messages.append(message)
+        }
+    }
+
+    private func removeStartStatus() {
+        guard let startStatusMessageID else { return }
+        chatWindowState.messages.removeAll { $0.id == startStatusMessageID }
+        self.startStatusMessageID = nil
+    }
+
+    /// Turns on nothing that captures until speech is ready, the microphone is allowed and the provider has
+    /// started; then screen, microphone and key tap start together and the session is running.
     private func performStart() async {
         // 1. The two permissions the app cannot ask for itself while running.
         var missingPermissions: [String] = []
@@ -110,25 +184,68 @@ final class SessionCoordinator: ObservableObject {
             missingPermissions.append("Screen Recording")
         }
         if !missingPermissions.isEmpty {
-            let noticeText = "Turn on \(missingPermissions.joined(separator: " and ")) for Clicky Fork in System Settings, under Privacy and Security, then start the session again."
-            failToStart(noticeText)
+            await discardStart(failure: "Turn on \(missingPermissions.joined(separator: " and ")) for Clicky Fork in System Settings, under Privacy and Security, then start the session again.")
             return
         }
 
-        // A new session replaces the finished conversation in the chat window.
         let providerID = settings.selectedProvider
-        chatWindowState.messages = []
-        chatWindowState.usageLimitOffer = nil
-        chatWindowState.questionPhase = .idle
-        chatWindowState.activeProviderName = ProviderFailureNotice.displayName(for: providerID)
+        let providerName = ProviderFailureNotice.displayName(for: providerID)
+        chatWindowState.activeProviderName = providerName
         chatWindowState.activeModel = displayModelName(for: providerID)
 
-        // 2. The log.
+        // 2. Crash leftovers are finished before any new session folder exists.
+        advanceStart(to: .preparingSessionLog)
+        if abandonedSessionsTask == nil { finishAbandonedSessionsAtLaunch() }
+        if let abandonedSessionsTask {
+            guard await CancellableWait.result(of: { await abandonedSessionsTask.value }) != nil else {
+                await discardStart(failure: nil)
+                return
+            }
+        }
+
+        // 3. Speech: wait for the model if it is still loading.
+        if speechTranscriberTask == nil { prepareSpeech() }
+        guard let speechTranscriberTask else {
+            await discardStart(failure: "Speech could not be prepared.")
+            return
+        }
+        if !isSpeechTranscriberReady { advanceStart(to: .gettingSpeechReady) }
+        guard let transcriber = await CancellableWait.result(of: { await speechTranscriberTask.value }) else {
+            await discardStart(failure: nil)
+            return
+        }
+        let usesAppleSpeech = !(transcriber is ParakeetSpeechTranscriber)
+
+        // 4. The microphone permission, asked here while nothing is on yet.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            advanceStart(to: .waitingForMicrophonePermission)
+            guard let isMicrophoneGranted = await CancellableWait.result(of: { await MicrophoneSampleSource.requestPermission() }) else {
+                await discardStart(failure: nil)
+                return
+            }
+            if !isMicrophoneGranted {
+                await discardStart(failure: "Turn on Microphone for Clicky Fork in System Settings, under Privacy and Security, then start the session again.")
+                return
+            }
+        default:
+            await discardStart(failure: "Turn on Microphone for Clicky Fork in System Settings, under Privacy and Security, then start the session again.")
+            return
+        }
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
+
+        // 5. The log and the provider. The provider starts its helper process; it reads no screen or sound.
+        advanceStart(to: .startingProvider(providerName: providerName))
         let startedSessionID: String
         do {
             startedSessionID = try await sessionStore.startSession(at: Date()).id
         } catch {
-            failToStart("The session log could not be created.")
+            await discardStart(failure: "The session log could not be created.")
             return
         }
         sessionID = startedSessionID
@@ -143,7 +260,22 @@ final class SessionCoordinator: ObservableObject {
 
         let flow = makeQuestionFlow(sessionID: startedSessionID, shotsDirectory: shotsDirectory, recorder: recorder)
         questionFlow = flow
+        do {
+            try await flow.begin()
+        } catch let failure as ProviderFailure {
+            await discardStart(failure: ProviderFailureNotice.text(for: failure, provider: providerID))
+            return
+        } catch {
+            await discardStart(failure: "The AI helper could not be started.")
+            return
+        }
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
 
+        // 6. Everything is ready: screen, microphone and key tap start together.
+        didStartCapture = true
         let sessionStore = self.sessionStore
         sessionInputTask = Task {
             for await input in inputStream {
@@ -158,7 +290,24 @@ final class SessionCoordinator: ObservableObject {
         }
         inputContinuation.yield(.event(SessionEvent(time: Date(), kind: .sessionStarted)))
 
-        // 3. Window tracking, then screen recording (it needs to know the starting window).
+        let pipeline = SessionSpeechPipeline(transcriber: transcriber, source: MicrophoneSampleSource())
+        speechPipeline = pipeline
+        await pipeline.setHandlers(
+            onUtterance: { text, spokenFrom, _ in
+                inputContinuation.yield(.event(SessionEvent(time: spokenFrom, kind: .utterance(text: text))))
+            },
+            onAudioLevel: { [weak self] level in
+                Task { @MainActor in self?.noteAudioLevel(level) }
+            }
+        )
+        do {
+            try await pipeline.start()
+        } catch {
+            await discardStart(failure: error.localizedDescription)
+            return
+        }
+
+        // Window tracking, then screen recording (it needs to know the starting window).
         frontmostWindowTracker.start { [weak self] appName, windowTitle, isAppSwitch in
             inputContinuation.yield(.event(SessionEvent(
                 time: Date(), kind: .focusChanged(appName: appName, windowTitle: windowTitle)
@@ -173,57 +322,27 @@ final class SessionCoordinator: ObservableObject {
         do {
             try await recorder.start { group in inputContinuation.yield(.shotGroup(group)) }
         } catch {
-            await abandonStart("Screen Recording is not working. Check that Clicky Fork is allowed in System Settings, under Privacy and Security.")
+            await discardStart(failure: "Screen Recording is not working. Check that Clicky Fork is allowed in System Settings, under Privacy and Security.")
             return
         }
 
-        // 4. Speech: wait for the model if it is still loading.
-        if speechTranscriberTask == nil { prepareSpeech() }
-        if !isSpeechTranscriberReady {
-            chatWindowState.messages.append(ChatMessage(role: .notice, text: "Getting speech ready"))
-            panelNotice = "Getting speech ready"
-        }
-        let transcriber = await speechTranscriberTask!.value
-        panelNotice = nil
-        let pipeline = SessionSpeechPipeline(transcriber: transcriber, source: MicrophoneSampleSource())
-        speechPipeline = pipeline
-        await pipeline.setHandlers(
-            onUtterance: { text, spokenFrom, _ in
-                inputContinuation.yield(.event(SessionEvent(time: spokenFrom, kind: .utterance(text: text))))
-            },
-            onAudioLevel: { [weak self] level in
-                Task { @MainActor in self?.noteAudioLevel(level) }
-            }
-        )
-        do {
-            try await pipeline.start()
-        } catch {
-            await abandonStart(error.localizedDescription)
-            return
-        }
-
-        // 5. The provider, then the question key last, so no tap can arrive before the conversation exists.
-        do {
-            try await flow.begin()
-        } catch let failure as ProviderFailure {
-            await abandonStart(ProviderFailureNotice.text(for: failure, provider: providerID))
-            return
-        } catch {
-            await abandonStart("The AI helper could not be started.")
-            return
-        }
+        // The question key last, so no tap can arrive before the conversation exists.
         guard questionKeyMonitor.start() else {
-            await abandonStart("The question key needs Accessibility. Turn it on for Clicky Fork in System Settings, under Privacy and Security.")
+            await discardStart(failure: "The question key needs Accessibility. Turn it on for Clicky Fork in System Settings, under Privacy and Security.")
             return
         }
 
-        isSessionRunning = true
+        removeStartStatus()
+        if usesAppleSpeech {
+            chatWindowState.messages.append(ChatMessage(role: .notice, text: "Using Apple speech: the Parakeet model is not available"))
+        }
+        _ = lifecycle.finishStart()
         chatWindowState.isSessionRunning = true
-        AppWindowRouter.shared.showChat()
     }
 
-    /// Stops whatever a failed start had already started, then reports why.
-    private func abandonStart(_ noticeText: String) async {
+    /// Ends a Start that failed or was cancelled: switches off whatever was on, ends the provider, and either
+    /// removes the session folder (nothing was captured) or finishes it as a short session (something was).
+    private func discardStart(failure noticeText: String?) async {
         questionKeyMonitor.stop()
         await speechPipeline?.stop()
         await screenRecorder?.stop()
@@ -232,16 +351,23 @@ final class SessionCoordinator: ObservableObject {
         await sessionInputTask?.value
         _ = await questionFlow?.finish(summaryEnabled: false)
         if let sessionID {
-            _ = try? await sessionStore.finishSession(sessionID: sessionID, at: Date(), summary: nil)
+            if didStartCapture {
+                _ = try? await sessionStore.finishSession(sessionID: sessionID, at: Date(), summary: nil)
+            } else {
+                try? FileManager.default.removeItem(at: locations.sessionsDirectory.appendingPathComponent(sessionID))
+            }
         }
         clearSessionObjects()
-        failToStart(noticeText)
+        removeStartStatus()
+        didStartCapture = false
+        lifecycle.endStartWithoutSession()
+        chatWindowState.isSessionRunning = false
+        if let noticeText { failToStart(noticeText) }
     }
 
     private func failToStart(_ noticeText: String) {
         panelNotice = noticeText
         chatWindowState.messages.append(ChatMessage(role: .notice, text: noticeText))
-        chatWindowState.isSessionRunning = false
         AppWindowRouter.shared.showChat()
     }
 
@@ -291,7 +417,7 @@ final class SessionCoordinator: ObservableObject {
     // MARK: - Question key
 
     private func handleQuestionKeySignal(_ signal: QuestionKeySignal) async {
-        guard isSessionRunning, let questionFlow else { return }
+        guard lifecycle.acceptsQuestionKeySignals, let questionFlow else { return }
         let outcome = await questionFlow.handle(signal)
         if outcome == .ignoredBecauseBusy, case .questionStarted = signal {
             // The tap was dropped, so forget it: the next tap must start a question, not send one.
@@ -300,7 +426,8 @@ final class SessionCoordinator: ObservableObject {
     }
 
     private func noteAudioLevel(_ level: Double) {
-        guard case .listening = currentPhase, abs(level - lastShownAudioLevel) > 0.02 else { return }
+        guard lifecycle.acceptsFlowPhaseUpdates, case .listening = currentPhase,
+              abs(level - lastShownAudioLevel) > 0.02 else { return }
         lastShownAudioLevel = level
         markerPanel.show(phase: .listening(audioLevel: level))
     }
@@ -308,44 +435,44 @@ final class SessionCoordinator: ObservableObject {
     // MARK: - Switching provider
 
     private func switchToChatGPT() {
-        guard let questionFlow else { return }
+        guard lifecycle.isRunning, let questionFlow else { return }
         Task { await questionFlow.switchProvider(to: .chatgpt) }
     }
 
     // MARK: - Stop
 
+    /// The chat window's Stop: stops a running session, or cancels a Start in progress.
     func stopSession() {
-        guard isSessionRunning, !isStartingOrStopping else { return }
-        isStartingOrStopping = true
-        Task {
-            await performStop(askForSummary: settings.summaryAtStopEnabled)
-            isStartingOrStopping = false
+        switch lifecycle.decideButtonPress() {
+        case .stopSession: beginStop(askForSummary: settings.summaryAtStopEnabled)
+        case .cancelStart: cancelStart()
+        case .startSession, .ignore: break
         }
     }
 
-    /// Quitting the app mid-session: the same Stop, without the summary request.
-    func stopSessionForQuit() async {
-        guard isSessionRunning else { return }
-        while isStartingOrStopping { try? await Task.sleep(nanoseconds: 50_000_000) }
-        guard isSessionRunning else { return }
-        isStartingOrStopping = true
-        await performStop(askForSummary: false)
-        isStartingOrStopping = false
+    /// Leaves running at once (so no key signal or phase update passes), then finishes the stop in the background.
+    private func beginStop(askForSummary: Bool) {
+        guard lifecycle.beginStop() else { return }
+        chatWindowState.isSessionRunning = false
+        stopTask = Task {
+            await performStop(askForSummary: askForSummary)
+            stopTask = nil
+        }
     }
 
     private func performStop(askForSummary: Bool) async {
-        guard let flow = questionFlow, let finishingSessionID = sessionID else { return }
+        guard let flow = questionFlow, let finishingSessionID = sessionID else {
+            lifecycle.finishStop()
+            return
+        }
 
         // Everything that watches or listens goes off first.
         questionKeyMonitor.stop()
         await speechPipeline?.stop()
         await screenRecorder?.stop()
         frontmostWindowTracker.stop()
-        markerPanel.hide()
+        resetMarkerAndQuestionPhase()
         pointerFlight.cancelFlight()
-        isSessionRunning = false
-        chatWindowState.isSessionRunning = false
-        chatWindowState.questionPhase = .idle
         chatWindowState.usageLimitOffer = nil
         currentPhase = .idle
 
@@ -353,19 +480,72 @@ final class SessionCoordinator: ObservableObject {
         sessionInputContinuation?.finish()
         await sessionInputTask?.value
 
-        let summary = await flow.finish(summaryEnabled: askForSummary)
+        let wantsSummary = askForSummary && !isSummarySkipped
+        let finishTask = Task { await flow.finish(summaryEnabled: wantsSummary) }
+        if wantsSummary { summaryTask = finishTask }
+        let summary = await finishTask.value
+        summaryTask = nil
+
+        // A tap queued before Stop may have landed a phase while the flow finished.
+        resetMarkerAndQuestionPhase()
+
         do {
             _ = try await sessionStore.finishSession(sessionID: finishingSessionID, at: Date(), summary: summary)
         } catch {
             print("Clicky Fork: the session log could not be finished: \(error)")
         }
         clearSessionObjects()
+        isSummarySkipped = false
+        lifecycle.finishStop()
         sessionFinished.send(finishingSessionID)
+    }
+
+    private func resetMarkerAndQuestionPhase() {
+        markerPanel.hide()
+        chatWindowState.questionPhase = .idle
+    }
+
+    // MARK: - Quit
+
+    /// Decides at once what Quit must do in the current phase.
+    func requestQuit() -> SessionQuitDecision {
+        lifecycle.requestQuit()
+    }
+
+    /// Carries out the decision: cancel a Start, stop a running session without the summary, or let a Stop
+    /// finish with its summary skipped. Returns when the session work is done and the app may quit.
+    func carryOutQuit(_ decision: SessionQuitDecision) async {
+        switch decision {
+        case .terminateNow, .alreadyHandled:
+            return
+        case .cancelStartThenTerminate:
+            cancelStart()
+            await startTask?.value
+            // The start may have finished just before the cancel landed.
+            beginStop(askForSummary: false)
+            await stopTask?.value
+        case .stopWithoutSummaryThenTerminate:
+            beginStop(askForSummary: false)
+            await stopTask?.value
+        case .skipSummaryAndWaitForStopThenTerminate:
+            skipSummary()
+            await stopTask?.value
+        }
+    }
+
+    /// Drops the summary: cancels the request and ends the provider's helper processes so it returns at once.
+    private func skipSummary() {
+        isSummarySkipped = true
+        guard let summaryTask else { return }
+        summaryTask.cancel()
+        ChildProcessTerminator.terminateDirectChildren()
     }
 
     // MARK: - What the question flow tells the screen
 
     fileprivate func showPhase(_ phase: SessionFlowPhase) {
+        // Once Stop has begun, a late phase (a tap queued just before Stop) must not light the marker again.
+        guard lifecycle.acceptsFlowPhaseUpdates else { return }
         currentPhase = phase
         let providerName: (ProviderID) -> String = { ProviderFailureNotice.displayName(for: $0) }
         switch phase {
@@ -415,8 +595,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     fileprivate func providerChanged(to provider: ProviderID, model: String) {
-        // The choice holds for the rest of the session, as the Settings screen shows it too.
-        settings.selectedProvider = provider
+        // The switch holds for this session only; the saved setting stays as the user set it.
         let name = ProviderFailureNotice.displayName(for: provider)
         chatWindowState.activeProviderName = name
         chatWindowState.activeModel = model.isEmpty ? "default" : model
