@@ -3,7 +3,8 @@
 //  leanring-buddy
 //
 //  The one place the menu bar panel asks to open the chat, sessions and
-//  settings windows. Later slices replace the prints with real windows.
+//  settings windows. Each window's controller is made the first time it is
+//  asked for and kept, so the window keeps its place and its state.
 //
 
 import Foundation
@@ -12,17 +13,21 @@ import Foundation
 final class AppWindowRouter {
     static let shared = AppWindowRouter()
 
+    private lazy var chatPanelController = ChatPanelController()
+    private lazy var sessionsWindowController = SessionsWindowController()
+    private lazy var settingsWindowController = SettingsWindowController()
+
     private init() {}
 
     func showChat() {
-        print("AppWindowRouter: showChat")
+        chatPanelController.show()
     }
 
     func showSessions() {
-        print("AppWindowRouter: showSessions")
+        sessionsWindowController.show()
     }
 
     func showSettings() {
-        print("AppWindowRouter: showSettings")
+        settingsWindowController.show()
     }
 }
