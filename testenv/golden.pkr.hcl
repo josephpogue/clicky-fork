@@ -7,10 +7,11 @@ packer {
 }
 
 variable "vm_name" { type = string }
-# The FluidAudio Parakeet model folder on the host, staged into the guest so the app needs no download.
+# The FluidAudio Parakeet v3 model folder on the host, staged into the guest so the app needs no download.
+# FluidAudio 0.18 loads v3 from `parakeet-tdt-0.6b-v3` (with JointDecisionv3.mlmodelc), not the older `-coreml` folder.
 variable "model_dir" {
   type    = string
-  default = "${env("HOME")}/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml"
+  default = "${env("HOME")}/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3"
 }
 
 source "tart-cli" "golden" {

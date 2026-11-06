@@ -148,6 +148,13 @@ public actor SessionStore {
     // MARK: Read back
 
     /// Newest first. Folders without a readable `session.json` are skipped.
+    /// Finishes every session folder a crash or force quit left without `endedAt`, except the one
+    /// running now: runs the same cleanup and `log.md` as Stop, with no summary. Returns the ids it finished.
+    public func finishAbandonedSessions(exceptSessionID: String?) throws -> [String] {
+        // Filled in by the session log fix.
+        return []
+    }
+
     public func listSessions() throws -> [SessionMetadata] {
         guard fileManager.fileExists(atPath: locations.sessionsDirectory.path) else { return [] }
         let folders = try fileManager.contentsOfDirectory(

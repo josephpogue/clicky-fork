@@ -30,4 +30,10 @@ final class AppWindowRouter {
     func showSettings() {
         settingsWindowController.show()
     }
+
+    /// Ends any `claude auth login` or `codex login` that Settings started, so quitting the app
+    /// leaves no login process behind. Called from `applicationShouldTerminate`.
+    func endRunningSignIns() {
+        // Filled in by the Settings fix: end the login processes Settings started.
+    }
 }
