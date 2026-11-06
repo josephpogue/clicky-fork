@@ -30,6 +30,8 @@ final class CursorAnswerPresenter {
 
     private var speakingPanel: CursorAttachedPanel?
     private var isSpeaking = false
+    /// Decides show, update in place or leave alone as an answer grows (and after a click or key dismissed it).
+    private var growingBubbleState = GrowingAnswerBubbleState()
 
     private var followTimer: Timer?
     private var globalDismissMonitor: Any?
@@ -44,13 +46,34 @@ final class CursorAnswerPresenter {
 
     /// Shows an answer's text in the bubble beside the cursor, replacing any bubble already there.
     func showAnswer(text: String) {
+        growingBubbleState.reset()
         showBubble(text: text, isNotice: false)
     }
 
     /// Shows a short notice beside the cursor the same way as an answer.
     func showNotice(text: String) {
+        growingBubbleState.reset()
         showBubble(text: text, isNotice: true)
     }
+
+    /// The answer so far, each time it grows: the first report shows the bubble, later ones change its text in place.
+    func showGrowingAnswer(text: String) {
+        apply(growingBubbleState.textReported(text))
+    }
+
+    /// "Checking your notes" under the text so far, or alone before any text.
+    func showCheckingLine() {
+        apply(growingBubbleState.checkingLineReported())
+    }
+
+    /// The final answer: the same bubble, newest lines, no checking line. Not shown again when the user dismissed
+    /// the bubble and the text is what it already showed.
+    func showFinalAnswer(text: String) {
+        apply(growingBubbleState.finalAnswerReported(text))
+    }
+
+    /// True when a bubble is on screen (the listening marker hides once the first text or checking line shows).
+    var isBubbleShowing: Bool { bubblePanel != nil }
 
     /// Shows the speaker capsule beside the cursor while an answer is read aloud, and removes it after.
     func showSpeaking(_ isSpeaking: Bool) {
@@ -61,6 +84,7 @@ final class CursorAnswerPresenter {
 
     /// Removes the bubble and the speaker capsule at once: a new question, Start, Stop and Quit.
     func hideAll() {
+        growingBubbleState.reset()
         isSpeaking = false
         removeBubbleNow()
         fadingBubblePanel?.removeNow()
@@ -73,7 +97,46 @@ final class CursorAnswerPresenter {
 
     // MARK: - Bubble
 
+    private func apply(_ action: GrowingAnswerBubbleState.Action) {
+        switch action {
+        case .nothing:
+            return
+        case .show(let text, let showsCheckingLine):
+            showBubble(content: AnswerBubbleContent(
+                text: text, isNotice: false, showsNewestLines: true, showsCheckingLine: showsCheckingLine))
+        case .update(let text, let showsCheckingLine):
+            updateBubbleInPlace(content: AnswerBubbleContent(
+                text: text, isNotice: false, showsNewestLines: true, showsCheckingLine: showsCheckingLine))
+        }
+    }
+
+    /// Changes the text of the bubble on screen with no fade. When the new text needs a different size, a new panel
+    /// takes the old one's place at once (shown before the old one goes), because a panel is fixed-size.
+    private func updateBubbleInPlace(content: AnswerBubbleContent) {
+        guard let panel = bubblePanel, let currentContent = bubbleContent else {
+            showBubble(content: content)
+            return
+        }
+        if content.size == currentContent.size {
+            bubbleContent = content
+            panel.update(rootView: AnswerBubbleView(content: content, nearCorner: bubbleNearCorner))
+            return
+        }
+        let replacement = CursorAttachedPanel(
+            rootView: AnswerBubbleView(content: content, nearCorner: bubbleNearCorner), size: content.size,
+            shadowMargin: AnswerBubbleView.shadowMargin)
+        bubblePanel = replacement
+        bubbleContent = content
+        moveBubbleToItsSpot()
+        replacement.show()
+        panel.removeNow()
+    }
+
     private func showBubble(text: String, isNotice: Bool) {
+        showBubble(content: AnswerBubbleContent(text: text, isNotice: isNotice))
+    }
+
+    private func showBubble(content: AnswerBubbleContent) {
         removeBubbleNow()
         fadingBubblePanel?.removeNow()
         fadingBubblePanel = nil
@@ -81,7 +144,6 @@ final class CursorAnswerPresenter {
         speakingPanel?.removeNow()
         speakingPanel = nil
 
-        let content = AnswerBubbleContent(text: text, isNotice: isNotice)
         let panel = CursorAttachedPanel(
             rootView: AnswerBubbleView(content: content, nearCorner: .topLeading), size: content.size,
             shadowMargin: AnswerBubbleView.shadowMargin)
@@ -103,6 +165,7 @@ final class CursorAnswerPresenter {
     /// A click or keypress: fade the bubble out, stop watching events, and bring the capsule back if reading continues.
     private func dismissBubbleAfterUserInput() {
         guard let panel = bubblePanel else { return }
+        growingBubbleState.userDismissed()
         bubblePanel = nil
         bubbleContent = nil
         removeDismissMonitors()

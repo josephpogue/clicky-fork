@@ -58,6 +58,9 @@ final class SessionCoordinator: ObservableObject {
     /// Reads answers aloud when Settings asks for spoken answers.
     private let spokenAnswerPlayer = SpokenAnswerPlayer()
     private var settingsSubscriptions = Set<AnyCancellable>()
+    /// Which chat message is the answer still coming, and whether the checking line shows (pure rules in ClickyCore).
+    private var growingAnswerChat = GrowingAnswerChatState()
+    private var comingAnswerMessageID: UUID?
     /// The provider the open usage-limit offer switches to; an answer from any other provider clears the offer.
     private var usageLimitSwitchTarget: ProviderID?
     private let questionKeyMonitor = QuestionKeyMonitor()
@@ -163,6 +166,9 @@ final class SessionCoordinator: ObservableObject {
         didStartCapture = false
         // A new session replaces the finished conversation in the chat window.
         chatWindowState.messages = []
+        growingAnswerChat.reset()
+        comingAnswerMessageID = nil
+        chatWindowState.isCheckingNotes = false
         chatWindowState.usageLimitOffer = nil
         chatWindowState.questionPhase = .idle
         // Start opens no window: the chat window opens only from the menu-bar panel's Open chat row.
@@ -204,6 +210,10 @@ final class SessionCoordinator: ObservableObject {
     /// Turns on nothing that captures until speech is ready, the microphone is allowed and the provider has
     /// started; then screen, microphone and key tap start together and the session is running.
     private func performStart() async {
+        // The brain index refreshes while the permission and speech steps run; Start awaits it before the first
+        // question can be asked (step 5).
+        let brainRefreshTask = Task { await BrainIndexService.shared.refreshForSessionStart() }
+
         // 1. The two permissions the app cannot ask for itself while running.
         var missingPermissions: [String] = []
         if !WindowPositionManager.hasAccessibilityPermission() { missingPermissions.append("Accessibility") }
@@ -308,7 +318,14 @@ final class SessionCoordinator: ObservableObject {
         let recorder = SessionScreenRecorder(shotsDirectory: shotsDirectory)
         screenRecorder = recorder
 
-        let flow = makeQuestionFlow(sessionID: startedSessionID, shotsDirectory: shotsDirectory, recorder: recorder)
+        // The index is ready before the flow exists, so the first question can find passages.
+        guard await CancellableWait.result(of: { await brainRefreshTask.value }) != nil else {
+            await discardStart(failure: nil)
+            return
+        }
+        let flow = makeQuestionFlow(
+            sessionID: startedSessionID, shotsDirectory: shotsDirectory, recorder: recorder,
+            isBrainOn: BrainIndexService.shared.isBrainOn)
         questionFlow = flow
         do {
             try await flow.begin()
@@ -450,7 +467,9 @@ final class SessionCoordinator: ObservableObject {
         currentPhase = .idle
     }
 
-    private func makeQuestionFlow(sessionID: String, shotsDirectory: URL, recorder: SessionScreenRecorder) -> SessionQuestionFlow {
+    private func makeQuestionFlow(
+        sessionID: String, shotsDirectory: URL, recorder: SessionScreenRecorder, isBrainOn: Bool
+    ) -> SessionQuestionFlow {
         let locations = self.locations
         let sessionStore = self.sessionStore
         let speechPipelineProvider: @Sendable () async -> SessionSpeechPipeline? = { [weak self] in
@@ -474,7 +493,16 @@ final class SessionCoordinator: ObservableObject {
                 }
             },
             shotsDirectory: shotsDirectory,
-            timeZone: .current
+            timeZone: .current,
+            findPassages: { question, frontAppName, frontWindowTitle in
+                await BrainIndexService.shared.passages(
+                    forQuestion: question, frontAppName: frontAppName, frontWindowTitle: frontWindowTitle)
+            },
+            isBrainOn: isBrainOn,
+            brainMapPaths: { await BrainIndexService.shared.mapPaths() },
+            digDeeperRequest: { providerID in
+                await MainActor.run { SessionProviderFactory.digDeeperRequest(for: providerID) }
+            }
         )
         return SessionQuestionFlow(
             initialProvider: settings.selectedProvider,
@@ -573,6 +601,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     private func resetMarkerAndQuestionPhase() {
+        finishComingAnswerAsCutShort()
         markerPanel.hide()
         hideCursorAnswerAndStopSpeaking()
         chatWindowState.questionPhase = .idle
@@ -631,7 +660,9 @@ final class SessionCoordinator: ObservableObject {
             chatWindowState.questionPhase = .idle
             markerPanel.show(phase: .idle)
         case .listening:
-            // A new question replaces the last answer: its text goes and its reading stops.
+            // A new question replaces the last answer: its text goes and its reading stops. An answer still coming
+            // (when the flow did not already report it cut short) ends here as cut short.
+            finishComingAnswerAsCutShort()
             cursorAnswerPresenter.hideAll()
             spokenAnswerPlayer.stopAllSpeaking()
             // The old pointer flies home, so the next answer sits by the cursor, not under the old label.
@@ -653,12 +684,13 @@ final class SessionCoordinator: ObservableObject {
     }
 
     fileprivate func showAnswer(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
+        notesRead: [String]
     ) {
-        chatWindowState.messages.append(ChatMessage(
-            role: .answer, text: spokenText, providerName: ProviderFailureNotice.displayName(for: provider),
-            model: model, secondsToAnswer: secondsToAnswer, pointLabel: pointLabel
-        ))
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead)
+        apply(growingAnswerChat.finalAnswerReceived(spokenText), details: details)
         chatWindowState.activeModel = model.isEmpty ? "default" : model
         settings.recordMeasuredAnswerSeconds(secondsToAnswer, for: provider)
         if chatWindowState.usageLimitOffer != nil, let switchTarget = usageLimitSwitchTarget,
@@ -668,8 +700,94 @@ final class SessionCoordinator: ObservableObject {
         // An answer that lands during Stop's drain reaches the chat only, like the pointer.
         guard lifecycle.acceptsPointerFlights else { return }
         let deliveryMode = settings.answerDeliveryMode
-        if deliveryMode.showsText { cursorAnswerPresenter.showAnswer(text: spokenText) }
-        if deliveryMode.speaksAloud { spokenAnswerPlayer.speak(text: spokenText) }
+        if deliveryMode.showsText { cursorAnswerPresenter.showFinalAnswer(text: spokenText) }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakFinalAnswer(text: spokenText) }
+    }
+
+    /// The answer so far: the chat message grows, the bubble grows in place and finished sentences are spoken.
+    fileprivate func showAnswerText(visibleText: String, provider: ProviderID, model: String) {
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: nil, pointLabel: nil, notesRead: [])
+        apply(growingAnswerChat.textReported(visibleText), details: details)
+        guard lifecycle.acceptsPointerFlights else { return }
+        // The listening or waiting marker has done its job once the answer starts to show.
+        markerPanel.hide()
+        let deliveryMode = settings.answerDeliveryMode
+        if deliveryMode.showsText { cursorAnswerPresenter.showGrowingAnswer(text: visibleText) }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakNewSentences(visibleTextSoFar: visibleText) }
+    }
+
+    fileprivate func showCheckingNotes() {
+        apply(growingAnswerChat.checkingReported(), details: nil)
+        guard lifecycle.acceptsPointerFlights else { return }
+        markerPanel.hide()
+        let deliveryMode = settings.answerDeliveryMode
+        if deliveryMode.showsText { cursorAnswerPresenter.showCheckingLine() }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakCheckingLine() }
+    }
+
+    /// A newer question ended the answer: the chat message ends with the cut-short line. The bubble stays as it
+    /// is until the new question's listening phase hides it, as it does today.
+    fileprivate func showAnswerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) {
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: nil, pointLabel: nil, notesRead: notesRead)
+        apply(growingAnswerChat.cutShort(visibleText: visibleText), details: details)
+    }
+
+    /// Stop, Quit and a new question's listening phase: nothing stays coming, and the checking line goes.
+    private func finishComingAnswerAsCutShort() {
+        apply(growingAnswerChat.abandon(), details: nil)
+    }
+
+    private struct ComingAnswerDetails {
+        let providerName: String
+        let model: String
+        let secondsToAnswer: Double?
+        let pointLabel: String?
+        let notesRead: [String]
+    }
+
+    /// Carries out the pure chat steps on the chat window's state.
+    private func apply(_ steps: [GrowingAnswerChatState.Step], details: ComingAnswerDetails?) {
+        for step in steps {
+            switch step {
+            case .setCheckingNotes(let isChecking):
+                chatWindowState.isCheckingNotes = isChecking
+            case .appendComingMessage(let text):
+                let message = ChatMessage(
+                    role: .answer, text: text, providerName: details?.providerName, model: details?.model,
+                    isStillComing: true)
+                comingAnswerMessageID = message.id
+                chatWindowState.messages.append(message)
+            case .replaceComingText(let text):
+                updateComingMessage { $0.text = text }
+            case .finishComingMessage(let text):
+                updateComingMessage { message in
+                    message.text = text
+                    if let details {
+                        message.model = details.model
+                        message.secondsToAnswer = details.secondsToAnswer
+                        message.pointLabel = details.pointLabel
+                        message.notesRead = details.notesRead
+                    }
+                    message.isStillComing = false
+                }
+                comingAnswerMessageID = nil
+            case .appendFinishedMessage(let text):
+                chatWindowState.messages.append(ChatMessage(
+                    role: .answer, text: text, providerName: details?.providerName, model: details?.model,
+                    secondsToAnswer: details?.secondsToAnswer, pointLabel: details?.pointLabel,
+                    notesRead: details?.notesRead ?? []))
+            }
+        }
+    }
+
+    private func updateComingMessage(_ change: (inout ChatMessage) -> Void) {
+        guard let comingAnswerMessageID,
+              let index = chatWindowState.messages.firstIndex(where: { $0.id == comingAnswerMessageID }) else { return }
+        change(&chatWindowState.messages[index])
     }
 
     fileprivate func showNotice(_ text: String) {
@@ -735,8 +853,22 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         await MainActor.run {
             coordinator?.showAnswer(
                 spokenText: spokenText, provider: provider, model: model,
-                secondsToAnswer: secondsToAnswer, pointLabel: pointLabel
+                secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead
             )
+        }
+    }
+
+    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {
+        await MainActor.run { coordinator?.showAnswerText(visibleText: visibleText, provider: provider, model: model) }
+    }
+
+    func checkingNotesShown() async {
+        await MainActor.run { coordinator?.showCheckingNotes() }
+    }
+
+    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {
+        await MainActor.run {
+            coordinator?.showAnswerCutShort(visibleText: visibleText, provider: provider, model: model, notesRead: notesRead)
         }
     }
 
