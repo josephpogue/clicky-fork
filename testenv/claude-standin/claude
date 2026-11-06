@@ -287,7 +287,7 @@ class Session:
         say({"type": "assistant", "session_id": self.session_id,
              "message": {"model": self.model, "id": message_id, "type": "message", "role": "assistant", "content": [block]}})
 
-    def tool_step(self, message_id, index, tool, arguments, tool_use_id):
+    def tool_step(self, message_id, index, tool, arguments, tool_use_id, search_pause=0.0):
         """tool_use block (partial json deltas), the assistant line, the helper's real answer, the tool_result user line."""
         full_name = "mcp__brain__" + tool
         if self.partial:
@@ -302,6 +302,8 @@ class Session:
             self.emit_event({"type": "content_block_stop", "index": index})
             self.emit_event({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
             self.emit_event({"type": "message_stop"})
+        if search_pause:
+            pause(search_pause)   # the tool is running slowly: the app already saw the tool_use start and shows "Checking your notes"
         text, is_error = self.helper.call(tool, arguments)
         say({"type": "user", "session_id": self.session_id, "parent_tool_use_id": None, "message": {"role": "user", "content": [
             {"tool_use_id": tool_use_id, "type": "tool_result", "content": [{"type": "text", "text": text}], "is_error": is_error}]}})
@@ -383,13 +385,14 @@ class Session:
     def answer_with_brain(self, started, message_id, kind):
         tool_use_id = "toolu_standin_%d" % int(started * 1000)
         index = 0
+        search_pause = 0.0
         if kind == "port":
             self.stream_text("Let me check your notes for the demo port.", message_id, index)
             self.assistant_line(message_id, {"type": "text", "text": "Let me check your notes for the demo port."})
             index += 1
             tool, arguments = "search_brain", {"query": "demo server port", "limit": 5}
         elif kind == "deploy":
-            pause(3.0)   # no preamble: the app shows its own "Checking your notes" during this wait
+            search_pause = 3.0   # no preamble: the tool_use starts at once, then the search takes 3 s (the app shows "Checking your notes")
             tool, arguments = "search_brain", {"query": "deploy", "limit": 5}
         elif kind == "correction":
             first = "From the screen this looks like the Debug build."
@@ -400,7 +403,7 @@ class Session:
         else:   # secret
             tool, arguments = "read_brain_file", {"path": os.path.join(self.folder, "projects/demo-app/.env"),
                                                   "start_line": 1, "line_count": 50}
-        tool_text, is_error = self.tool_step(message_id, index, tool, arguments, tool_use_id)
+        tool_text, is_error = self.tool_step(message_id, index, tool, arguments, tool_use_id, search_pause)
         second_id = message_id + "_b"
         self.new_message(second_id)
         if kind == "port":

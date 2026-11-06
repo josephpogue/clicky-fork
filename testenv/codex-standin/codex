@@ -75,7 +75,7 @@ def passage_reply(prompt):
             body = body.strip()
             if body.startswith("File:"):
                 break
-            if body.startswith("#"):
+            if body.startswith("#") or body.startswith("Heading:"):
                 seen_heading = True
                 continue
             if body and (seen_heading or not sentence):
