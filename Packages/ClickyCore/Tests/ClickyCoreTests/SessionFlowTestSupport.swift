@@ -1,6 +1,45 @@
 import Foundation
 @testable import ClickyCore
 
+/// Holds a caller at a point until the test opens it, so a test can press Stop at an exact moment.
+final class TestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var arrived = false
+    private var waiting: CheckedContinuation<Void, Never>?
+
+    /// True once a caller has reached the gate.
+    var hasArrived: Bool { lock.lock(); defer { lock.unlock() }; return arrived }
+
+    func pass() async {
+        lock.lock(); arrived = true; lock.unlock()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiting = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let continuation = waiting
+        waiting = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    /// Waits (up to two seconds) until a caller is held at the gate.
+    func waitUntilReached() async {
+        for _ in 0..<200 where !hasArrived { try? await Task.sleep(nanoseconds: 10_000_000) }
+    }
+}
+
 /// A test double of the AnswerProvider contract (the real ones run the claude and codex tools).
 /// It records every call and answers from a script, so the flow's own logic is what the tests exercise.
 final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
@@ -19,6 +58,8 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     private var recordedTurns: [(turn: QuestionTurn, model: String)] = []
     private var recordedSummaries: [(text: String, instructions: String, model: String)] = []
     private var endCount = 0
+    private var nextStartGate: TestGate?
+    private var nextStartFailure: ProviderFailure?
     private var summaryResult: Result<String, ProviderFailure> = .success("You asked about the Save button.")
 
     init(providerID: ProviderID) {
@@ -46,6 +87,18 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         continuation?.resume()
     }
 
+    /// The next startConversation call waits at this gate until the test opens it.
+    func holdNextStart(at gate: TestGate) {
+        lock.lock(); defer { lock.unlock() }
+        nextStartGate = gate
+    }
+
+    /// The next startConversation call throws this.
+    func failNextStart(with failure: ProviderFailure) {
+        lock.lock(); defer { lock.unlock() }
+        nextStartFailure = failure
+    }
+
     func setSummaryResult(_ result: Result<String, ProviderFailure>) {
         lock.lock(); defer { lock.unlock() }
         summaryResult = result
@@ -65,8 +118,15 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     // MARK: AnswerProvider
 
     func startConversation(instructions: String, model: String, recap: String?) async throws {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         recordedStarts.append(StartCall(instructions: instructions, model: model, recap: recap))
+        let gate = nextStartGate
+        nextStartGate = nil
+        let failure = nextStartFailure
+        nextStartFailure = nil
+        lock.unlock()
+        await gate?.pass()
+        if let failure { throw failure }
     }
 
     func ask(_ turn: QuestionTurn, model: String) async throws -> ProviderAnswer {
@@ -131,7 +191,16 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     private(set) var pointers: [Pointer] = []
 
     func phaseChanged(_ phase: SessionFlowPhase) async { lock.lock(); phases.append(phase); lock.unlock() }
-    func questionAsked(_ text: String) async { lock.lock(); questions.append(text); lock.unlock() }
+    func questionAsked(_ text: String) async {
+        lock.lock()
+        questions.append(text)
+        let gate = questionAskedGate
+        lock.unlock()
+        await gate?.pass()
+    }
+    private var questionAskedGate: TestGate?
+    /// The next questionAsked call waits at this gate, which is the moment between capture and ask.
+    func holdQuestionAsked(at gate: TestGate) { lock.lock(); questionAskedGate = gate; lock.unlock() }
     func answerReceived(
         spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
     ) async {
@@ -173,6 +242,8 @@ final class FlowHarness: @unchecked Sendable {
     let output = RecordingFlowOutput()
     let log = RecordedEventLog()
     let flow: SessionQuestionFlow
+    /// When set, the next screen capture waits here until the test opens the gate.
+    let captureHold = CaptureHold()
 
     private let lock = NSLock()
     private var transcriptions: [String] = []
@@ -185,6 +256,7 @@ final class FlowHarness: @unchecked Sendable {
         transcriptions = questions
         let claudeProvider = claude
         let chatgptProvider = chatgpt
+        let captureHold = self.captureHold
         let holder = HarnessState()
         flow = SessionQuestionFlow(
             initialProvider: .claude,
@@ -195,7 +267,8 @@ final class FlowHarness: @unchecked Sendable {
                 markQuestionStarted: { date in holder.recordStart(date) },
                 transcribeQuestion: { _, _ in holder.nextTranscription() },
                 captureCurrentGroup: {
-                    holder.makeGroup(shots: screenShots)
+                    await captureHold.takeGate()?.pass()
+                    return holder.makeGroup(shots: screenShots)
                 },
                 logEvent: { [log] event in log.append(event) },
                 shotsDirectory: URL(fileURLWithPath: "/tmp/clicky-flow-test-shots", isDirectory: true),
@@ -214,6 +287,14 @@ final class FlowHarness: @unchecked Sendable {
         _ = await flow.handle(.questionStarted(at: started))
         return await flow.handle(.sendQuestion(speechFrom: started, speechTo: started.addingTimeInterval(3)))
     }
+}
+
+/// Lets a test hold the next screen capture.
+final class CaptureHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var gate: TestGate?
+    func holdNextCapture(at newGate: TestGate) { lock.lock(); gate = newGate; lock.unlock() }
+    func takeGate() -> TestGate? { lock.lock(); defer { lock.unlock() }; let held = gate; gate = nil; return held }
 }
 
 /// Mutable bits behind the closures, kept in one lock so the harness stays Sendable.

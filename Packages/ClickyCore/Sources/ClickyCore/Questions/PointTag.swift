@@ -20,41 +20,96 @@ public struct PointTagParseResult: Equatable, Sendable {
     }
 }
 
-/// Parses `[POINT:x,y:label:screenN]` or `[POINT:none]` from the very end of an answer. Ported from upstream's parsePointingCoordinates.
+/// Parses `[POINT:x,y:label:screenN]` or `[POINT:none]` from an answer. Ported from upstream's parsePointingCoordinates,
+/// but wherever the tag sits: the last well-formed tag is the one pointed at, and every `[POINT:...]` is
+/// removed from the shown text, so the chat never shows raw tag text.
 public enum PointTagParser {
-    public static func parse(_ answerText: String) -> PointTagParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+    /// Anything that looks like a tag, well-formed or not; all of these are removed from the shown text.
+    private static let anyTagPattern = #"\[POINT:[^\]]*\]"#
 
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: answerText, range: NSRange(answerText.startIndex..., in: answerText)),
-              let tagRange = Range(match.range, in: answerText) else {
+    /// A well-formed tag: `none`, or two numbers (decimals allowed) with an optional label that may hold
+    /// colons, and an optional `:screenN` at the end. Spaces are allowed after `POINT:` and around the numbers.
+    private static let wellFormedTagPattern =
+        #"^\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?:\s*:(?!\s*screen\d+\s*\])([^\]]+?))?(?:\s*:\s*screen(\d+))?)\s*\]$"#
+
+    public static func parse(_ answerText: String) -> PointTagParseResult {
+        guard let anyTagRegex = try? NSRegularExpression(pattern: anyTagPattern),
+              let wellFormedRegex = try? NSRegularExpression(pattern: wellFormedTagPattern) else {
             return PointTagParseResult(spokenText: answerText, coordinate: nil, label: nil, screenNumber: nil)
         }
 
-        let spokenText = String(answerText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let wholeRange = NSRange(answerText.startIndex..., in: answerText)
+        let tagMatches = anyTagRegex.matches(in: answerText, range: wholeRange)
+        guard !tagMatches.isEmpty else {
+            return PointTagParseResult(spokenText: answerText, coordinate: nil, label: nil, screenNumber: nil)
+        }
 
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: answerText),
-              let yRange = Range(match.range(at: 2), in: answerText),
-              let x = Double(answerText[xRange]),
-              let y = Double(answerText[yRange]) else {
-            return PointTagParseResult(spokenText: spokenText, coordinate: nil, label: "none", screenNumber: nil)
+        var shownText = ""
+        var cursor = answerText.startIndex
+        var lastWellFormed: PointTagParseResult?
+
+        for tagMatch in tagMatches {
+            guard let tagRange = Range(tagMatch.range, in: answerText) else { continue }
+            let tagText = String(answerText[tagRange])
+
+            if let parsedTag = parseWellFormedTag(tagText, using: wellFormedRegex) {
+                lastWellFormed = parsedTag
+            }
+
+            // Keep the words before the tag, minus the spaces that led up to it.
+            var before = String(answerText[cursor..<tagRange.lowerBound])
+            while let lastCharacter = before.last, lastCharacter == " " || lastCharacter == "\t" {
+                before.removeLast()
+            }
+            shownText += before
+            cursor = tagRange.upperBound
+
+            // "Click Save. [POINT:...]." would leave a doubled full stop; the stray one goes.
+            if let lastShownCharacter = shownText.last, ".!?".contains(lastShownCharacter),
+               cursor < answerText.endIndex, answerText[cursor] == "." {
+                cursor = answerText.index(after: cursor)
+            }
+        }
+        shownText += String(answerText[cursor...])
+        let spokenText = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let lastWellFormed else {
+            return PointTagParseResult(spokenText: spokenText, coordinate: nil, label: nil, screenNumber: nil)
+        }
+        return PointTagParseResult(
+            spokenText: spokenText, coordinate: lastWellFormed.coordinate,
+            label: lastWellFormed.label, screenNumber: lastWellFormed.screenNumber
+        )
+    }
+
+    /// The point, label and screen a single well-formed tag names; nil when the tag is malformed.
+    private static func parseWellFormedTag(_ tagText: String, using regex: NSRegularExpression) -> PointTagParseResult? {
+        guard let match = regex.firstMatch(in: tagText, range: NSRange(tagText.startIndex..., in: tagText)) else {
+            return nil
+        }
+        guard let xRange = Range(match.range(at: 1), in: tagText),
+              let yRange = Range(match.range(at: 2), in: tagText),
+              let x = Double(tagText[xRange]),
+              let y = Double(tagText[yRange]) else {
+            // [POINT:none]
+            return PointTagParseResult(spokenText: "", coordinate: nil, label: "none", screenNumber: nil)
         }
 
         var label: String?
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: answerText) {
-            label = String(answerText[labelRange]).trimmingCharacters(in: .whitespaces)
+        if let labelRange = Range(match.range(at: 3), in: tagText) {
+            let trimmedLabel = tagText[labelRange].trimmingCharacters(in: .whitespaces)
+            label = trimmedLabel.isEmpty ? nil : trimmedLabel
         }
 
         var screenNumber: Int?
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: answerText) {
-            screenNumber = Int(answerText[screenRange])
+        if let screenRange = Range(match.range(at: 4), in: tagText) {
+            screenNumber = Int(tagText[screenRange])
         }
 
+        // Whole pixels: the nearest one to a decimal coordinate.
         return PointTagParseResult(
-            spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
+            spokenText: "",
+            coordinate: CGPoint(x: x.rounded(), y: y.rounded()),
             label: label,
             screenNumber: screenNumber
         )

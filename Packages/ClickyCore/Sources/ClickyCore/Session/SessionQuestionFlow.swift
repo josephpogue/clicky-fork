@@ -86,6 +86,8 @@ public actor SessionQuestionFlow {
     private var allEvents: [SessionEvent] = []
     private var eventsSincePreviousQuestion: [SessionEvent] = []
     private var isFinished = false
+    /// True while a provider switch is starting its conversation; keys and second taps on Switch wait it out.
+    private var isSwitching = false
 
     public init(
         initialProvider: ProviderID,
@@ -128,7 +130,7 @@ public actor SessionQuestionFlow {
 
     @discardableResult
     public func handle(_ signal: QuestionKeySignal) async -> SessionSignalOutcome {
-        guard !isFinished else { return .ignoredBecauseBusy }
+        guard !isFinished, !isSwitching else { return .ignoredBecauseBusy }
         switch signal {
         case .questionStarted(let date):
             guard phase == .idle else { return .ignoredBecauseBusy }
@@ -165,15 +167,24 @@ public actor SessionQuestionFlow {
 
         // Questions after the budget is spent begin a fresh conversation that carries a text recap.
         if budget.shouldStartFresh {
+            let restartedProvider = provider
             do {
-                try await startFreshConversation(provider: provider, providerID: activeProviderID)
+                try await startFreshConversation(provider: restartedProvider, providerID: activeProviderID)
             } catch let failure as ProviderFailure {
+                guard !isFinished else { return }
                 await output.noticeShown(ProviderFailureNotice.text(for: failure, provider: activeProviderID))
                 await setPhase(.idle)
                 return
             } catch {
+                guard !isFinished else { return }
                 await output.noticeShown("The conversation could not be restarted.")
                 await setPhase(.idle)
+                return
+            }
+            // Stop landed while the restart was starting: Stop already ended the old conversation, so the
+            // one the restart just opened is ended here and the question goes nowhere.
+            guard !isFinished else {
+                await restartedProvider.endConversation()
                 return
             }
         }
@@ -187,6 +198,7 @@ public actor SessionQuestionFlow {
             await setPhase(.idle)
             return
         }
+        guard !isFinished else { return }
 
         let now = dependencies.now()
         let earlierGroup = EarlierMomentPicker.pick(
@@ -196,8 +208,9 @@ public actor SessionQuestionFlow {
             currentAppName: currentGroup.appName,
             currentWindowTitle: currentGroup.windowTitle
         )
+        // The note stays in the pending list until an answer comes back, so a retry after a failure carries it.
+        let eventsInContextNote = eventsSincePreviousQuestion.count
         let contextNote = ContextNoteBuilder.note(events: eventsSincePreviousQuestion, timeZone: dependencies.timeZone)
-        eventsSincePreviousQuestion = []
         let turn = QuestionTurnBuilder.turn(
             questionText: questionText,
             currentGroup: currentGroup,
@@ -217,12 +230,17 @@ public actor SessionQuestionFlow {
         let askedProvider = provider
         let askedProviderID = activeProviderID
         let model = await dependencies.model(askedProviderID)
+        // Stop may have landed while the question was being logged and shown; nothing goes to the AI after it.
+        guard !isFinished else { return }
         await setPhase(.waitingForAnswer(provider: askedProviderID))
 
         do {
             let answer = try await askedProvider.ask(turn, model: model)
             guard !isFinished else { return }
-            await showAnswer(answer, for: turn, group: currentGroup, provider: askedProviderID)
+            await showAnswer(
+                answer, for: turn, group: currentGroup, provider: askedProviderID,
+                eventsInContextNote: eventsInContextNote
+            )
         } catch let failure as ProviderFailure {
             guard !isFinished else { return }
             await showFailure(failure, provider: askedProviderID, model: model)
@@ -230,13 +248,24 @@ public actor SessionQuestionFlow {
             guard !isFinished else { return }
             await showFailure(.failed(message: "The answer could not be fetched."), provider: askedProviderID, model: model)
         }
+        guard !isFinished else { return }
         await setPhase(.idle)
     }
 
     private func showAnswer(
-        _ answer: ProviderAnswer, for turn: QuestionTurn, group: ShotGroup, provider providerID: ProviderID
+        _ answer: ProviderAnswer, for turn: QuestionTurn, group: ShotGroup, provider providerID: ProviderID,
+        eventsInContextNote: Int
     ) async {
         let parsed = PointTagParser.parse(answer.text)
+        // An answer with nothing to say once the tag is gone (an unparsed reply, or only [POINT:none]) is a
+        // failure, not a blank card, and it is not an exchange: no count, no recap line, no spent note.
+        guard !parsed.spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            await showFailure(
+                .failed(message: "No answer came back. Try again."), provider: providerID,
+                model: answer.model
+            )
+            return
+        }
         let pointLabel = parsed.label.flatMap { $0 == "none" ? nil : $0 }
         await noteEvent(SessionEvent(time: dependencies.now(), kind: .answer(
             text: answer.text, provider: providerID, model: answer.model,
@@ -251,6 +280,8 @@ public actor SessionQuestionFlow {
                 globalPoint: mapped.point, displayFrameInPoints: mapped.shot.displayFrameInPoints, label: pointLabel
             )
         }
+        // The note went out with an answer that came back; drop only those events, not ones noted since.
+        eventsSincePreviousQuestion.removeFirst(min(eventsInContextNote, eventsSincePreviousQuestion.count))
         budget.recordTurn(imageCount: turn.images.count)
         exchanges.append((question: turn.questionText, answer: answer.text))
     }
@@ -274,7 +305,10 @@ public actor SessionQuestionFlow {
     /// Moves the rest of the session to another provider and gives it a recap of the exchanges so far.
     /// The old conversation ends only after the new one has started.
     public func switchProvider(to newProviderID: ProviderID) async {
-        guard !isFinished, newProviderID != activeProviderID else { return }
+        // One switch at a time, and never under a question that is listening, transcribing or waiting.
+        guard !isFinished, !isSwitching, phase == .idle, newProviderID != activeProviderID else { return }
+        isSwitching = true
+        defer { isSwitching = false }
         let oldProvider = provider
         let oldProviderID = activeProviderID
         let newProvider = dependencies.makeProvider(newProviderID)
@@ -285,10 +319,17 @@ public actor SessionQuestionFlow {
                 recap: RecapBuilder.recap(exchanges: exchanges)
             )
         } catch let failure as ProviderFailure {
+            guard !isFinished else { return }
             await output.noticeShown(ProviderFailureNotice.text(for: failure, provider: newProviderID))
             return
         } catch {
+            guard !isFinished else { return }
             await output.noticeShown("The switch to \(ProviderFailureNotice.displayName(for: newProviderID)) did not work.")
+            return
+        }
+        // Stop landed during the start: Stop already ended the old conversation, so only the new one is left.
+        guard !isFinished else {
+            await newProvider.endConversation()
             return
         }
         await oldProvider.endConversation()

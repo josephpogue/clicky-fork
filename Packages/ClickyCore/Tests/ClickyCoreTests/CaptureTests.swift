@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import ClickyCore
 
@@ -172,6 +173,22 @@ private func makeShotGroup(thumbnailBytes: [[UInt8]], screenNumbers: [Int]? = ni
         #expect(encoded.jpegData.count > 1000)
         // A real JPEG starts with the SOI marker.
         #expect(encoded.jpegData.prefix(2) == Data([0xFF, 0xD8]))
+    }
+
+    @Test func theSavedFileIsA1280PixelJPEGUnder300KB() throws {
+        let encoded = try ScreenshotJPEGEncoder.encode(makeBusyImage(width: 2560, height: 1600))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("clicky-jpeg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let savedFile = folder.appendingPathComponent("0001-screen1.jpg")
+        try encoded.jpegData.write(to: savedFile)
+
+        // Read the file back the way any viewer would: its real size, not the encoder's claim.
+        let fileSize = try #require(try FileManager.default.attributesOfItem(atPath: savedFile.path)[.size] as? Int)
+        let source = try #require(CGImageSourceCreateWithURL(savedFile as CFURL, nil))
+        let decoded = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        #expect(max(decoded.width, decoded.height) == 1280)
+        #expect(fileSize < 300_000)
     }
 
     @Test func portraitImageKeepsLongSideAt1280() throws {

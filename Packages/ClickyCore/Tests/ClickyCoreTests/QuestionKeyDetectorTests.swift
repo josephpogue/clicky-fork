@@ -55,6 +55,27 @@ struct QuestionKeyDetectorTests {
         #expect(taps.isEmpty)
     }
 
+    @Test func aHoldJustUnderOneSecondIsATap() {
+        let taps = feed([rightCommand(down: true, 0.0), rightCommand(down: false, 0.99)])
+        #expect(taps == [LoneTap(pressedAt: at(0.0), releasedAt: at(0.99))])
+    }
+
+    @Test func aHoldOfExactlyOneSecondIsNotATap() {
+        // The detector counts a hold only when it is shorter than the maximum, so 1.0 s is a long press.
+        let taps = feed([rightCommand(down: true, 0.0), rightCommand(down: false, 1.0)])
+        #expect(taps.isEmpty)
+    }
+
+    @Test func aHoldOfOnePointZeroOneSecondsIsNotATap() {
+        let taps = feed([rightCommand(down: true, 0.0), rightCommand(down: false, 1.01)])
+        #expect(taps.isEmpty)
+    }
+
+    @Test func aLoneLeftCommandTapIsNotATap() {
+        let taps = feed([leftCommand(down: true, 0.0), leftCommand(down: false, 0.1)])
+        #expect(taps.isEmpty)
+    }
+
     @Test func longHoldIsNotATap() {
         let taps = feed([rightCommand(down: true, 0.0), rightCommand(down: false, 1.5)])
         #expect(taps.isEmpty)

@@ -28,11 +28,76 @@ struct QuestionsPointTagParserTests {
         #expect(result.screenNumber == nil)
     }
 
-    @Test func tagNotAtTheEndIsLeftAlone() {
-        let text = "Look at [POINT:10,20:thing] and then keep reading."
-        let result = PointTagParser.parse(text)
+    @Test func tagInTheMiddleIsPointedAtAndRemovedFromTheShownText() {
+        let result = PointTagParser.parse("Look at [POINT:10,20:thing] and then keep reading.")
+        #expect(result.coordinate == CGPoint(x: 10, y: 20))
+        #expect(result.label == "thing")
+        #expect(result.spokenText == "Look at and then keep reading.")
+    }
+
+    @Test func tagFollowedByAFullStopShowsNoRawTagText() {
+        let result = PointTagParser.parse("Click Save. [POINT:1180,40:save button:screen1].")
+        #expect(result.spokenText == "Click Save.")
+        #expect(result.coordinate == CGPoint(x: 1180, y: 40))
+        #expect(result.screenNumber == 1)
+        #expect(result.label == "save button")
+    }
+
+    @Test func noneTagFollowedByAFullStopIsRemoved() {
+        let result = PointTagParser.parse("Here. [POINT:none].")
+        #expect(result.spokenText == "Here.")
         #expect(result.coordinate == nil)
-        #expect(result.spokenText == text)
+        #expect(result.label == "none")
+    }
+
+    @Test func spaceAfterPointColonIsAccepted() {
+        let result = PointTagParser.parse("Here. [POINT: none]")
+        #expect(result.spokenText == "Here.")
+        #expect(result.coordinate == nil)
+        let spaced = PointTagParser.parse("There. [POINT: 5, 6: spot]")
+        #expect(spaced.coordinate == CGPoint(x: 5, y: 6))
+        #expect(spaced.label == "spot")
+    }
+
+    @Test func decimalCoordinatesRoundToTheNearestPixel() {
+        // 10.6 rounds to 11, 20.4 rounds to 20
+        let result = PointTagParser.parse("[POINT:10.6,20.4:x:screen2] Then wait.")
+        #expect(result.spokenText == "Then wait.")
+        #expect(result.coordinate == CGPoint(x: 11, y: 20))
+        #expect(result.screenNumber == 2)
+        #expect(result.label == "x")
+    }
+
+    @Test func aLabelWithAColonKeepsTheWholeLabel() {
+        let result = PointTagParser.parse("Open it. [POINT:30,40:File: Save As:screen2]")
+        #expect(result.spokenText == "Open it.")
+        #expect(result.label == "File: Save As")
+        #expect(result.screenNumber == 2)
+        #expect(result.coordinate == CGPoint(x: 30, y: 40))
+    }
+
+    @Test func aTagThenAnotherSentenceKeepsTheSentence() {
+        let result = PointTagParser.parse("Click Save. [POINT:1,2:save] Then wait.")
+        #expect(result.spokenText == "Click Save. Then wait.")
+        #expect(result.coordinate == CGPoint(x: 1, y: 2))
+    }
+
+    @Test func theLastWellFormedTagWinsAndEveryTagIsRemoved() {
+        let result = PointTagParser.parse("A [POINT:1,2:first] B [POINT:broken] C [POINT:3,4:second]")
+        #expect(result.coordinate == CGPoint(x: 3, y: 4))
+        #expect(result.label == "second")
+        #expect(result.spokenText == "A B C")
+    }
+
+    @Test func aMalformedTagIsRemovedWithoutAPoint() {
+        let result = PointTagParser.parse("Done. [POINT:left,top]")
+        #expect(result.spokenText == "Done.")
+        #expect(result.coordinate == nil)
+    }
+
+    @Test func aReplyOfOnlyATagHasNoShownText() {
+        let result = PointTagParser.parse("[POINT:none]")
+        #expect(result.spokenText == "")
     }
 
     @Test func textWithoutTagIsUnchanged() {
