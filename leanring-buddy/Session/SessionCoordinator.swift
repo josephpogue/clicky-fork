@@ -866,7 +866,9 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         await MainActor.run { coordinator?.showCheckingNotes() }
     }
 
-    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {
+    func answerCutShort(
+        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+    ) async {
         await MainActor.run {
             coordinator?.showAnswerCutShort(visibleText: visibleText, provider: provider, model: model, notesRead: notesRead)
         }

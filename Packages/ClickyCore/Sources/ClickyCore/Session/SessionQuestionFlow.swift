@@ -16,6 +16,16 @@ public enum SessionSignalOutcome: Equatable, Sendable {
 
 /// Everything the flow tells the screen. The app implements it and moves the words onto the chat window,
 /// the marker and the pointer; the flow itself knows nothing about windows.
+/// Why an answer ended before it was complete; the chat's last line for that answer says it.
+public enum AnswerCutReason: Sendable, Equatable {
+    /// A newer question ended it: "(Cut short by your next question.)"
+    case newerQuestion
+    /// The provider failed or stopped partway: "(Cut short.)"; the failure's notice shows separately.
+    case failed
+    /// Stop or quit ended it: "(Stopped.)"
+    case stopped
+}
+
 public protocol SessionFlowOutput: Sendable {
     func phaseChanged(_ phase: SessionFlowPhase) async
     func questionAsked(_ text: String) async
@@ -29,9 +39,14 @@ public protocol SessionFlowOutput: Sendable {
     func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async
     /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
     func checkingNotesShown() async
-    /// A newer question ended this answer while it was still coming. `visibleText` is what had arrived; the app
-    /// finishes the chat message as cut short and shows nothing else for it.
-    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async
+    /// An answer ended before it was complete. `visibleText` is what had arrived; the app finishes the chat message
+    /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own).
+    func answerCutShort(
+        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+    ) async
+    /// The model began a tool call (every one, whether or not the checking line shows): a sentence that ended right
+    /// before it is complete even with no space after it yet, so speech may say it now.
+    func toolCallStarted() async
     func noticeShown(_ text: String) async
     func usageLimitOffered(message: String, switchTo: ProviderID) async
     func usageLimitOfferCleared() async
@@ -44,7 +59,10 @@ public protocol SessionFlowOutput: Sendable {
 public extension SessionFlowOutput {
     func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {}
     func checkingNotesShown() async {}
-    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {}
+    func answerCutShort(
+        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+    ) async {}
+    func toolCallStarted() async {}
 }
 
 /// The outside world the flow works through: the providers, the microphone's speech, the screen and the log.
@@ -437,6 +455,7 @@ public actor SessionQuestionFlow {
         case .toolCallStarted:
             let shouldShowLine = state.checkingNotesRule.toolCallStarted(visibleTextSoFar: state.visibleText)
             streamingAnswer = state
+            await output.toolCallStarted()
             if shouldShowLine { await output.checkingNotesShown() }
         case .toolCallMade(let call):
             await noteEvent(SessionEvent(time: dependencies.now(), kind: .brainToolCalled(
@@ -460,7 +479,7 @@ public actor SessionQuestionFlow {
         guard !isStopping, !isFinished else { return }
         await output.answerCutShort(
             visibleText: StreamingAnswerText.visible(rawTextSoFar: answer.text).visibleText,
-            provider: providerID, model: answer.model, notesRead: notesRead
+            provider: providerID, model: answer.model, notesRead: notesRead, reason: .newerQuestion
         )
     }
 

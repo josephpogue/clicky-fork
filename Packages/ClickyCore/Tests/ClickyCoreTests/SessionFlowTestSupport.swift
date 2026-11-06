@@ -301,6 +301,8 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     private(set) var checkingNotesCount = 0
     private(set) var answerNotesRead: [[String]] = []
     private(set) var cutShorts: [(visibleText: String, notesRead: [String])] = []
+    private(set) var cutReasons: [AnswerCutReason] = []
+    private(set) var toolCallStartedCount = 0
     /// Every streaming-related call in the order it happened: "text", "checking", "pointer", "answer", "cut".
     private(set) var callOrder: [String] = []
 
@@ -310,8 +312,13 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     func checkingNotesShown() async {
         lock.lock(); checkingNotesCount += 1; callOrder.append("checking"); lock.unlock()
     }
-    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {
-        lock.lock(); cutShorts.append((visibleText, notesRead)); callOrder.append("cut"); lock.unlock()
+    func answerCutShort(
+        visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+    ) async {
+        lock.lock(); cutShorts.append((visibleText, notesRead)); cutReasons.append(reason); callOrder.append("cut"); lock.unlock()
+    }
+    func toolCallStarted() async {
+        lock.lock(); toolCallStartedCount += 1; lock.unlock()
     }
 
     func phaseChanged(_ phase: SessionFlowPhase) async { lock.lock(); phases.append(phase); lock.unlock() }
