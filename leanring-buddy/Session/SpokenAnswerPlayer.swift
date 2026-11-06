@@ -92,6 +92,13 @@ final class SpeechOwner {
         apply(changes)
     }
 
+    /// Stops whoever is reading, the Settings sample included: a new question must not be heard over.
+    func stopAll() {
+        let changes = tracker.stopAll()
+        synthesizer.stopSpeaking(at: .immediate)
+        apply(changes)
+    }
+
     private func handleUtteranceEvent(utterance: AVSpeechUtterance, isSpeaking: Bool) {
         guard let live = liveUtterances[ObjectIdentifier(utterance)] else { return }
         if !isSpeaking { liveUtterances[ObjectIdentifier(utterance)] = nil }
@@ -120,7 +127,12 @@ final class SpokenAnswerPlayer {
         SpeechOwner.shared.speak(text: text, voice: voice, as: .answer)
     }
 
-    /// Stops reading at once: a new question, Start, Stop, Quit and a change to a mode that does not speak.
+    /// Stops every voice at once, the Settings sample too: a new question.
+    func stopAllSpeaking() {
+        SpeechOwner.shared.stopAll()
+    }
+
+    /// Stops reading at once: Start, question, Start, Stop, Quit and a change to a mode that does not speak.
     func stopSpeaking() {
         SpeechOwner.shared.stop(.answer)
     }

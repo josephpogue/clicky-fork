@@ -80,6 +80,27 @@ enum UIPreviewSamples {
                     usageLimitOffer: UsageLimitOffer(message: "Your Claude plan has hit its usage limit. It resets at 3:00 PM.", switchToProviderName: "ChatGPT")
                 )
             ),
+            (
+                "chat-usage-limit-switch-waiting.png",
+                ChatWindowState(
+                    messages: usageLimitMessages,
+                    sessionPhase: .running,
+                    questionPhase: .waitingForAnswer(providerName: "Claude"),
+                    usageLimitOffer: UsageLimitOffer(message: "Your Claude plan has hit its usage limit. It resets at 3:00 PM.", switchToProviderName: "ChatGPT")
+                )
+            ),
+            (
+                "chat-usage-limit-switching.png",
+                {
+                    let switchingState = ChatWindowState(
+                        messages: usageLimitMessages,
+                        sessionPhase: .running,
+                        usageLimitOffer: UsageLimitOffer(message: "Your Claude plan has hit its usage limit. It resets at 3:00 PM.", switchToProviderName: "ChatGPT")
+                    )
+                    switchingState.isSwitchInProgress = true
+                    return switchingState
+                }()
+            ),
             ("chat-switched-to-chatgpt.png", ChatWindowState(messages: switchedMessages, sessionPhase: .running, activeProviderName: "ChatGPT", activeModel: "gpt-5")),
             ("chat-session-stopped.png", ChatWindowState(messages: threeExchanges, sessionPhase: .idle)),
             ("chat-starting.png", ChatWindowState(sessionPhase: .starting, startStepText: SessionStartStep.waitingForMicrophonePermission.statusText)),

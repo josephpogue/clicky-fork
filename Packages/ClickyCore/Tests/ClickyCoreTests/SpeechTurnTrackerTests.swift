@@ -81,4 +81,24 @@ struct SpeechTurnTrackerTests {
         let sample = tracker.begin(.sample, reportsImmediately: true)
         #expect(tracker.event(token: sample.token, isSpeaking: false) == [hidden(.sample)])
     }
+
+    @Test func stopAllDuringTheSampleReportsTheSampleStopped() {
+        var tracker = SpeechTurnTracker()
+        _ = tracker.begin(.sample, reportsImmediately: true)
+        #expect(tracker.stopAll() == [hidden(.sample)])
+        #expect(tracker.currentSpeaker == nil)
+    }
+
+    @Test func stopAllDuringAnAnswerHidesTheCapsule() {
+        var tracker = SpeechTurnTracker()
+        let reading = tracker.begin(.answer)
+        _ = tracker.event(token: reading.token, isSpeaking: true)
+        #expect(tracker.stopAll() == [hidden(.answer)])
+        #expect(tracker.event(token: reading.token, isSpeaking: false).isEmpty)
+    }
+
+    @Test func stopAllWithNothingSpeakingReportsNothing() {
+        var tracker = SpeechTurnTracker()
+        #expect(tracker.stopAll().isEmpty)
+    }
 }

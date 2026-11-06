@@ -29,8 +29,10 @@ extension UIPreviewRendering {
         )
         try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, onSwitch: {}) },
                    size: nil, fileName: "menu-panel-usage-limit-offer.png", into: directory)
-        try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, isSwitchEnabled: false, onSwitch: {}) },
+        try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, switchState: .waitsForAnswer, onSwitch: {}) },
                    size: nil, fileName: "menu-panel-usage-limit-offer-switch-waiting.png", into: directory)
+        try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, switchState: .switching, onSwitch: {}) },
+                   size: nil, fileName: "menu-panel-usage-limit-offer-switching.png", into: directory)
     }
 }
 

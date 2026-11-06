@@ -28,4 +28,20 @@ struct UsageLimitOfferRulesTests {
         #expect(UsageLimitOfferRules.cursorNotice(message: "Limit reached  ", switchToProviderName: "Claude")
             == "Limit reached. Switch to Claude from the menu bar.")
     }
+
+    @Test func switchButtonIsEnabledOnlyWhenIdleAndNotSwitching() {
+        #expect(UsageLimitOfferRules.switchButtonState(isQuestionPhaseIdle: true, isSwitchInProgress: false) == .enabled)
+        #expect(UsageLimitOfferRules.switchButtonState(isQuestionPhaseIdle: false, isSwitchInProgress: false) == .waitsForAnswer)
+        #expect(UsageLimitOfferRules.switchButtonState(isQuestionPhaseIdle: true, isSwitchInProgress: true) == .switching)
+        #expect(UsageLimitOfferRules.switchButtonState(isQuestionPhaseIdle: false, isSwitchInProgress: true) == .switching)
+    }
+
+    @Test func switchButtonCaptionsMatchTheState() {
+        #expect(UsageLimitSwitchButtonState.enabled.isEnabled)
+        #expect(!UsageLimitSwitchButtonState.waitsForAnswer.isEnabled)
+        #expect(!UsageLimitSwitchButtonState.switching.isEnabled)
+        #expect(UsageLimitSwitchButtonState.enabled.caption == nil)
+        #expect(UsageLimitSwitchButtonState.waitsForAnswer.caption == "Switch after this answer")
+        #expect(UsageLimitSwitchButtonState.switching.caption == "Switching...")
+    }
 }

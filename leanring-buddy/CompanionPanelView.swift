@@ -40,7 +40,9 @@ struct CompanionPanelView: View {
             }
 
             if let offer = chatWindowState.usageLimitOffer {
-                PanelUsageLimitOffer(offer: offer, isSwitchEnabled: chatWindowState.questionPhase == .idle) {
+                PanelUsageLimitOffer(offer: offer, switchState: UsageLimitOfferRules.switchButtonState(
+                    isQuestionPhaseIdle: chatWindowState.questionPhase == .idle,
+                    isSwitchInProgress: chatWindowState.isSwitchInProgress)) {
                     chatWindowState.onSwitchProvider()
                     dismissPanel()
                 }

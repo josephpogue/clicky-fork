@@ -79,6 +79,8 @@ final class ChatWindowState: ObservableObject {
     @Published var activeProviderName: String
     @Published var activeModel: String
     @Published var usageLimitOffer: UsageLimitOffer?
+    /// True while a provider switch is running, so both switch buttons wait.
+    @Published var isSwitchInProgress: Bool = false
     /// Added for the design: the name of the question key as the hint line
     /// says it ("right Command"), so a changed key reads right everywhere.
     @Published var questionKeyLabel: String

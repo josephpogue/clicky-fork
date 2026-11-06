@@ -74,8 +74,8 @@ struct PanelOpenChatRow: View {
 /// the panel because the chat window may never be open.
 struct PanelUsageLimitOffer: View {
     let offer: UsageLimitOffer
-    /// False while a question is under way: a switch then does nothing, so the button waits.
-    var isSwitchEnabled: Bool = true
+    /// Disabled while a question is under way or a switch is running; the caption says which.
+    var switchState: UsageLimitSwitchButtonState = .enabled
     let onSwitch: () -> Void
 
     var body: some View {
@@ -100,12 +100,12 @@ struct PanelUsageLimitOffer: View {
             }
             .buttonStyle(.plain)
             .pointerCursor()
-            .disabled(!isSwitchEnabled)
-            .opacity(isSwitchEnabled ? 1 : 0.45)
+            .disabled(!switchState.isEnabled)
+            .opacity(switchState.isEnabled ? 1 : 0.45)
             .accessibilityIdentifier("panel.switchProvider")
 
-            if !isSwitchEnabled {
-                Text("Switch after this answer")
+            if let caption = switchState.caption {
+                Text(caption)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textMuted)
                     .accessibilityIdentifier("panel.switchProviderCaption")

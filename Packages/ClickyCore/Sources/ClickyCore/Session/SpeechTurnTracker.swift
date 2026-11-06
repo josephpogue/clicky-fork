@@ -49,6 +49,11 @@ public struct SpeechTurnTracker: Sendable {
         return changes
     }
 
+    /// Stops whoever is reading: a new question silences the sample as well as the answer.
+    public mutating func stopAll() -> [SpeechChange] {
+        stop(nil)
+    }
+
     /// A start, finish or cancel event from the synthesizer for the reading with `token`.
     public mutating func event(token: Int, isSpeaking: Bool) -> [SpeechChange] {
         guard token == currentToken, let speaker = currentSpeaker else { return [] }

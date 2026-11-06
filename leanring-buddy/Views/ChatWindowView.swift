@@ -406,6 +406,13 @@ struct ChatWindowView: View {
     // MARK: - Usage limit
 
     private func usageLimitBanner(_ usageLimitOffer: UsageLimitOffer) -> some View {
+        let switchState = UsageLimitOfferRules.switchButtonState(
+            isQuestionPhaseIdle: state.questionPhase == .idle,
+            isSwitchInProgress: state.isSwitchInProgress)
+        return usageLimitBannerContent(usageLimitOffer, switchState: switchState)
+    }
+
+    private func usageLimitBannerContent(_ usageLimitOffer: UsageLimitOffer, switchState: UsageLimitSwitchButtonState) -> some View {
         WindowCallout(kind: .warning, message: usageLimitOffer.message, messageIdentifier: "chat.usageLimitMessage") {
             VStack(alignment: .leading, spacing: 6) {
                 Button(action: state.onSwitchProvider) {
@@ -416,9 +423,11 @@ struct ChatWindowView: View {
                     }
                 }
                 .clickyWindowButton(.primary, isFullWidth: true)
+                .disabled(!switchState.isEnabled)
+                .opacity(switchState.isEnabled ? 1 : 0.45)
                 .accessibilityIdentifier("chat.switchProvider")
 
-                Text("This conversation comes with you.")
+                Text(switchState.caption ?? "This conversation comes with you.")
                     .font(DS.WindowText.meta)
                     .foregroundColor(DS.Colors.textMuted)
             }

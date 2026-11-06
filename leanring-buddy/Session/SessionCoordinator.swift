@@ -505,7 +505,11 @@ final class SessionCoordinator: ObservableObject {
 
     private func switchToChatGPT() {
         guard lifecycle.isRunning, let questionFlow else { return }
-        Task { await questionFlow.switchProvider(to: .chatgpt) }
+        chatWindowState.isSwitchInProgress = true
+        Task {
+            await questionFlow.switchProvider(to: .chatgpt)
+            chatWindowState.isSwitchInProgress = false
+        }
     }
 
     // MARK: - Stop
@@ -628,7 +632,9 @@ final class SessionCoordinator: ObservableObject {
             markerPanel.show(phase: .idle)
         case .listening:
             // A new question replaces the last answer: its text goes and its reading stops.
-            hideCursorAnswerAndStopSpeaking()
+            cursorAnswerPresenter.hideAll()
+            spokenAnswerPlayer.stopAllSpeaking()
+
             lastShownAudioLevel = 0
             chatWindowState.questionPhase = .listening(audioLevel: 0)
             markerPanel.show(phase: .listening(audioLevel: 0))
