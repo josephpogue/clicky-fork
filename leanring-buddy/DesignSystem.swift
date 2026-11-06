@@ -878,3 +878,64 @@ extension Color {
         return Color(red: red, green: green, blue: blue)
     }
 }
+
+// MARK: - Clicky Fork v1 Window Tokens
+//
+// Added for the chat, marker, settings, session and save windows. Appended
+// only: nothing above this line changes. Every v1 window view reads these.
+
+extension DS.Colors {
+    /// Supporting text that must still pass 4.5:1 on `background` and
+    /// `surface2` (about 5.9:1 and 5.0:1). `textTertiary` is only about 3.9:1,
+    /// so it stays for icons and decoration, never for text that carries meaning.
+    static let textMuted = Color(hex: "#8A928E")
+
+    /// The live microphone colour: the same pale blue as the upstream
+    /// waveform, so "listening" looks the same everywhere in the app.
+    static let listeningWave = Color(hex: "#8FD2FF")
+
+    /// Fill behind the latest answer, one step up from the window ground so
+    /// the eye lands there first without a coloured frame.
+    static let latestAnswerSurface = Color(hex: "#1B1E1D")
+
+    /// Tinted fills for callouts. The matching border uses the same hue at a
+    /// higher opacity (see `DS.WindowCallout`).
+    static let warningSubtle = Color(hex: "#FFB224").opacity(0.09)
+    static let destructiveSubtle = Color(hex: "#E5484D").opacity(0.10)
+    static let successSubtle = Color(hex: "#34D399").opacity(0.10)
+
+    /// The marker beside the cursor sits on any screen, light or dark, so it
+    /// carries its own near-opaque ground and a thin light outline.
+    static let markerGround = Color(hex: "#101211").opacity(0.94)
+    static let markerOutline = Color.white.opacity(0.14)
+}
+
+extension DS {
+    /// Named text styles for the v1 windows. One family (SF Pro) for reading,
+    /// its rounded cut for titles, so the windows match the menu panel.
+    enum WindowText {
+        static let windowTitle = Font.system(size: 17, weight: .semibold, design: .rounded)
+        static let sectionTitle = Font.system(size: 14, weight: .semibold, design: .rounded)
+        static let latestAnswer = Font.system(size: 16, weight: .regular)
+        static let latestAnswerLineSpacing: CGFloat = 5
+        static let body = Font.system(size: 13, weight: .regular)
+        static let bodyEmphasis = Font.system(size: 13, weight: .semibold)
+        static let bodyLineSpacing: CGFloat = 3.5
+        static let rowTitle = Font.system(size: 13.5, weight: .semibold)
+        /// Supporting text never goes below 12.5 points.
+        static let meta = Font.system(size: 12.5, weight: .medium)
+        static let metaNumbers = Font.system(size: 12.5, weight: .medium).monospacedDigit()
+    }
+
+    /// Corner radii for the v1 windows: capsules for buttons and chips,
+    /// 10 for cards and callouts, 6 for screenshot thumbnails.
+    enum WindowRadius {
+        static let card: CGFloat = 10
+        static let thumbnail: CGFloat = 6
+    }
+
+    /// Callout outline strength, shared by warning, error and success callouts.
+    enum WindowCallout {
+        static let outlineOpacity: Double = 0.28
+    }
+}
