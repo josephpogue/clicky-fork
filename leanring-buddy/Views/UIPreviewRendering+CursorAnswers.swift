@@ -41,6 +41,35 @@ extension UIPreviewRendering {
         try render(
             CursorAnswerTile(tileSize: tileSize, cursor: topLeftCursor, content: .speaking),
             size: tileSize, fileName: "cursor-speaking.png", into: directory)
+
+        try renderGrowingAnswerPreviews(into: directory, tileSize: tileSize, cursor: topLeftCursor)
+    }
+
+    /// The bubble while an answer is still coming (brain-context designer slice): growing text, the
+    /// "Checking your notes" line alone and under text, and a text past the cap showing its newest lines.
+    @MainActor
+    private static func renderGrowingAnswerPreviews(into directory: URL, tileSize: CGSize, cursor: CGPoint) throws {
+        let firstWords = "The demo server runs on port 4100."
+        let pastTheCap = """
+        The demo server runs on port 4100. Your notes say it starts from the demo-server folder with npm run dev, and the setup page lists three things it needs first.
+        It reads its settings from a file named demo.env in that folder. The checklist says to copy demo.env.example to demo.env before the first start.
+        Your deploy note adds that the port is fixed on purpose, because the browser extension posts to it. If 4100 is busy, the server stops instead of picking another port.
+        The last step in the checklist is to open the status page and confirm the green line reads Ready, then run the smoke test from the same folder.
+        """
+        let growingPreviews: [(fileName: String, text: String, showsCheckingLine: Bool)] = [
+            ("cursor-growing-short.png", firstWords, false),
+            ("cursor-growing-checking-alone.png", "", true),
+            ("cursor-growing-with-checking.png", firstWords + " Checking where it reads its settings from.", true),
+            ("cursor-growing-past-cap.png", pastTheCap, false),
+            ("cursor-growing-past-cap-checking.png", pastTheCap, true),
+        ]
+        for preview in growingPreviews {
+            let content = AnswerBubbleContent(
+                text: preview.text, isNotice: false, showsNewestLines: true, showsCheckingLine: preview.showsCheckingLine)
+            try render(
+                CursorAnswerTile(tileSize: tileSize, cursor: cursor, content: .bubble(content)),
+                size: tileSize, fileName: preview.fileName, into: directory)
+        }
     }
 }
 
@@ -84,7 +113,8 @@ private struct CursorAnswerTile: View {
         case .bubble(let bubbleContent):
             let placement = CursorBubbleLayout.placement(
                 anchor: .cursor(at: cursor), bubbleSize: bubbleContent.size, visibleFrame: visibleFrame)
-            AnswerBubbleView(content: bubbleContent, nearCorner: placement.nearCorner)
+            // The checking line's light is frozen mid-sweep so every render shows it the same way.
+            AnswerBubbleView(content: bubbleContent, nearCorner: placement.nearCorner, fixedCheckingSweepPhase: 0.55)
                 .offset(
                     x: placement.origin.x - AnswerBubbleView.shadowMargin,
                     y: tileSize.height - placement.origin.y - bubbleContent.size.height - AnswerBubbleView.shadowMargin)

@@ -176,7 +176,7 @@ struct SessionQuestionFlowTests {
 
     // MARK: A tap while an answer is pending
 
-    @Test func aTapWhileWaitingMakesNoSecondAsk() async throws {
+    @Test func aTapWhileWaitingEndsTheOldAnswerAndStartsListeningWithoutAskingAgain() async throws {
         let harness = try await startedHarness(questions: ["first", "second"])
         harness.claude.holdNextAnswer()
 
@@ -188,9 +188,11 @@ struct SessionQuestionFlowTests {
         harness.claude.releaseHeldAnswer()
         _ = await firstQuestion.value
 
-        #expect(tapWhileWaiting == .ignoredBecauseBusy)
+        #expect(tapWhileWaiting == .accepted)
+        #expect(harness.claude.stopRequestCount == 1)
         #expect(harness.claude.askedTurns.count == 1)
         #expect(harness.output.questions == ["first"])
+        #expect(harness.output.phases.last == .listening)
     }
 
     // MARK: Stop

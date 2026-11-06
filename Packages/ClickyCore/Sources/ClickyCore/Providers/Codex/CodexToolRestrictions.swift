@@ -7,6 +7,12 @@ import Foundation
 ///
 /// What stays: a tool named `exec` still appears in the request, but with `code_mode_host` off it fails closed
 /// ("code-mode host is disabled") and runs nothing, and the sandbox is read-only on top of that.
+///
+/// The brain tools (`search_brain`, `read_brain_file`) are deliberately not given to Codex. Checked 2026-11-06 on
+/// codex 0.155.1: every subscription model is `code_mode_only`, so an MCP tool is reachable only through the
+/// code-mode `exec` tool, and that is exactly what this list turns off. ChatGPT therefore answers from the passages
+/// the Mac attached to the question and nothing else. This list must stay whole: never remove an entry to make a
+/// tool reachable.
 enum CodexToolRestrictions {
     /// Every feature that gives the model a tool or a way outside the conversation. Features already off stay on this
     /// list on purpose, so a CLI update that turns one on does not hand the model a tool.

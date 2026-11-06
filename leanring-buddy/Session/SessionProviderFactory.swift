@@ -14,8 +14,11 @@ enum SessionProviderFactory {
     static func makeProvider(for providerID: ProviderID, locations: AppDataLocations) -> AnswerProvider {
         switch providerID {
         case .claude:
-            return ClaudeCLIProvider(locations: locations)
+            // With search folders set, Claude gets the bundled helper as its only tools; nil keeps today's flags.
+            return ClaudeCLIProvider(locations: locations, brainToolServer: BrainIndexService.shared.toolServer())
         case .chatgpt:
+            // ChatGPT has no helper, so passages follow the current Settings list, not an earlier Claude helper's.
+            BrainIndexService.shared.forgetHelperLaunchFolders()
             return CodexCLIProvider(locations: locations)
         }
     }
@@ -26,6 +29,16 @@ enum SessionProviderFactory {
         switch providerID {
         case .claude: return AppSettings.shared.claudeModel
         case .chatgpt: return AppSettings.shared.chatgptModel
+        }
+    }
+
+    /// The model and effort a "dig deeper" question uses on a provider, from the user's settings.
+    @MainActor
+    static func digDeeperRequest(for providerID: ProviderID) -> AnswerRequest {
+        let settings = AppSettings.shared
+        switch providerID {
+        case .claude: return AnswerRequest(model: settings.digDeeperClaudeModel, effort: settings.digDeeperEffort)
+        case .chatgpt: return AnswerRequest(model: settings.digDeeperChatgptModel, effort: settings.digDeeperEffort)
         }
     }
 }

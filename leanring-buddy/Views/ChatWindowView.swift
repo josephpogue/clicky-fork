@@ -18,6 +18,11 @@ struct ChatWindowView: View {
     /// History answers show three lines until the user asks for the rest,
     /// so an old "explain more" answer never turns the history into a wall.
     @State private var expandedHistoryAnswerIDs: Set<UUID> = []
+    /// Answers whose "Notes read" list shows every name, not just the first three.
+    @State private var expandedNotesReadAnswerIDs: Set<UUID> = []
+
+    /// Preview renderer only: freezes the checking line's passing light (see `CheckingNotesLine`).
+    var fixedCheckingSweepPhase: Double? = nil
     private let historyAnswerCollapsedLineCount = 3
     /// About three lines at the default window width.
     private let historyAnswerCollapsibleCharacterCount = 150
@@ -210,6 +215,27 @@ struct ChatWindowView: View {
                 .buttonStyle(WindowInlineLinkButtonStyle())
                 .accessibilityIdentifier("chat.expand.\(answer.index)")
             }
+            notesReadList(answer)
+                .padding(.top, 2)
+        }
+    }
+
+    /// Under a finished answer that read notes; nothing for a screen-only answer or one still coming.
+    @ViewBuilder
+    private func notesReadList(_ answer: IndexedChatMessage) -> some View {
+        if !answer.message.isStillComing && !answer.message.notesRead.isEmpty {
+            let answerID = answer.message.id
+            NotesReadList(
+                notePaths: answer.message.notesRead,
+                isExpanded: expandedNotesReadAnswerIDs.contains(answerID),
+                onToggleExpanded: {
+                    if expandedNotesReadAnswerIDs.contains(answerID) {
+                        expandedNotesReadAnswerIDs.remove(answerID)
+                    } else {
+                        expandedNotesReadAnswerIDs.insert(answerID)
+                    }
+                },
+                messageIndex: answer.index)
         }
     }
 
@@ -284,20 +310,39 @@ struct ChatWindowView: View {
                 }
 
                 if let answer {
-                    Text(answer.message.text)
-                        .font(DS.WindowText.latestAnswer)
-                        .lineSpacing(DS.WindowText.latestAnswerLineSpacing)
-                        .foregroundColor(DS.Colors.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("chat.message.\(answer.index)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("chat.latestAnswer")
+                    // A growing answer has no text for a moment when its message is made before the first words.
+                    if !answer.message.text.isEmpty {
+                        Text(answer.message.text)
+                            .font(DS.WindowText.latestAnswer)
+                            .lineSpacing(DS.WindowText.latestAnswerLineSpacing)
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("chat.message.\(answer.index)")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("chat.latestAnswer")
+                    }
+
+                    if answer.message.isStillComing {
+                        if state.isCheckingNotes {
+                            CheckingNotesLine(placement: .chatCard, fixedSweepPhase: fixedCheckingSweepPhase)
+                                .frame(height: 22, alignment: .leading)
+                        } else if answer.message.text.isEmpty {
+                            pendingAnswerDots
+                        }
+                    }
+
+                    notesReadList(answer)
 
                     answerFooter(answer.message)
                 } else if isWaitingForAnswer {
-                    pendingAnswerDots
+                    if state.isCheckingNotes {
+                        CheckingNotesLine(placement: .chatCard, fixedSweepPhase: fixedCheckingSweepPhase)
+                            .frame(height: 22, alignment: .leading)
+                    } else {
+                        pendingAnswerDots
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -341,7 +386,12 @@ struct ChatWindowView: View {
         if let providerName = answerMessage.providerName { metaParts.append(providerName) }
         // An empty model is the CLI's own default, named as in the header.
         if let model = answerMessage.model { metaParts.append(model.isEmpty ? "default" : model) }
-        if let secondsToAnswer = answerMessage.secondsToAnswer { metaParts.append(WindowTimeFormatting.seconds(secondsToAnswer)) }
+        if answerMessage.isStillComing {
+            // No timing until it is done; this word is what tells a growing answer from a finished one.
+            metaParts.append("answering")
+        } else if let secondsToAnswer = answerMessage.secondsToAnswer {
+            metaParts.append(WindowTimeFormatting.seconds(secondsToAnswer))
+        }
         return metaParts.joined(separator: " · ")
     }
 

@@ -3,8 +3,16 @@ import Foundation
 /// What the JSON lines of one `codex exec --json` run said.
 struct CodexTurnOutput: Equatable {
     var threadID: String?
-    /// The text of the last `agent_message` item.
-    var answerText: String?
+    /// The text of every `agent_message` item, oldest first.
+    var agentMessages: [String] = []
+    /// True when the turn carried a brain note: the model may then speak before and after its findings, so every
+    /// agent message is the answer. Without one the answer is the last agent message, as it always was.
+    var joinsEveryAgentMessage = false
+    /// Nil when the run produced no agent message.
+    var answerText: String? {
+        guard let lastMessage = agentMessages.last else { return nil }
+        return joinsEveryAgentMessage ? CodexOutputParsing.joinedAgentMessages(agentMessages) : lastMessage
+    }
     /// Every error message the run printed, oldest first (retry notices included).
     var errorMessages: [String] = []
     var turnFailedMessage: String?
@@ -20,12 +28,39 @@ enum CodexLoginState: Equatable {
     case unknown
     /// Stop ended the status check before it answered.
     case cancelled
+    /// A new question ended the status check before it answered. Says nothing about the login.
+    case endedOnRequest
 }
 
 /// Pure helpers for the text the `codex` tool prints and the text the app sends it.
 enum CodexOutputParsing {
     /// The words the CLI prints when the plan's allowance is used up ("You've hit your usage limit ...").
     static let usageLimitPhrase = "hit your usage limit"
+
+    static func joinedAgentMessages(_ messages: [String]) -> String {
+        messages.joined(separator: "\n\n")
+    }
+
+    /// The text of the `agent_message` item a `item.completed` line reports; nil for every other line.
+    static func agentMessageText(inLine line: String) -> String? {
+        // Cheap check first: this runs on the reader thread for every output line.
+        guard line.contains("agent_message"),
+              let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "item.completed",
+              let item = object["item"] as? [String: Any],
+              item["type"] as? String == "agent_message" else { return nil }
+        return item["text"] as? String
+    }
+
+    /// The thread id a `thread.started` line reports; nil for every other line.
+    static func threadID(inLine line: String) -> String? {
+        guard line.contains("thread.started"),
+              let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "thread.started" else { return nil }
+        return object["thread_id"] as? String
+    }
 
     static func parseTurnOutput(lines: [String]) -> CodexTurnOutput {
         var output = CodexTurnOutput()
@@ -39,7 +74,7 @@ enum CodexOutputParsing {
             case "item.completed":
                 guard let item = object["item"] as? [String: Any], let itemType = item["type"] as? String else { continue }
                 if itemType == "agent_message", let text = item["text"] as? String {
-                    output.answerText = text
+                    output.agentMessages.append(text)
                 } else if itemType == "error", let message = item["message"] as? String, !isHarmlessNotice(message) {
                     output.errorMessages.append(message)
                 }
@@ -151,7 +186,8 @@ enum CodexOutputParsing {
     // MARK: Text sent to the CLI
 
     /// The prompt for a question: the recap of earlier turns when the conversation has one that no thread holds yet
-    /// (as Claude does, ahead of everything else), each image label in order, the context note, then the question.
+    /// (as Claude does, ahead of everything else), each image label in order, the context note, the passages found
+    /// in the user's notes (when there are any), then the question.
     /// The images themselves travel in `-i` arguments in the same order.
     static func promptText(for turn: QuestionTurn, recap: String? = nil) -> String {
         var sections: [String] = []
@@ -166,6 +202,9 @@ enum CodexOutputParsing {
         }
         if !turn.contextNote.isEmpty {
             sections.append(turn.contextNote)
+        }
+        if !turn.brainNote.isEmpty {
+            sections.append(turn.brainNote)
         }
         sections.append("Question: \(turn.questionText)")
         return sections.joined(separator: "\n\n")

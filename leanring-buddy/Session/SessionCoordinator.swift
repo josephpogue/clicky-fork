@@ -58,6 +58,12 @@ final class SessionCoordinator: ObservableObject {
     /// Reads answers aloud when Settings asks for spoken answers.
     private let spokenAnswerPlayer = SpokenAnswerPlayer()
     private var settingsSubscriptions = Set<AnyCancellable>()
+    /// Which chat message is the answer still coming, and whether the checking line shows (pure rules in ClickyCore).
+    private var growingAnswerChat = GrowingAnswerChatState()
+    /// The chat message of each answer, by the answer token `growingAnswerChat` gave it.
+    private var answerMessageIDs: [Int: UUID] = [:]
+    /// The visible text of the answer so far, so a tool call can have its trailing sentence spoken.
+    private var lastVisibleAnswerText = ""
     /// The provider the open usage-limit offer switches to; an answer from any other provider clears the offer.
     private var usageLimitSwitchTarget: ProviderID?
     private let questionKeyMonitor = QuestionKeyMonitor()
@@ -104,6 +110,9 @@ final class SessionCoordinator: ObservableObject {
         cursorAnswerPresenter = CursorAnswerPresenter(pointerFlight: pointerFlight)
         spokenAnswerPlayer.onSpeakingChanged = { [weak self] isSpeaking in
             self?.cursorAnswerPresenter.showSpeaking(isSpeaking)
+            // Spoken-only: the waiting marker stays until the voice actually starts. A late start event of an old
+            // answer's voice (after the new question's listening marker showed) must not hide that marker.
+            if isSpeaking, let self, case .waitingForAnswer = self.currentPhase { self.markerPanel.hide() }
         }
         // Switching to a mode that does not speak stops a reading in progress; switching to Spoken starts nothing.
         settings.$answerDeliveryMode
@@ -163,6 +172,10 @@ final class SessionCoordinator: ObservableObject {
         didStartCapture = false
         // A new session replaces the finished conversation in the chat window.
         chatWindowState.messages = []
+        growingAnswerChat.reset()
+        answerMessageIDs = [:]
+        lastVisibleAnswerText = ""
+        chatWindowState.isCheckingNotes = false
         chatWindowState.usageLimitOffer = nil
         chatWindowState.questionPhase = .idle
         // Start opens no window: the chat window opens only from the menu-bar panel's Open chat row.
@@ -204,6 +217,10 @@ final class SessionCoordinator: ObservableObject {
     /// Turns on nothing that captures until speech is ready, the microphone is allowed and the provider has
     /// started; then screen, microphone and key tap start together and the session is running.
     private func performStart() async {
+        // The brain index refreshes while the permission and speech steps run; Start awaits it before the first
+        // question can be asked (step 5).
+        let brainRefreshTask = Task { await BrainIndexService.shared.refreshForSessionStart() }
+
         // 1. The two permissions the app cannot ask for itself while running.
         var missingPermissions: [String] = []
         if !WindowPositionManager.hasAccessibilityPermission() { missingPermissions.append("Accessibility") }
@@ -308,7 +325,14 @@ final class SessionCoordinator: ObservableObject {
         let recorder = SessionScreenRecorder(shotsDirectory: shotsDirectory)
         screenRecorder = recorder
 
-        let flow = makeQuestionFlow(sessionID: startedSessionID, shotsDirectory: shotsDirectory, recorder: recorder)
+        // The index is ready before the flow exists, so the first question can find passages.
+        guard await CancellableWait.result(of: { await brainRefreshTask.value }) != nil else {
+            await discardStart(failure: nil)
+            return
+        }
+        let flow = makeQuestionFlow(
+            sessionID: startedSessionID, shotsDirectory: shotsDirectory, recorder: recorder,
+            isBrainOn: BrainIndexService.shared.isBrainOn)
         questionFlow = flow
         do {
             try await flow.begin()
@@ -450,7 +474,9 @@ final class SessionCoordinator: ObservableObject {
         currentPhase = .idle
     }
 
-    private func makeQuestionFlow(sessionID: String, shotsDirectory: URL, recorder: SessionScreenRecorder) -> SessionQuestionFlow {
+    private func makeQuestionFlow(
+        sessionID: String, shotsDirectory: URL, recorder: SessionScreenRecorder, isBrainOn: Bool
+    ) -> SessionQuestionFlow {
         let locations = self.locations
         let sessionStore = self.sessionStore
         let speechPipelineProvider: @Sendable () async -> SessionSpeechPipeline? = { [weak self] in
@@ -474,7 +500,16 @@ final class SessionCoordinator: ObservableObject {
                 }
             },
             shotsDirectory: shotsDirectory,
-            timeZone: .current
+            timeZone: .current,
+            findPassages: { question, frontAppName, frontWindowTitle in
+                await BrainIndexService.shared.passages(
+                    forQuestion: question, frontAppName: frontAppName, frontWindowTitle: frontWindowTitle)
+            },
+            isBrainOn: isBrainOn,
+            brainMapPaths: { await BrainIndexService.shared.mapPaths() },
+            digDeeperRequest: { providerID in
+                await MainActor.run { SessionProviderFactory.digDeeperRequest(for: providerID) }
+            }
         )
         return SessionQuestionFlow(
             initialProvider: settings.selectedProvider,
@@ -526,6 +561,9 @@ final class SessionCoordinator: ObservableObject {
     /// Leaves running at once (so no key signal or phase update passes), then finishes the stop in the background.
     private func beginStop(askForSummary: Bool) {
         guard lifecycle.beginStop() else { return }
+        // The slow parts of Stop (the speech and screen shutdown) come next: close the answer now, so the card does
+        // not say "still coming", the checking line does not animate and no queued sentence is read meanwhile.
+        closeAnswerAsStopped()
         stopTask = Task {
             await performStop(askForSummary: askForSummary)
             stopTask = nil
@@ -572,9 +610,16 @@ final class SessionCoordinator: ObservableObject {
         sessionFinished.send(finishingSessionID)
     }
 
-    private func resetMarkerAndQuestionPhase() {
-        markerPanel.hide()
+    /// Ends the answer in flight as "(Stopped.)", hides the bubble and stops the voice. Called at the very start of
+    /// Stop and of Quit (both go through `beginStop`); later calls find nothing left to end.
+    private func closeAnswerAsStopped() {
+        apply(growingAnswerChat.abandon(reason: .stopped), details: nil)
         hideCursorAnswerAndStopSpeaking()
+    }
+
+    private func resetMarkerAndQuestionPhase() {
+        closeAnswerAsStopped()
+        markerPanel.hide()
         chatWindowState.questionPhase = .idle
     }
 
@@ -631,7 +676,11 @@ final class SessionCoordinator: ObservableObject {
             chatWindowState.questionPhase = .idle
             markerPanel.show(phase: .idle)
         case .listening:
-            // A new question replaces the last answer: its text goes and its reading stops.
+            // A new question replaces the last answer: its text goes and its reading stops. An answer still coming
+            // (when the flow did not already report it cut short) ends here as cut short; its own late cut report
+            // then finds this same card instead of adding a second one.
+            apply(growingAnswerChat.newQuestionListening(), details: nil)
+            lastVisibleAnswerText = ""
             cursorAnswerPresenter.hideAll()
             spokenAnswerPlayer.stopAllSpeaking()
             // The old pointer flies home, so the next answer sits by the cursor, not under the old label.
@@ -648,33 +697,146 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    fileprivate func showQuestion(_ text: String) {
+    fileprivate func showQuestion(_ text: String, answerNumber: Int) {
         chatWindowState.messages.append(ChatMessage(role: .question, text: text))
+        // The answer number is the card's token: every later report names it, so a report of an older answer finds
+        // its own card (or is dropped) and never reaches this one.
+        apply(growingAnswerChat.beginAnswer(answerNumber: answerNumber), details: nil)
     }
 
     fileprivate func showAnswer(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
+        notesRead: [String]
     ) {
-        chatWindowState.messages.append(ChatMessage(
-            role: .answer, text: spokenText, providerName: ProviderFailureNotice.displayName(for: provider),
-            model: model, secondsToAnswer: secondsToAnswer, pointLabel: pointLabel
-        ))
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead)
+        // A final answer for a number that is not the current answer (a newer question or Stop already ended it) is
+        // dropped: no card, no bubble, no voice. The measurements below still count as a provider answer.
+        let isCurrentAnswer = growingAnswerChat.isCurrent(answerNumber: answerNumber)
+        if isCurrentAnswer {
+            apply(growingAnswerChat.finalAnswerReceived(answerNumber: answerNumber, text: spokenText), details: details)
+        }
         chatWindowState.activeModel = model.isEmpty ? "default" : model
         settings.recordMeasuredAnswerSeconds(secondsToAnswer, for: provider)
         if chatWindowState.usageLimitOffer != nil, let switchTarget = usageLimitSwitchTarget,
            UsageLimitOfferRules.answerClearsOffer(switchTarget: switchTarget, answeredBy: provider) {
             chatWindowState.usageLimitOffer = nil
         }
-        // An answer that lands during Stop's drain reaches the chat only, like the pointer.
-        guard lifecycle.acceptsPointerFlights else { return }
+        // An answer that lands during Stop's drain finds its number already retired by Stop (the card ended as
+        // "(Stopped.)"), so it reaches nothing: no chat card, no bubble, no voice, and no pointer (`flyPointer`).
+        guard isCurrentAnswer, lifecycle.acceptsPointerFlights else { return }
         let deliveryMode = settings.answerDeliveryMode
-        if deliveryMode.showsText { cursorAnswerPresenter.showAnswer(text: spokenText) }
-        if deliveryMode.speaksAloud { spokenAnswerPlayer.speak(text: spokenText) }
+        if deliveryMode.showsText { cursorAnswerPresenter.showFinalAnswer(text: spokenText) }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakFinalAnswer(text: spokenText) }
+    }
+
+    /// The answer so far: the chat message grows, the bubble grows in place and finished sentences are spoken.
+    fileprivate func showAnswerText(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) {
+        guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
+        lastVisibleAnswerText = visibleText
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: nil, pointLabel: nil, notesRead: [])
+        apply(growingAnswerChat.textReported(answerNumber: answerNumber, text: visibleText), details: details)
+        let deliveryMode = settings.answerDeliveryMode
+        // The listening or waiting marker has done its job once the answer shows; for Spoken-only it stays until
+        // the voice starts (see onSpeakingChanged).
+        if deliveryMode.showsText { markerPanel.hide() }
+        if deliveryMode.showsText { cursorAnswerPresenter.showGrowingAnswer(text: visibleText) }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakNewSentences(visibleTextSoFar: visibleText) }
+    }
+
+    fileprivate func showCheckingNotes(answerNumber: Int) {
+        guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
+        apply(growingAnswerChat.checkingReported(answerNumber: answerNumber), details: nil)
+        let deliveryMode = settings.answerDeliveryMode
+        if deliveryMode.showsText { markerPanel.hide() }
+        if deliveryMode.showsText { cursorAnswerPresenter.showCheckingLine() }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakCheckingLine() }
+    }
+
+    /// An answer ended early: the chat message ends with the line for the reason, once. The bubble stays as it is
+    /// until the new question's listening phase hides it, as it does today; a failure's notice arrives separately.
+    fileprivate func showAnswerCutShort(
+        answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
+    ) {
+        // After Stop began, only the Stop's own report may finish the card (Stop ended it as "(Stopped.)" already).
+        guard lifecycle.acceptsPointerFlights || reason == .stopped else { return }
+        let details = ComingAnswerDetails(
+            providerName: ProviderFailureNotice.displayName(for: provider), model: model,
+            secondsToAnswer: nil, pointLabel: nil, notesRead: notesRead)
+        apply(
+            growingAnswerChat.cutShort(answerNumber: answerNumber, visibleText: visibleText, reason: reason),
+            details: details)
+    }
+
+    /// The model began a tool call: the bubble now treats new text as a new finding, and a Spoken answer says the
+    /// sentence that just ended ("Let me check your notes.") instead of waiting through the whole search in silence.
+    fileprivate func showToolCallStarted(answerNumber: Int) {
+        guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
+        let deliveryMode = settings.answerDeliveryMode
+        if deliveryMode.showsText { cursorAnswerPresenter.noteToolCallStarted() }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakTrailingSentence(visibleTextSoFar: lastVisibleAnswerText) }
+    }
+
+    private struct ComingAnswerDetails {
+        let providerName: String
+        let model: String
+        let secondsToAnswer: Double?
+        let pointLabel: String?
+        let notesRead: [String]
+    }
+
+    /// Carries out the pure chat steps on the chat window's state.
+    private func apply(_ steps: [GrowingAnswerChatState.Step], details: ComingAnswerDetails?) {
+        for step in steps {
+            switch step {
+            case .setCheckingNotes(let isChecking):
+                chatWindowState.isCheckingNotes = isChecking
+            case .appendComingMessage(let token, let text):
+                let message = ChatMessage(
+                    role: .answer, text: text, providerName: details?.providerName, model: details?.model,
+                    isStillComing: true)
+                answerMessageIDs[token] = message.id
+                chatWindowState.messages.append(message)
+            case .replaceComingText(let token, let text):
+                updateAnswerMessage(token: token) { $0.text = text }
+            case .finishComingMessage(let token, let text):
+                updateAnswerMessage(token: token) { message in
+                    message.text = text
+                    if let details {
+                        message.model = details.model
+                        message.secondsToAnswer = details.secondsToAnswer
+                        message.pointLabel = details.pointLabel
+                        message.notesRead = details.notesRead
+                    }
+                    message.isStillComing = false
+                }
+            case .appendFinishedMessage(let text):
+                chatWindowState.messages.append(ChatMessage(
+                    role: .answer, text: text, providerName: details?.providerName, model: details?.model,
+                    secondsToAnswer: details?.secondsToAnswer, pointLabel: details?.pointLabel,
+                    notesRead: details?.notesRead ?? []))
+            }
+        }
+    }
+
+    private func updateAnswerMessage(token: Int, _ change: (inout ChatMessage) -> Void) {
+        guard let messageID = answerMessageIDs[token],
+              let index = chatWindowState.messages.firstIndex(where: { $0.id == messageID }) else { return }
+        change(&chatWindowState.messages[index])
     }
 
     fileprivate func showNotice(_ text: String) {
+        // A notice takes the answer's place: a message still coming ends, the checking line stops, the voice stops.
+        let endedSteps = growingAnswerChat.noticeShown()
+        apply(endedSteps, details: nil)
         chatWindowState.messages.append(ChatMessage(role: .notice, text: text))
         guard lifecycle.acceptsPointerFlights else { return }
+        // Only an answer still coming (or its checking line) is cut off by the notice. A notice that arrives with
+        // nothing in flight (the failed switch to ChatGPT) leaves a finished answer being read aloud.
+        if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
         cursorAnswerPresenter.showNotice(text: text)
     }
 
@@ -682,8 +844,11 @@ final class SessionCoordinator: ObservableObject {
         let switchToProviderName = ProviderFailureNotice.displayName(for: provider)
         chatWindowState.usageLimitOffer = UsageLimitOffer(message: message, switchToProviderName: switchToProviderName)
         usageLimitSwitchTarget = provider
+        let endedSteps = growingAnswerChat.noticeShown()
+        apply(endedSteps, details: nil)
         // The one-tap switch lives in the menu-bar panel; the cursor only says where to find it.
         guard lifecycle.acceptsPointerFlights else { return }
+        if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
         cursorAnswerPresenter.showNotice(
             text: UsageLimitOfferRules.cursorNotice(message: message, switchToProviderName: switchToProviderName))
     }
@@ -724,19 +889,43 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         await MainActor.run { coordinator?.showPhase(phase) }
     }
 
-    func questionAsked(_ text: String) async {
-        await MainActor.run { coordinator?.showQuestion(text) }
+    func questionAsked(_ text: String, answerNumber: Int) async {
+        await MainActor.run { coordinator?.showQuestion(text, answerNumber: answerNumber) }
     }
 
     func answerReceived(
-        spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?
+        answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double,
+        pointLabel: String?, notesRead: [String]
     ) async {
         await MainActor.run {
             coordinator?.showAnswer(
-                spokenText: spokenText, provider: provider, model: model,
-                secondsToAnswer: secondsToAnswer, pointLabel: pointLabel
+                answerNumber: answerNumber, spokenText: spokenText, provider: provider, model: model,
+                secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead
             )
         }
+    }
+
+    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+        await MainActor.run { coordinator?.showAnswerText(
+                answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model) }
+    }
+
+    func checkingNotesShown(answerNumber: Int) async {
+        await MainActor.run { coordinator?.showCheckingNotes(answerNumber: answerNumber) }
+    }
+
+    func answerCutShort(
+        answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
+        reason: AnswerCutReason
+    ) async {
+        await MainActor.run {
+            coordinator?.showAnswerCutShort(
+                answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model, notesRead: notesRead, reason: reason)
+        }
+    }
+
+    func toolCallStarted(answerNumber: Int) async {
+        await MainActor.run { coordinator?.showToolCallStarted(answerNumber: answerNumber) }
     }
 
     func noticeShown(_ text: String) async {

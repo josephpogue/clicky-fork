@@ -8,3 +8,6 @@ coding-plans/
 Packages/ClickyCore/.build/
 .swiftpm/
 *.profraw
+
+# Python bytecode from the test Mac stand-ins
+__pycache__/

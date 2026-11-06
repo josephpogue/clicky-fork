@@ -85,6 +85,8 @@ public enum SessionBrowsing {
                 }
             case .sessionStarted, .questionStarted, .sessionStopped:
                 continue
+            case .digDeeperAsked, .passagesAttached, .brainToolCalled, .answerTiming:
+                continue
             }
         }
         return entries

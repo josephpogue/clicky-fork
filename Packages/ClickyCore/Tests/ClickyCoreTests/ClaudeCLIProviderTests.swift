@@ -65,6 +65,11 @@ struct ClaudeCLIProviderTests {
         #expect(argv.contains("--disable-slash-commands"))
         #expect(argv.contains("--no-session-persistence"))
         #expect(argv.contains("--safe-mode"))
+        #expect(argv.contains("--include-partial-messages"))
+        // No brain tools: no MCP server, no allowed tools, no file-mention switch.
+        #expect(argv.contains("--mcp-config") == false)
+        #expect(argv.contains("--allowedTools") == false)
+        #expect(standIn.environment(ofStart: 0)["CLAUDE_CODE_DISABLE_FILE_MENTIONS"] == nil)
     }
 
     @Test func childGetsTheAppsLoginFolderAndNoApiKeyOrBaseUrl() async throws {

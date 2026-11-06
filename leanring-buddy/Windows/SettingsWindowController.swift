@@ -38,9 +38,15 @@ final class SettingsWindowController {
             selectedProviderName: AppSettings.shared.selectedProvider.windowDisplayName,
             notesFolderPath: Self.effectiveNotesFolderPath(notesFolderSetting: AppSettings.shared.notesFolderPath),
             isNotesFolderSetByEnvironment: Self.isNotesFolderSetByEnvironment,
-            isSummaryAtStopEnabled: AppSettings.shared.summaryAtStopEnabled
+            isSummaryAtStopEnabled: AppSettings.shared.summaryAtStopEnabled,
+            searchFolderPaths: AppSettings.shared.brainSearchFolderPaths,
+            digDeeperEffort: AppSettings.shared.digDeeperEffort
         )
         connectClosures()
+        // The index status line updates live while Settings is open.
+        BrainIndexService.shared.onStatusChange = { [weak self] status in
+            self?.state.searchFolderIndexStatus = Self.indexStatus(from: status)
+        }
     }
 
     /// Opens the window (activating the app, since Settings is a normal window)
@@ -76,6 +82,15 @@ final class SettingsWindowController {
         state.onToggleSummary = { [weak self] isEnabled in
             self?.settings.summaryAtStopEnabled = isEnabled
             self?.state.isSummaryAtStopEnabled = isEnabled
+        }
+        state.onAddSearchFolder = { [weak self] in self?.addSearchFolder() }
+        state.onRemoveSearchFolder = { [weak self] path in self?.removeSearchFolder(path: path) }
+        state.onChangeDigDeeperModel = { [weak self] providerName, model in
+            self?.changeDigDeeperModel(model, providerName: providerName)
+        }
+        state.onChangeDigDeeperEffort = { [weak self] effort in
+            self?.settings.digDeeperEffort = effort
+            self?.state.digDeeperEffort = effort
         }
     }
 
@@ -194,6 +209,70 @@ final class SettingsWindowController {
         }
     }
 
+    private func addSearchFolder() {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.canCreateDirectories = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.prompt = "Add"
+        openPanel.message = "Choose a folder whose notes Clicky may search when a question needs them."
+        let handleResult: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let folderURL = openPanel.url, let self else { return }
+            let chosenPath = folderURL.standardizedFileURL.path
+            guard !self.settings.brainSearchFolderPaths.contains(chosenPath) else { return }
+            self.settings.brainSearchFolderPaths.append(chosenPath)
+            self.state.searchFolderPaths = self.settings.brainSearchFolderPaths
+            BrainIndexService.shared.folderListDidChange()
+        }
+        if let window {
+            openPanel.beginSheetModal(for: window, completionHandler: handleResult)
+        } else {
+            openPanel.begin(completionHandler: handleResult)
+        }
+    }
+
+    private func removeSearchFolder(path: String) {
+        guard settings.brainSearchFolderPaths.contains(path) else { return }
+        settings.brainSearchFolderPaths.removeAll { $0 == path }
+        state.searchFolderPaths = settings.brainSearchFolderPaths
+        BrainIndexService.shared.folderListDidChange()
+    }
+
+    private func changeDigDeeperModel(_ model: String, providerName: String) {
+        guard let providerID = ProviderID(windowDisplayName: providerName) else { return }
+        switch providerID {
+        case .claude: settings.digDeeperClaudeModel = model
+        case .chatgpt: settings.digDeeperChatgptModel = model
+        }
+        reloadDigDeeperModelRows()
+    }
+
+    /// The dig-deeper lists follow the provider rows' model lists; the selections come from the two saved settings.
+    private func reloadDigDeeperModelRows() {
+        let claudeRowModels = rowIndex(for: .claude).map { state.providers[$0].models } ?? []
+        let chatgptRowModels = rowIndex(for: .chatgpt).map { state.providers[$0].models } ?? []
+        state.digDeeperModelRows = [
+            DigDeeperModelRow(
+                providerName: ProviderID.claude.windowDisplayName,
+                models: BrainServiceDigDeeperModels.claude(providerRowModels: claudeRowModels),
+                selectedModel: settings.digDeeperClaudeModel),
+            DigDeeperModelRow(
+                providerName: ProviderID.chatgpt.windowDisplayName,
+                models: BrainServiceDigDeeperModels.chatgpt(providerRowModels: chatgptRowModels),
+                selectedModel: settings.digDeeperChatgptModel),
+        ]
+    }
+
+    private static func indexStatus(from status: BrainServiceStatus?) -> SearchFolderIndexStatus? {
+        guard let status else { return nil }
+        switch status.kind {
+        case .ready: return SearchFolderIndexStatus(text: status.text, kind: .ready)
+        case .working: return SearchFolderIndexStatus(text: status.text, kind: .working)
+        case .problem: return SearchFolderIndexStatus(text: status.text, kind: .problem)
+        }
+    }
+
     // MARK: - Loading state
 
     /// Copies the plain settings into the state each time the window opens.
@@ -202,6 +281,10 @@ final class SettingsWindowController {
         state.selectedProviderName = settings.selectedProvider.windowDisplayName
         reloadNotesFolder()
         state.isSummaryAtStopEnabled = settings.summaryAtStopEnabled
+        state.searchFolderPaths = settings.brainSearchFolderPaths
+        state.searchFolderIndexStatus = Self.indexStatus(from: BrainIndexService.shared.currentStatus)
+        state.digDeeperEffort = settings.digDeeperEffort
+        reloadDigDeeperModelRows()
         for providerID in ProviderID.allCases {
             guard let rowIndex = rowIndex(for: providerID) else { continue }
             state.providers[rowIndex].measuredAnswerSeconds = settings.measuredAnswerSeconds[providerID.rawValue]
@@ -246,6 +329,7 @@ final class SettingsWindowController {
                 state.providers[rowIndex].statusMessage = nil
             }
         }
+        reloadDigDeeperModelRows()
     }
 
     private func savedModel(for providerID: ProviderID) -> String {

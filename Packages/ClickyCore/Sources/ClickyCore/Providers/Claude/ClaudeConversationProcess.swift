@@ -75,6 +75,11 @@ final class ClaudeLineChannel: @unchecked Sendable {
 final class ClaudeConversationProcess: @unchecked Sendable {
     /// The model the process is answering with right now (changes after an in-place model change).
     var model: String
+    /// The effort applied to this process for dig deeper; nil while it runs on the setting it started with.
+    var appliedEffort: AnswerEffort?
+    /// What the tool reported as its effort before the first change (nil when none was ever set), so it can be put back.
+    var startingEffortLevel: String?
+    var hasCapturedStartingEffort = false
     let lines = ClaudeLineChannel()
     private let process = Process()
     private let inputHandle: FileHandle

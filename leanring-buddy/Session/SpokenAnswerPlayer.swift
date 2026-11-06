@@ -60,6 +60,8 @@ final class SpeechOwner {
     /// Each utterance still alive, with its reading token, until its finish or cancel arrives.
     private var liveUtterances: [ObjectIdentifier: (utterance: AVSpeechUtterance, token: Int)] = [:]
     private var speakingHandlers: [SpeechSpeaker: (Bool) -> Void] = [:]
+    /// The reading token of the answer being read, so a later sentence of the same answer joins its queue.
+    private var answerReadingToken: Int?
 
     private init() {
         synthesizer.delegate = delegateBridge
@@ -77,10 +79,25 @@ final class SpeechOwner {
     func speak(text: String, voice: AVSpeechSynthesisVoice?, as speaker: SpeechSpeaker) {
         synthesizer.stopSpeaking(at: .immediate)
         let reading = tracker.begin(speaker, reportsImmediately: speaker == .sample)
+        answerReadingToken = speaker == .answer ? reading.token : nil
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
         liveUtterances[ObjectIdentifier(utterance)] = (utterance, reading.token)
         apply(reading.changes)
+        synthesizer.speak(utterance)
+    }
+
+    /// Adds `text` after what the answer is already saying, never cutting it. With no answer reading in progress
+    /// (or the Settings sample talking) it starts a reading like `speak`. The speaking report stays on through the
+    /// whole queue and ends when the last queued sentence ends.
+    func enqueueAnswer(text: String, voice: AVSpeechSynthesisVoice?) {
+        guard tracker.currentSpeaker == .answer, let token = answerReadingToken else {
+            speak(text: text, voice: voice, as: .answer)
+            return
+        }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = voice
+        liveUtterances[ObjectIdentifier(utterance)] = (utterance, token)
         synthesizer.speak(utterance)
     }
 
@@ -101,7 +118,11 @@ final class SpeechOwner {
 
     private func handleUtteranceEvent(utterance: AVSpeechUtterance, isSpeaking: Bool) {
         guard let live = liveUtterances[ObjectIdentifier(utterance)] else { return }
-        if !isSpeaking { liveUtterances[ObjectIdentifier(utterance)] = nil }
+        if !isSpeaking {
+            liveUtterances[ObjectIdentifier(utterance)] = nil
+            // Another sentence of the same reading is still queued: the reading has not ended.
+            if liveUtterances.values.contains(where: { $0.token == live.token }) { return }
+        }
         apply(tracker.event(token: live.token, isSpeaking: isSpeaking))
     }
 
@@ -112,6 +133,12 @@ final class SpeechOwner {
 
 @MainActor
 final class SpokenAnswerPlayer {
+    /// Cuts the streamed answer text into sentences, each handed out once.
+    private var sentenceSplitter = SpokenSentenceSplitter()
+    /// True once anything of this answer was queued (a sentence or the checking line): the final answer then
+    /// speaks only its remaining sentences, never the whole text again.
+    private var hasQueuedAnswerSpeech = false
+
     /// Called with true when reading starts and false when it ends, is stopped or fails.
     var onSpeakingChanged: ((Bool) -> Void)? {
         didSet {
@@ -127,13 +154,54 @@ final class SpokenAnswerPlayer {
         SpeechOwner.shared.speak(text: text, voice: voice, as: .answer)
     }
 
+    /// The visible answer so far: speaks each sentence that completed since the last report, in order, after
+    /// whatever is still being said.
+    func speakNewSentences(visibleTextSoFar: String) {
+        queue(sentenceSplitter.newSentences(visibleTextSoFar: visibleTextSoFar, isFinal: false))
+    }
+
+    /// A tool call began: speaks the sentence that just ended at the end of the visible text (no space follows it
+    /// yet), so a search is not silent.
+    func speakTrailingSentence(visibleTextSoFar: String) {
+        queue(sentenceSplitter.newSentencesAtToolCall(visibleTextSoFar: visibleTextSoFar))
+    }
+
+    /// Says "Checking your notes." in the same queue.
+    func speakCheckingLine() {
+        queue(["\(CheckingNotesRule.lineText)."])
+    }
+
+    /// The final answer: speaks only the sentences not spoken yet. With nothing streamed before (an old provider)
+    /// it reads the whole answer, as it always did.
+    func speakFinalAnswer(text: String) {
+        guard hasQueuedAnswerSpeech else {
+            speak(text: text)
+            return
+        }
+        queue(sentenceSplitter.newSentences(visibleTextSoFar: text, isFinal: true))
+    }
+
+    private func queue(_ sentences: [String]) {
+        guard !sentences.isEmpty else { return }
+        hasQueuedAnswerSpeech = true
+        let voice = InstalledSpokenVoices.voice(savedIdentifier: AppSettings.shared.spokenAnswerVoiceIdentifier)
+        for sentence in sentences { SpeechOwner.shared.enqueueAnswer(text: sentence, voice: voice) }
+    }
+
+    private func resetStreamedSpeech() {
+        sentenceSplitter = SpokenSentenceSplitter()
+        hasQueuedAnswerSpeech = false
+    }
+
     /// Stops every voice at once, the Settings sample too: a new question.
     func stopAllSpeaking() {
+        resetStreamedSpeech()
         SpeechOwner.shared.stopAll()
     }
 
     /// Stops reading at once: Start, question, Start, Stop, Quit and a change to a mode that does not speak.
     func stopSpeaking() {
+        resetStreamedSpeech()
         SpeechOwner.shared.stop(.answer)
     }
 }

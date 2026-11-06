@@ -33,13 +33,39 @@ struct ClaudeStandIn {
         case slowModelChange = "slowsetmodel"
         /// The one-shot run (the summary) ignores the polite stop request and never ends on its own
         case ignoreTerminate = "ignoreterm"
+        /// Refuses `apply_flag_settings` (the in-place effort change)
+        case refuseEffortChange = "noeffort"
+        /// Ignores the interrupt request during a held answer
+        case ignoreInterrupt = "ignoreinterrupt"
     }
+
+    /// Words a test puts in a question to pick how the stand-in answers it, in any mode, on the same process.
+    enum QuestionTrigger {
+        /// Streams the default answer in pieces: text block start, several deltas, result
+        static let streamed = "STREAMQUESTION"
+        /// Preamble text, a `search_brain` call with its result, then the finding
+        static let search = "SEARCHQUESTION"
+        /// The same `search_brain` call three times, then waits
+        static let repeatedCall = "REPEATQUESTION"
+        /// One delta, then holds until an interrupt arrives
+        static let held = "HELDQUESTION"
+        /// Six deltas 0.5 s apart
+        static let trickle = "TRICKLEQUESTION"
+        /// Streams text but no `result.result` text (the final text is only in the deltas)
+        static let thinking = "THINKINGQUESTION"
+    }
+
+    /// The text of the search stream's two blocks and the file its tool result names.
+    static let searchPreamble = "Searching the brain for the port."
+    static let searchFinding = "design-vault runs on port 4417."
+    static let searchResultPath = "/notes/design-vault.md"
 
     let directory: URL
     let executableURL: URL
     let mode: Mode
 
-    init(mode: Mode = .normal) throws {
+    /// `startingEffortLevel` is the effort `get_settings` shows when the process starts; nil means none was set.
+    init(mode: Mode = .normal, startingEffortLevel: String? = nil) throws {
         self.mode = mode
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-standin-\(UUID().uuidString)", isDirectory: true)
@@ -48,6 +74,15 @@ struct ClaudeStandIn {
         try Self.script.write(to: executableURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
         try mode.rawValue.write(to: directory.appendingPathComponent("mode"), atomically: true, encoding: .utf8)
+        if let startingEffortLevel {
+            try startingEffortLevel.write(to: directory.appendingPathComponent("effort"), atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Changes how the running stand-in answers `apply_flag_settings` from the next request on.
+    func switchEffortRefusal(on: Bool) throws {
+        try (on ? Mode.refuseEffortChange : Mode.normal).rawValue
+            .write(to: directory.appendingPathComponent("mode"), atomically: true, encoding: .utf8)
     }
 
     /// Variables that must never reach a child: keys and tokens, a base URL, the keychain folder switch, and
@@ -76,7 +111,7 @@ struct ClaudeStandIn {
     static func unexpectedVariableNames(in childEnvironment: [String: String]) -> [String] {
         let allowedNames: Set<String> = [
             "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM", "__CF_USER_TEXT_ENCODING",
-            "CLAUDE_CONFIG_DIR", "__PYVENV_LAUNCHER__",
+            "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_FILE_MENTIONS", "__PYVENV_LAUNCHER__",
         ]
         return childEnvironment.keys
             .filter { !allowedNames.contains($0) && !$0.hasPrefix("LC_") }
@@ -133,6 +168,19 @@ struct ClaudeStandIn {
         }
     }
 
+    /// Every control request the provider sent, in order, as its `request` object.
+    var controlRequests: [[String: Any]] {
+        stdinLines.compactMap { line in
+            guard let message = line["message"] as? [String: Any], message["type"] as? String == "control_request" else { return nil }
+            return message["request"] as? [String: Any]
+        }
+    }
+
+    /// The subtypes of the control requests, in order.
+    var controlSubtypes: [String] {
+        controlRequests.compactMap { $0["subtype"] as? String }
+    }
+
     /// The content blocks of a recorded user line.
     func contentBlocks(ofUserLine line: [String: Any]) -> [[String: Any]] {
         let message = (line["message"] as? [String: Any])?["message"] as? [String: Any]
@@ -150,7 +198,7 @@ struct ClaudeStandIn {
 
     private static let script = #"""
 #!/usr/bin/env python3
-import json, os, signal, sys, time
+import json, os, queue, signal, sys, threading, time
 
 directory = os.path.dirname(os.path.realpath(__file__))
 mode = open(os.path.join(directory, "mode")).read().strip()
@@ -201,10 +249,30 @@ if "--input-format" not in argv:
 
 model = argv[argv.index("--model") + 1]
 answered = 0
+effort = None
+effort_file = os.path.join(directory, "effort")
+if os.path.exists(effort_file):
+    effort = open(effort_file).read().strip()
+
+inbox = queue.Queue()
+
+def read_stdin():
+    for raw in sys.stdin:
+        inbox.put(raw)
+    inbox.put(None)
+
+threading.Thread(target=read_stdin, daemon=True).start()
 
 def send_init():
     emit({"type": "system", "subtype": "init", "model": model, "permissionMode": "default",
           "apiKeySource": "ANTHROPIC_API_KEY" if mode == "apikey" else "none", "session_id": "stand-in"})
+
+def stream_event(event):
+    emit({"type": "stream_event", "event": event, "session_id": "stand-in", "parent_tool_use_id": None})
+
+def assistant_blocks(blocks):
+    emit({"type": "assistant", "message": {"model": model, "role": "assistant", "content": blocks},
+          "parent_tool_use_id": None, "session_id": "stand-in"})
 
 def send_reply(text, is_error=False, error=None):
     assistant = {"type": "assistant", "message": {"model": model, "role": "assistant",
@@ -215,31 +283,140 @@ def send_reply(text, is_error=False, error=None):
     emit({"type": "result", "subtype": "success", "is_error": is_error, "result": text,
           "stop_reason": "end_turn", "session_id": "stand-in"})
 
-for line in sys.stdin:
-    message = json.loads(line)
-    append("stdin.jsonl", {"pid": pid, "message": message})
-    if message["type"] == "control_request":
-        request = message["request"]
+def stream_text_block(pieces, index=0, pause=0):
+    stream_event({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}})
+    for piece in pieces:
+        stream_event({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": piece}})
+        if pause:
+            time.sleep(pause)
+    assistant_blocks([{"type": "text", "text": "".join(pieces)}])
+    stream_event({"type": "content_block_stop", "index": index})
+
+tool_counter = [0]
+
+def tool_call(query, result_text, wait_for_result=True):
+    tool_counter[0] += 1
+    tool_id = "toolu_%d" % tool_counter[0]
+    name = "mcp__brain__search_brain"
+    stream_event({"type": "content_block_start", "index": 1,
+                  "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}})
+    assistant_blocks([{"type": "tool_use", "id": tool_id, "name": name, "input": {"query": query}}])
+    stream_event({"type": "content_block_stop", "index": 1})
+    if wait_for_result:
+        emit({"type": "user", "message": {"role": "user", "content": [
+            {"tool_use_id": tool_id, "type": "tool_result", "content": [{"type": "text", "text": result_text}]}]},
+            "parent_tool_use_id": None, "session_id": "stand-in"})
+
+def send_result(text):
+    emit({"type": "result", "subtype": "success", "is_error": False, "result": text,
+          "stop_reason": "end_turn", "session_id": "stand-in"})
+
+def handle_control(message):
+    request = message["request"]
+    subtype = request["subtype"]
+    request_id = message["request_id"]
+    global model, effort
+    if subtype == "set_model":
         if mode == "slowsetmodel":
             time.sleep(30)
         if mode == "nosetmodel":
             emit({"type": "control_response", "response": {"subtype": "error",
-                  "request_id": message["request_id"], "error": "Unsupported control request"}})
-        else:
-            model = request["model"]
-            emit({"type": "control_response", "response": {"subtype": "success",
-                  "request_id": message["request_id"], "response": {"model": model}}})
+                  "request_id": request_id, "error": "Unsupported control request"}})
+            return
+        model = request["model"]
+        emit({"type": "control_response", "response": {"subtype": "success",
+              "request_id": request_id, "response": {"model": model}}})
+    elif subtype == "get_settings":
+        effective = {"effortLevel": effort} if effort else {}
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
+              "response": {"effective": effective, "sources": [], "applied": {"model": model, "effort": effort or "medium"}}}})
+    elif subtype == "apply_flag_settings":
+        if open(os.path.join(directory, "mode")).read().strip() == "noeffort":
+            emit({"type": "control_response", "response": {"subtype": "error",
+                  "request_id": request_id, "error": "Unsupported control request subtype: apply_flag_settings"}})
+            return
+        effort = request["settings"].get("effortLevel")
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": request_id}})
+    elif subtype == "interrupt":
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
+              "response": {"still_queued": []}}})
+    else:
+        emit({"type": "control_response", "response": {"subtype": "error", "request_id": request_id,
+              "error": "Unsupported control request subtype: " + subtype}})
+
+def hold_until_interrupted(partial_text):
+    # A slow answer: waits for the interrupt request, then ends the way the real CLI does (verified on 2.1.318).
+    while True:
+        try:
+            raw = inbox.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if raw is None:
+            sys.exit(0)
+        message = json.loads(raw)
+        append("stdin.jsonl", {"pid": pid, "message": message})
+        if message["type"] != "control_request":
+            continue
+        if message["request"]["subtype"] == "interrupt" and mode == "ignoreinterrupt":
+            continue
+        handle_control(message)
+        if message["request"]["subtype"] == "interrupt":
+            assistant_blocks([{"type": "text", "text": partial_text}])
+            emit({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": "[Request interrupted by user]"}]}, "parent_tool_use_id": None,
+                "session_id": "stand-in"})
+            emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": None,
+                  "stop_reason": None, "session_id": "stand-in"})
+            return
+
+while True:
+    raw = inbox.get()
+    if raw is None:
+        break
+    message = json.loads(raw)
+    append("stdin.jsonl", {"pid": pid, "message": message})
+    if message["type"] == "control_request":
+        handle_control(message)
         continue
     send_init()
     if mode == "silent":
         continue
     if mode == "limit":
-        send_reply("You've hit your limit · resets 3pm", True, "rate_limit")
+        send_reply("You've hit your limit \u00b7 resets 3pm", True, "rate_limit")
         continue
     if mode == "notloggedin":
-        send_reply("Not logged in · Please run /login", True, "authentication_failed")
+        send_reply("Not logged in \u00b7 Please run /login", True, "authentication_failed")
         sys.exit(1)
-    send_reply(answer)
+    # Only the last block holds the new question; a recap in an earlier block may quote old trigger words.
+    question = json.dumps(message["message"]["content"][-1])
+    if "STREAMQUESTION" in question:
+        stream_text_block(["The Save button ", "is at the top right. ", "[POINT:1180,40:save button]"])
+        send_result(answer)
+    elif "SEARCHQUESTION" in question:
+        stream_text_block(["Searching the ", "brain for the port."])
+        tool_call("design-vault port", "File: /notes/design-vault.md lines 1-4\nport is 4417")
+        stream_text_block(["design-vault runs ", "on port 4417."])
+        send_result("design-vault runs on port 4417.")
+    elif "REPEATQUESTION" in question:
+        stream_text_block(["Looking."])
+        tool_call("same query", "File: /notes/a.md lines 1-2\nnothing")
+        tool_call("same query", "File: /notes/a.md lines 1-2\nnothing")
+        tool_call("same query", "", wait_for_result=False)
+        hold_until_interrupted("Looking.")
+    elif "HELDQUESTION" in question:
+        stream_text_block(["Part one of a long answer."])
+        hold_until_interrupted("Part one of a long answer.")
+    elif "TRICKLEQUESTION" in question:
+        stream_text_block(["a ", "b ", "c ", "d ", "e ", "f"], pause=0.5)
+        send_result("a b c d e f")
+    elif "THINKINGQUESTION" in question:
+        stream_event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}})
+        stream_event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}})
+        stream_event({"type": "content_block_stop", "index": 0})
+        stream_text_block(["Visible."], index=1)
+        send_result("Visible.")
+    else:
+        send_reply(answer)
     answered += 1
     if mode == "exitafterfirst" and answered == 1:
         sys.exit(0)

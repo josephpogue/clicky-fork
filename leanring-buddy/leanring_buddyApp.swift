@@ -45,6 +45,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         SessionCoordinator.shared.prepareSpeech()
         // Finish any session folder an earlier crash left open, off the main actor; Start waits for it.
         SessionCoordinator.shared.finishAbandonedSessionsAtLaunch()
+        // Brings the brain index up to date for the Settings folders, off the main thread; an empty list does nothing.
+        BrainIndexService.shared.refreshInBackground()
         // Auto-open the panel when permissions are missing so the user sees what to grant.
         if !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()

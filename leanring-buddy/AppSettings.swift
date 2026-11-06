@@ -50,6 +50,27 @@ final class AppSettings: ObservableObject {
         didSet { userDefaults.set(spokenAnswerVoiceIdentifier, forKey: Keys.spokenAnswerVoiceIdentifier) }
     }
 
+    /// Folders whose notes Clicky may search for a question (absolute paths). Empty means the brain feature is off and
+    /// Clicky behaves exactly as without it.
+    @Published var brainSearchFolderPaths: [String] {
+        didSet { userDefaults.set(brainSearchFolderPaths, forKey: Keys.brainSearchFolderPaths) }
+    }
+
+    /// The stronger Claude model a "dig deeper" question uses, for that one question.
+    @Published var digDeeperClaudeModel: String {
+        didSet { userDefaults.set(digDeeperClaudeModel, forKey: Keys.digDeeperClaudeModel) }
+    }
+
+    /// The stronger ChatGPT model a "dig deeper" question uses. Empty means the CLI's own default model.
+    @Published var digDeeperChatgptModel: String {
+        didSet { userDefaults.set(digDeeperChatgptModel, forKey: Keys.digDeeperChatgptModel) }
+    }
+
+    /// How hard the model thinks on a "dig deeper" question. High by default.
+    @Published var digDeeperEffort: AnswerEffort {
+        didSet { userDefaults.set(digDeeperEffort.rawValue, forKey: Keys.digDeeperEffort) }
+    }
+
     /// Seconds the last answer took, per provider raw value, shown in Settings.
     @Published private(set) var measuredAnswerSeconds: [String: Double] {
         didSet { userDefaults.set(measuredAnswerSeconds, forKey: Keys.measuredAnswerSeconds) }
@@ -68,6 +89,10 @@ final class AppSettings: ObservableObject {
         summaryAtStopEnabled = userDefaults.object(forKey: Keys.summaryAtStopEnabled) as? Bool ?? true
         answerDeliveryMode = userDefaults.string(forKey: Keys.answerDeliveryMode).flatMap(AnswerDeliveryMode.init(rawValue:)) ?? .text
         spokenAnswerVoiceIdentifier = userDefaults.string(forKey: Keys.spokenAnswerVoiceIdentifier)
+        brainSearchFolderPaths = userDefaults.stringArray(forKey: Keys.brainSearchFolderPaths) ?? []
+        digDeeperClaudeModel = userDefaults.string(forKey: Keys.digDeeperClaudeModel) ?? "opus"
+        digDeeperChatgptModel = userDefaults.string(forKey: Keys.digDeeperChatgptModel) ?? ""
+        digDeeperEffort = userDefaults.string(forKey: Keys.digDeeperEffort).flatMap(AnswerEffort.init(rawValue:)) ?? .high
         measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 
@@ -80,5 +105,9 @@ final class AppSettings: ObservableObject {
         static let measuredAnswerSeconds = "settings.measuredAnswerSeconds"
         static let answerDeliveryMode = "settings.answerDeliveryMode"
         static let spokenAnswerVoiceIdentifier = "settings.spokenAnswerVoiceIdentifier"
+        static let brainSearchFolderPaths = "settings.brainSearchFolderPaths"
+        static let digDeeperClaudeModel = "settings.digDeeperClaudeModel"
+        static let digDeeperChatgptModel = "settings.digDeeperChatgptModel"
+        static let digDeeperEffort = "settings.digDeeperEffort"
     }
 }

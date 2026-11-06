@@ -29,6 +29,15 @@ public struct AppDataLocations: Equatable, Sendable {
         root.appendingPathComponent("providers/workdir", isDirectory: true)
     }
 
+    /// The brain search index (SQLite FTS5), rebuilt from the search folders; never inside them.
+    public var brainIndexDirectory: URL {
+        root.appendingPathComponent("brain-index", isDirectory: true)
+    }
+
+    public var brainIndexDatabaseURL: URL {
+        brainIndexDirectory.appendingPathComponent("index.sqlite", isDirectory: false)
+    }
+
     public static func standard(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> AppDataLocations {

@@ -25,18 +25,24 @@ enum ClaudeCommandLine {
     /// The environment the child gets: the shared allowlist from `ProviderProcessSupport` plus the app's own Claude
     /// login folder. Nothing that could switch the tool to an API key, another server, another keychain entry or a
     /// parent Claude Code session is on the list, so nothing needs removing by name.
-    static func childEnvironment(base: [String: String], locations: AppDataLocations) -> [String: String] {
-        ProviderProcessSupport.scrubbedEnvironment(
-            base: base,
-            adding: ["CLAUDE_CONFIG_DIR": locations.claudeConfigDirectory.path]
-        )
+    ///
+    /// With brain tools on, safe mode is off, so `@path` file mentions are switched off too: a note passage holding
+    /// `@/some/file` must never make the tool read that file.
+    static func childEnvironment(
+        base: [String: String],
+        locations: AppDataLocations,
+        withBrainTools: Bool = false
+    ) -> [String: String] {
+        var addedVariables = ["CLAUDE_CONFIG_DIR": locations.claudeConfigDirectory.path]
+        if withBrainTools { addedVariables["CLAUDE_CODE_DISABLE_FILE_MENTIONS"] = "1" }
+        return ProviderProcessSupport.scrubbedEnvironment(base: base, adding: addedVariables)
     }
 
     /// Flags that keep the tool to a plain answer on the subscription: no tools, no settings files, no MCP servers,
     /// no slash commands, nothing saved to disk, and safe mode (measured to cost no extra time).
     /// Never `--bare`, which would drop the subscription login.
-    static func isolationArguments(model: String, instructions: String) -> [String] {
-        [
+    static func isolationArguments(model: String, instructions: String, includeSafeMode: Bool = true) -> [String] {
+        var arguments = [
             "--model", model,
             "--system-prompt", instructions,
             "--tools", "",
@@ -44,14 +50,48 @@ enum ClaudeCommandLine {
             "--strict-mcp-config",
             "--disable-slash-commands",
             "--no-session-persistence",
-            "--safe-mode",
         ]
+        if includeSafeMode { arguments.append("--safe-mode") }
+        return arguments
     }
 
-    /// Arguments for the long-lived conversation process.
-    static func conversationArguments(model: String, instructions: String) -> [String] {
-        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
-            + isolationArguments(model: model, instructions: instructions)
+    /// Arguments for the long-lived conversation process. Text is always streamed in pieces. With a brain tool
+    /// server the only change is that safe mode goes (it blocks every MCP server, measured on 2.1.318) and the one
+    /// MCP server is added, with its two tools named in `--allowedTools` (without it each call is denied). The
+    /// built-in tool list stays empty, so the model gets no tool but those two.
+    static func conversationArguments(
+        model: String,
+        instructions: String,
+        brainToolServer: BrainToolServer? = nil
+    ) -> [String] {
+        var arguments = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        arguments += isolationArguments(model: model, instructions: instructions, includeSafeMode: brainToolServer == nil)
+        arguments.append("--include-partial-messages")
+        if let brainToolServer {
+            arguments += [
+                "--mcp-config", brainMCPConfigJSON(for: brainToolServer),
+                "--allowedTools", BrainToolName.allCases.map(\.claudeToolName).joined(separator: ","),
+            ]
+        }
+        return arguments
+    }
+
+    /// The inline `--mcp-config` value: one stdio server named `brain` that starts the bundled helper.
+    static func brainMCPConfigJSON(for brainToolServer: BrainToolServer) -> String {
+        let configuration: [String: Any] = [
+            "mcpServers": [
+                BrainToolName.serverName: [
+                    "type": "stdio",
+                    "command": brainToolServer.executableURL.path,
+                    "args": brainToolServer.arguments,
+                ] as [String: Any],
+            ],
+        ]
+        let data = (try? JSONSerialization.data(
+            withJSONObject: configuration,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Arguments for the one-shot text-only run (the summary). The prompt arrives on standard input.

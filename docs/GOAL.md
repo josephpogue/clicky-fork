@@ -29,6 +29,14 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 - **Short answers first:** As a user, I want short answers unless I ask for more, so that I can take them in at a glance while I work.
   - Acceptance: When the user asks a question, the app shall answer in one or two sentences.
   - Acceptance: When the user asks it to explain more, the app shall give the longer answer.
+- **Answers from my notes:** As a user, I want answers to draw on my own notes and project files only when a question needs them, so that I get accurate answers without waiting for everything to load.
+  - Acceptance: When no search folder is set, the app shall answer from the screen alone, as before.
+  - Acceptance: When a question is sent and search folders are set, the app shall attach the passages from those folders that match the question, found on the Mac.
+  - Acceptance: When the passages do not answer the question, the app shall let the answer search and read files inside the search folders, and never any file outside them or any file that may hold secrets.
+  - Acceptance: When the first words of an answer arrive, the app shall show or speak them at once, and add later findings to the same answer as they arrive.
+  - Acceptance: When the answer is searching the notes and has not said so, the app shall show "Checking your notes" beside the cursor.
+  - Acceptance: When the user asks a new question while an answer is still coming, the app shall end that answer and take the new question.
+  - Acceptance: When a question starts with "dig deeper", the app shall answer it on the stronger model and effort from Settings, and use the normal model again from the next question.
 - **Watch only when I say so:** As a user, I want the assistant to watch only during a session I start and stop, so that it never uses my plan or sees my screen when I have not asked it to.
   - Acceptance: When the Mac starts up, the app shall not start a session.
   - Acceptance: When no session is running, the app shall not capture the screen or the microphone.
@@ -51,9 +59,10 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 - The question key is right Command by default.
 - No window opens during a session unless the user opens it; the chat window holding the whole conversation opens only from the menu-bar panel.
 - Spoken answers use the voices built into macOS.
-- Screenshots, speech-to-text, change detection and cleanup run on the Mac with no AI request.
+- Screenshots, speech-to-text, change detection, cleanup and the notes index and passage search run on the Mac with no AI request.
 - The app does not read text off screenshots.
-- The only AI requests are one per question and one optional text-only summary at Stop.
+- Notes are read only from the search folders set in Settings, read-only, and files that may hold secrets (`.env` files, keys, credentials, tokens, `.git`) are never indexed or read.
+- The only AI requests are one per question and one optional text-only summary at Stop. One question's request may search and read the notes several times inside it.
 - Claude runs through the official Claude Code CLI on the user's own login; ChatGPT runs through the official Codex CLI on the user's own login.
 - The app keeps its own sign-ins, apart from any Claude Code or Codex the user already has.
 - The notes folder is a setting; no path or account is built into the code.

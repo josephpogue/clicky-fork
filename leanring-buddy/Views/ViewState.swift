@@ -33,6 +33,12 @@ struct ChatMessage: Identifiable, Equatable {
     var secondsToAnswer: Double?
     /// What the pointer moved to, when the answer carried a point tag.
     var pointLabel: String?
+    /// The notes the answer read from the search folders, in the order read: each a full path (or a path inside
+    /// a search folder). The chat shows only the file name, with the whole path on hover. Empty for screen-only answers.
+    var notesRead: [String]
+    /// True while the answer is still coming: `text` is the text so far and grows with each report. Set it to
+    /// false when the answer is done; the chat then shows the timing and the notes read.
+    var isStillComing: Bool
 
     init(
         id: UUID = UUID(),
@@ -42,7 +48,9 @@ struct ChatMessage: Identifiable, Equatable {
         providerName: String? = nil,
         model: String? = nil,
         secondsToAnswer: Double? = nil,
-        pointLabel: String? = nil
+        pointLabel: String? = nil,
+        notesRead: [String] = [],
+        isStillComing: Bool = false
     ) {
         self.id = id
         self.role = role
@@ -52,6 +60,8 @@ struct ChatMessage: Identifiable, Equatable {
         self.model = model
         self.secondsToAnswer = secondsToAnswer
         self.pointLabel = pointLabel
+        self.notesRead = notesRead
+        self.isStillComing = isStillComing
     }
 }
 
@@ -84,6 +94,9 @@ final class ChatWindowState: ObservableObject {
     /// Added for the design: the name of the question key as the hint line
     /// says it ("right Command"), so a changed key reads right everywhere.
     @Published var questionKeyLabel: String
+    /// True while the answer being written is searching the user's folders: the latest card shows "Checking
+    /// your notes" at the end of the growing answer, or alone before any answer text has come.
+    @Published var isCheckingNotes: Bool
 
     var isSessionRunning: Bool { sessionPhase == .running }
 
@@ -100,6 +113,7 @@ final class ChatWindowState: ObservableObject {
         activeModel: String = "sonnet",
         usageLimitOffer: UsageLimitOffer? = nil,
         questionKeyLabel: String = "right Command",
+        isCheckingNotes: Bool = false,
         onSwitchProvider: @escaping () -> Void = {},
         onStopSession: @escaping () -> Void = {},
         onStartSession: @escaping () -> Void = {}
@@ -112,6 +126,7 @@ final class ChatWindowState: ObservableObject {
         self.activeModel = activeModel
         self.usageLimitOffer = usageLimitOffer
         self.questionKeyLabel = questionKeyLabel
+        self.isCheckingNotes = isCheckingNotes
         self.onSwitchProvider = onSwitchProvider
         self.onStopSession = onStopSession
         self.onStartSession = onStartSession
@@ -159,6 +174,56 @@ struct ProviderSettingsRow: Identifiable, Equatable {
     }
 }
 
+/// The quiet line under the search folders that says how the index is doing. The app writes the text
+/// ("1,284 notes indexed", "Indexing...", "Could not read ~/x"); the kind picks its look.
+struct SearchFolderIndexStatus: Equatable {
+    enum Kind: Equatable {
+        /// Done and current: plain muted text.
+        case ready
+        /// Indexing now: a small spinner before the text.
+        case working
+        /// Something could not be read: amber text with a warning mark.
+        case problem
+    }
+
+    var text: String
+    var kind: Kind
+
+    init(text: String, kind: Kind = .ready) {
+        self.text = text
+        self.kind = kind
+    }
+}
+
+/// One provider's model choice for "dig deeper", drawn like the provider card's Model pills.
+struct DigDeeperModelRow: Identifiable, Equatable {
+    var id: String { providerName }
+    /// "Claude" or "ChatGPT", as in `ProviderSettingsRow.providerName`.
+    var providerName: String
+    /// The models to offer, in order. An empty string is the CLI's own default and shows as "default".
+    /// An empty list shows "Sign in to choose" (a provider that is not signed in has no model list).
+    var models: [String]
+    /// The chosen model; an empty string is the CLI's own default.
+    var selectedModel: String
+
+    init(providerName: String, models: [String], selectedModel: String) {
+        self.providerName = providerName
+        self.models = models
+        self.selectedModel = selectedModel
+    }
+
+    /// Same slug rule as `ProviderSettingsRow.identifierSlug`.
+    var identifierSlug: String {
+        providerName.lowercased().replacingOccurrences(of: " ", with: "")
+    }
+
+    /// What Settings shows before the app fills the real lists: Claude on opus, ChatGPT on the CLI default.
+    static let defaultRows: [DigDeeperModelRow] = [
+        DigDeeperModelRow(providerName: "Claude", models: ["sonnet", "opus", "haiku"], selectedModel: "opus"),
+        DigDeeperModelRow(providerName: "ChatGPT", models: [""], selectedModel: ""),
+    ]
+}
+
 @MainActor
 final class SettingsState: ObservableObject {
     @Published var providers: [ProviderSettingsRow]
@@ -168,6 +233,15 @@ final class SettingsState: ObservableObject {
     /// True when CLICKY_VAULT_ROOT sets the notes folder, so the window can say why a choice does not apply.
     @Published var isNotesFolderSetByEnvironment: Bool
     @Published var isSummaryAtStopEnabled: Bool
+    /// The folders Clicky may search, as full paths (the view shows the home folder as "~"). Empty turns the
+    /// search off and the section shows only its caption and Add folder.
+    @Published var searchFolderPaths: [String]
+    /// The line under the folder list; nil shows none. Not shown while the list is empty.
+    @Published var searchFolderIndexStatus: SearchFolderIndexStatus?
+    /// The stronger model per provider used when the user says "dig deeper".
+    @Published var digDeeperModelRows: [DigDeeperModelRow]
+    /// The effort used when the user says "dig deeper". High by default.
+    @Published var digDeeperEffort: AnswerEffort
 
     var onSignIn: (_ providerName: String) -> Void
     var onCancelSignIn: (_ providerName: String) -> Void
@@ -176,6 +250,14 @@ final class SettingsState: ObservableObject {
     var onSelectProvider: (_ providerName: String) -> Void
     var onChooseNotesFolder: () -> Void
     var onToggleSummary: (_ isEnabled: Bool) -> Void
+    /// Add folder was pressed: show the folder picker, then append the chosen path to `searchFolderPaths`.
+    var onAddSearchFolder: () -> Void
+    /// A folder row's remove control was pressed; `path` is the full path exactly as in `searchFolderPaths`.
+    var onRemoveSearchFolder: (_ path: String) -> Void
+    /// A dig-deeper model pill was pressed; `model` is "" for the CLI's own default. Update `digDeeperModelRows`.
+    var onChangeDigDeeperModel: (_ providerName: String, _ model: String) -> Void
+    /// A dig-deeper effort chip was pressed. Update `digDeeperEffort`.
+    var onChangeDigDeeperEffort: (_ effort: AnswerEffort) -> Void
 
     init(
         providers: [ProviderSettingsRow] = [],
@@ -183,19 +265,31 @@ final class SettingsState: ObservableObject {
         notesFolderPath: String? = nil,
         isNotesFolderSetByEnvironment: Bool = false,
         isSummaryAtStopEnabled: Bool = true,
+        searchFolderPaths: [String] = [],
+        searchFolderIndexStatus: SearchFolderIndexStatus? = nil,
+        digDeeperModelRows: [DigDeeperModelRow] = DigDeeperModelRow.defaultRows,
+        digDeeperEffort: AnswerEffort = .high,
         onSignIn: @escaping (String) -> Void = { _ in },
         onCancelSignIn: @escaping (String) -> Void = { _ in },
         onSignOut: @escaping (String) -> Void = { _ in },
         onSelectModel: @escaping (String, String) -> Void = { _, _ in },
         onSelectProvider: @escaping (String) -> Void = { _ in },
         onChooseNotesFolder: @escaping () -> Void = {},
-        onToggleSummary: @escaping (Bool) -> Void = { _ in }
+        onToggleSummary: @escaping (Bool) -> Void = { _ in },
+        onAddSearchFolder: @escaping () -> Void = {},
+        onRemoveSearchFolder: @escaping (String) -> Void = { _ in },
+        onChangeDigDeeperModel: @escaping (String, String) -> Void = { _, _ in },
+        onChangeDigDeeperEffort: @escaping (AnswerEffort) -> Void = { _ in }
     ) {
         self.providers = providers
         self.selectedProviderName = selectedProviderName
         self.notesFolderPath = notesFolderPath
         self.isNotesFolderSetByEnvironment = isNotesFolderSetByEnvironment
         self.isSummaryAtStopEnabled = isSummaryAtStopEnabled
+        self.searchFolderPaths = searchFolderPaths
+        self.searchFolderIndexStatus = searchFolderIndexStatus
+        self.digDeeperModelRows = digDeeperModelRows
+        self.digDeeperEffort = digDeeperEffort
         self.onSignIn = onSignIn
         self.onCancelSignIn = onCancelSignIn
         self.onSignOut = onSignOut
@@ -203,6 +297,10 @@ final class SettingsState: ObservableObject {
         self.onSelectProvider = onSelectProvider
         self.onChooseNotesFolder = onChooseNotesFolder
         self.onToggleSummary = onToggleSummary
+        self.onAddSearchFolder = onAddSearchFolder
+        self.onRemoveSearchFolder = onRemoveSearchFolder
+        self.onChangeDigDeeperModel = onChangeDigDeeperModel
+        self.onChangeDigDeeperEffort = onChangeDigDeeperEffort
     }
 }
 

@@ -11,6 +11,8 @@ struct CodexProcessResult {
     var wasStoppedEarly: Bool
     /// `terminateEverything()` ended the process.
     var wasCancelled: Bool
+    /// `endRunningProcesses()` ended the process because the answer was no longer wanted (a new question).
+    var wasEndedOnRequest: Bool = false
     var couldNotStart: Bool
 }
 
@@ -20,6 +22,7 @@ final class CodexProcessRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var runningProcessesByID: [Int32: Process] = [:]
     private var cancelledProcessIDs: Set<Int32> = []
+    private var processIDsEndedOnRequest: Set<Int32> = []
 
     func run(
         executableURL: URL,
@@ -28,6 +31,7 @@ final class CodexProcessRunner: @unchecked Sendable {
         workingDirectory: URL,
         timeoutSeconds: Double,
         shouldStopAfterLine: (@Sendable (String) -> Bool)? = nil,
+        onLine: (@Sendable (String) -> Void)? = nil,
         shouldStillStart: (@Sendable () -> Bool)? = nil
     ) async -> CodexProcessResult {
         await withCheckedContinuation { continuation in
@@ -39,6 +43,7 @@ final class CodexProcessRunner: @unchecked Sendable {
                     workingDirectory: workingDirectory,
                     timeoutSeconds: timeoutSeconds,
                     shouldStopAfterLine: shouldStopAfterLine,
+                    onLine: onLine,
                     shouldStillStart: shouldStillStart
                 )
                 continuation.resume(returning: result)
@@ -59,6 +64,20 @@ final class CodexProcessRunner: @unchecked Sendable {
         }
     }
 
+    /// Ends every running process because its answer is no longer wanted. Unlike `terminateEverything()` the result
+    /// says so (`wasEndedOnRequest`), so the caller can return what had arrived instead of failing.
+    func endRunningProcesses() {
+        lock.lock()
+        let processes = Array(runningProcessesByID)
+        for (processID, _) in processes {
+            processIDsEndedOnRequest.insert(processID)
+        }
+        lock.unlock()
+        for (_, process) in processes {
+            Self.terminateAndEscalate(process)
+        }
+    }
+
     // MARK: Blocking implementation
 
     private func runBlocking(
@@ -68,6 +87,7 @@ final class CodexProcessRunner: @unchecked Sendable {
         workingDirectory: URL,
         timeoutSeconds: Double,
         shouldStopAfterLine: (@Sendable (String) -> Bool)?,
+        onLine: (@Sendable (String) -> Void)?,
         shouldStillStart: (@Sendable () -> Bool)?
     ) -> CodexProcessResult {
         let process = Process()
@@ -131,6 +151,7 @@ final class CodexProcessRunner: @unchecked Sendable {
                     pending.removeSubrange(pending.startIndex...newlineIndex)
                     let line = String(decoding: lineData, as: UTF8.self)
                     capturedLines.append(line)
+                    onLine?(line)
                     if let shouldStopAfterLine, shouldStopAfterLine(line), !flags.markStoppedEarly() {
                         Self.terminateAndEscalate(process)
                     }
@@ -161,6 +182,7 @@ final class CodexProcessRunner: @unchecked Sendable {
         lock.lock()
         runningProcessesByID[processID] = nil
         let wasCancelled = cancelledProcessIDs.remove(processID) != nil
+        let wasEndedOnRequest = processIDsEndedOnRequest.remove(processID) != nil
         lock.unlock()
 
         return CodexProcessResult(
@@ -170,6 +192,7 @@ final class CodexProcessRunner: @unchecked Sendable {
             didTimeOut: flags.timedOut,
             wasStoppedEarly: flags.stoppedEarly,
             wasCancelled: wasCancelled,
+            wasEndedOnRequest: wasEndedOnRequest,
             couldNotStart: false
         )
     }
