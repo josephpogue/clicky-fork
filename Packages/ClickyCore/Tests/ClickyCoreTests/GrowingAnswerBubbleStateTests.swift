@@ -28,14 +28,58 @@ struct GrowingAnswerBubbleStateTests {
         #expect(state.checkingLineReported() == .update(text: "Let me look.", showsCheckingLine: true))
     }
 
-    @Test func dismissedBubbleComesBackOnlyWhenTheTextGrew() {
+    // Finding 5: a click during streaming must not flash back within a token.
+    @Test func clickThenMoreTextWithNoToolCallStaysHidden() {
         var state = GrowingAnswerBubbleState()
         _ = state.textReported("First finding.")
         state.userDismissed()
         #expect(state.textReported("First finding.") == .nothing)
+        #expect(state.textReported("First finding. And") == .nothing)
+        #expect(state.textReported("First finding. And more.") == .nothing)
         #expect(state.checkingLineReported() == .nothing)
-        #expect(state.textReported("First finding. And a later one.")
-            == .show(text: "First finding. And a later one.", showsCheckingLine: false))
+    }
+
+    @Test func clickThenToolCallThenNewTextShowsOnce() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("First finding.")
+        state.userDismissed()
+        state.toolCallStartedReported()
+        // The tool call alone shows nothing; text before new findings arrive stays hidden until it differs.
+        #expect(state.textReported("First finding. Second.")
+            == .show(text: "First finding. Second.", showsCheckingLine: false))
+        #expect(state.textReported("First finding. Second. Third") == .update(text: "First finding. Second. Third", showsCheckingLine: false))
+    }
+
+    @Test func clickThenCheckingLineThenNewTextShowsAgain() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("First finding.")
+        state.userDismissed()
+        #expect(state.checkingLineReported() == .nothing)
+        #expect(state.textReported("First finding. Later.")
+            == .show(text: "First finding. Later.", showsCheckingLine: false))
+    }
+
+    @Test func clickTwiceNeedsAFreshToolCallEachTime() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("One.")
+        state.userDismissed()
+        state.userDismissed()
+        state.toolCallStartedReported()
+        _ = state.textReported("One. Two.")
+        state.userDismissed()
+        #expect(state.textReported("One. Two. Three.") == .nothing)
+        state.toolCallStartedReported()
+        #expect(state.textReported("One. Two. Three. Four.")
+            == .show(text: "One. Two. Three. Four.", showsCheckingLine: false))
+    }
+
+    @Test func clickThenMoreTextThenDifferentFinalShowsTheFinal() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("One.")
+        state.userDismissed()
+        _ = state.textReported("One. Two.")
+        #expect(state.finalAnswerReported("One. Two. Three.")
+            == .show(text: "One. Two. Three.", showsCheckingLine: false))
     }
 
     @Test func dismissedThenSameFinalAnswerStaysHidden() {

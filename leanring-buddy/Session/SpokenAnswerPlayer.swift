@@ -160,6 +160,12 @@ final class SpokenAnswerPlayer {
         queue(sentenceSplitter.newSentences(visibleTextSoFar: visibleTextSoFar, isFinal: false))
     }
 
+    /// A tool call began: speaks the sentence that just ended at the end of the visible text (no space follows it
+    /// yet), so a search is not silent.
+    func speakTrailingSentence(visibleTextSoFar: String) {
+        queue(sentenceSplitter.newSentencesAtToolCall(visibleTextSoFar: visibleTextSoFar))
+    }
+
     /// Says "Checking your notes." in the same queue.
     func speakCheckingLine() {
         queue(["\(CheckingNotesRule.lineText)."])

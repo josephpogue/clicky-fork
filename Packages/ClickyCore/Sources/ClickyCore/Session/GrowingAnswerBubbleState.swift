@@ -4,8 +4,9 @@ import Foundation
 /// or leave it alone. The AppKit presenter only carries out the returned action.
 ///
 /// The bubble hides only on the user's click or key (`userDismissed`), never on a timer. After that dismissal a
-/// later report brings it back only when it carries something new: text longer than what had been shown (a later
-/// finding), or a final answer that differs from what had been shown. The same text never re-shows it.
+/// later report brings it back only when it carries something new: text that arrives after a checking line or a
+/// tool call started since the dismissal (a later finding), or a final answer that differs from what had been shown.
+/// Plain growth of the same sentence never re-shows it, so a click during streaming is not undone within a token.
 public struct GrowingAnswerBubbleState: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
         case nothing
@@ -20,6 +21,8 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
     /// The answer text the bubble last showed, or showed when the user dismissed it.
     private var shownText = ""
     private var showsCheckingLine = false
+    /// A checking line or tool call started since the user dismissed the bubble: the next text is a new finding.
+    private var hasNewFindingSinceDismissal = false
 
     public init() {}
 
@@ -27,8 +30,8 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
     public mutating func textReported(_ text: String) -> Action {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .nothing }
         if isDismissed {
-            // Only a later finding is worth bringing the bubble back for.
-            guard text.count > shownText.count else { return .nothing }
+            // Only text after a search that started since the dismissal is worth bringing the bubble back for.
+            guard hasNewFindingSinceDismissal, text != shownText else { return .nothing }
         } else if isOnScreen, text == shownText, !showsCheckingLine {
             return .nothing
         }
@@ -37,8 +40,17 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
 
     /// The model is searching: "Checking your notes" under the text so far, or alone before any text.
     public mutating func checkingLineReported() -> Action {
-        guard !isDismissed, !showsCheckingLine || !isOnScreen else { return .nothing }
+        if isDismissed {
+            hasNewFindingSinceDismissal = true
+            return .nothing
+        }
+        guard !showsCheckingLine || !isOnScreen else { return .nothing }
         return display(text: shownText, showsCheckingLine: true)
+    }
+
+    /// The model began a tool call. While the bubble is dismissed, text that follows is a new finding.
+    public mutating func toolCallStartedReported() {
+        if isDismissed { hasNewFindingSinceDismissal = true }
     }
 
     /// The final answer, after every progress report.
@@ -57,6 +69,7 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         guard isOnScreen else { return }
         isOnScreen = false
         isDismissed = true
+        hasNewFindingSinceDismissal = false
         showsCheckingLine = false
     }
 
@@ -71,6 +84,7 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
             : .show(text: text, showsCheckingLine: showsCheckingLine)
         isOnScreen = true
         isDismissed = false
+        hasNewFindingSinceDismissal = false
         shownText = text
         self.showsCheckingLine = showsCheckingLine
         return action

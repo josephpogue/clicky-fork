@@ -69,7 +69,18 @@ final class CursorAnswerPresenter {
     /// The final answer: the same bubble, newest lines, no checking line. Not shown again when the user dismissed
     /// the bubble and the text is what it already showed.
     func showFinalAnswer(text: String) {
-        apply(growingBubbleState.finalAnswerReported(text))
+        // A finished answer shows its FIRST lines with the "rest is in Open chat" footer, not the newest lines.
+        let action = growingBubbleState.finalAnswerReported(text)
+        apply(action, showsNewestLines: false)
+        // The same text may already be on screen drawn as newest lines (nothing changed for the state): redraw it.
+        guard action == .nothing, let currentContent = bubbleContent, currentContent.fullText == text else { return }
+        let finalContent = AnswerBubbleContent(text: text, isNotice: false, showsNewestLines: false, showsCheckingLine: false)
+        if finalContent != currentContent { updateBubbleInPlace(content: finalContent) }
+    }
+
+    /// The model began a tool call: after a click dismissed the bubble, the next text is a new finding.
+    func noteToolCallStarted() {
+        growingBubbleState.toolCallStartedReported()
     }
 
     /// True when a bubble is on screen (the listening marker hides once the first text or checking line shows).
@@ -97,16 +108,16 @@ final class CursorAnswerPresenter {
 
     // MARK: - Bubble
 
-    private func apply(_ action: GrowingAnswerBubbleState.Action) {
+    private func apply(_ action: GrowingAnswerBubbleState.Action, showsNewestLines: Bool = true) {
         switch action {
         case .nothing:
             return
         case .show(let text, let showsCheckingLine):
             showBubble(content: AnswerBubbleContent(
-                text: text, isNotice: false, showsNewestLines: true, showsCheckingLine: showsCheckingLine))
+                text: text, isNotice: false, showsNewestLines: showsNewestLines, showsCheckingLine: showsCheckingLine))
         case .update(let text, let showsCheckingLine):
             updateBubbleInPlace(content: AnswerBubbleContent(
-                text: text, isNotice: false, showsNewestLines: true, showsCheckingLine: showsCheckingLine))
+                text: text, isNotice: false, showsNewestLines: showsNewestLines, showsCheckingLine: showsCheckingLine))
         }
     }
 
