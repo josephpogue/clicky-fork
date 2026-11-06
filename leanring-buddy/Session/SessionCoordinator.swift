@@ -33,7 +33,13 @@ final class SessionCoordinator: ObservableObject {
     let chatWindowState = ChatWindowState()
 
     /// The phase rules (idle, starting, running, stopping) live in ClickyCore, where every phase and action is tested.
-    @Published private(set) var lifecycle = SessionLifecycle()
+    @Published private(set) var lifecycle = SessionLifecycle() {
+        // The chat window shows the same phase and start step as the menu panel.
+        didSet {
+            chatWindowState.sessionPhase = lifecycle.phase
+            chatWindowState.startStepText = lifecycle.startStep?.statusText
+        }
+    }
 
     /// True only while the session runs and everything that captures is on.
     var isSessionRunning: Bool { lifecycle.isRunning }
@@ -89,7 +95,8 @@ final class SessionCoordinator: ObservableObject {
         try? locations.createDirectories()
         sessionStore = SessionStore(locations: locations)
 
-        chatWindowState.onStartSession = { [weak self] in self?.startSession() }
+        // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
+        chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
         chatWindowState.onStopSession = { [weak self] in self?.stopSession() }
         chatWindowState.onSwitchProvider = { [weak self] in self?.switchToChatGPT() }
         questionKeyMonitor.onSignal = { [weak self] signal in
@@ -147,7 +154,8 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    /// Cancels a Start in progress. Nothing was captured: the half-made session folder is removed.
+    /// Cancels a Start in progress, at any step. The session never showed as running, so its folder is removed
+    /// and everything switched on is switched off, even when capture had begun.
     func cancelStart() {
         guard lifecycle.phase == .starting else { return }
         startTask?.cancel()
@@ -252,6 +260,10 @@ final class SessionCoordinator: ObservableObject {
                 return
             }
         }
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
 
         // 5. The log and the provider. The provider starts its helper process; it reads no screen or sound.
         advanceStart(to: .startingProvider(providerName: providerName))
@@ -262,7 +274,12 @@ final class SessionCoordinator: ObservableObject {
             await discardStart(failure: "The session log could not be created.")
             return
         }
+        // Set before the cancellation check, so the cancelled path removes the folder just made.
         sessionID = startedSessionID
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
         let shotsDirectory = sessionStore.shotsDirectory(sessionID: startedSessionID)
 
         // Everything that reaches the log from outside the flow goes through one queue, so it is written in order.
@@ -320,6 +337,10 @@ final class SessionCoordinator: ObservableObject {
             await discardStart(failure: error.localizedDescription)
             return
         }
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
 
         // Window tracking, then screen recording (it needs to know the starting window).
         frontmostWindowTracker.start { [weak self] appName, windowTitle, isAppSwitch in
@@ -339,10 +360,20 @@ final class SessionCoordinator: ObservableObject {
             await discardStart(failure: "Screen Recording is not working. Check that Clicky Fork is allowed in System Settings, under Privacy and Security.")
             return
         }
+        if Task.isCancelled {
+            await discardStart(failure: nil)
+            return
+        }
 
         // The question key last, so no tap can arrive before the conversation exists.
         guard questionKeyMonitor.start() else {
             await discardStart(failure: "The question key needs Accessibility. Turn it on for Clicky Fork in System Settings, under Privacy and Security.")
+            return
+        }
+        // The last check. Nothing awaits between it and finishStart, so a Cancel or Quit cannot land in between:
+        // after this the session shows as running and Quit stops it as a short session.
+        if Task.isCancelled {
+            await discardStart(failure: nil)
             return
         }
 
@@ -351,23 +382,28 @@ final class SessionCoordinator: ObservableObject {
             chatWindowState.messages.append(ChatMessage(role: .notice, text: "Using Apple speech: the Parakeet model is not available"))
         }
         _ = lifecycle.finishStart()
-        chatWindowState.isSessionRunning = true
     }
 
-    /// Ends a Start that failed or was cancelled: switches off whatever was on, ends the provider, and either
-    /// removes the session folder (nothing was captured) or finishes it as a short session (something was).
+    /// Ends a Start that failed or was cancelled: switches off whatever was on, ends the provider, and applies
+    /// `SessionStartEnding`: a cancelled Start removes its session folder even when capture had begun; a real
+    /// failure after capture began keeps a short session and shows its notice.
     private func discardStart(failure noticeText: String?) async {
+        let ending = SessionStartEnding.decide(
+            isCancelled: Task.isCancelled, failureNotice: noticeText, captureBegan: didStartCapture
+        )
         questionKeyMonitor.stop()
+        // The window tracker goes first: its callback feeds the recorder and the input queue.
+        frontmostWindowTracker.stop()
         await speechPipeline?.stop()
         await screenRecorder?.stop()
-        frontmostWindowTracker.stop()
         sessionInputContinuation?.finish()
         await sessionInputTask?.value
         _ = await questionFlow?.finish(summaryEnabled: false)
         if let sessionID {
-            if didStartCapture {
+            switch ending.folderOutcome {
+            case .keepAsShortSession:
                 _ = try? await sessionStore.finishSession(sessionID: sessionID, at: Date(), summary: nil)
-            } else {
+            case .removeFolder:
                 try? FileManager.default.removeItem(at: locations.sessionsDirectory.appendingPathComponent(sessionID))
             }
         }
@@ -375,8 +411,7 @@ final class SessionCoordinator: ObservableObject {
         removeStartStatus()
         didStartCapture = false
         lifecycle.endStartWithoutSession()
-        chatWindowState.isSessionRunning = false
-        if let noticeText { failToStart(noticeText) }
+        if let noticeText = ending.noticeText { failToStart(noticeText) }
     }
 
     private func failToStart(_ noticeText: String) {
@@ -467,7 +502,6 @@ final class SessionCoordinator: ObservableObject {
     /// Leaves running at once (so no key signal or phase update passes), then finishes the stop in the background.
     private func beginStop(askForSummary: Bool) {
         guard lifecycle.beginStop() else { return }
-        chatWindowState.isSessionRunning = false
         stopTask = Task {
             await performStop(askForSummary: askForSummary)
             stopTask = nil
@@ -617,6 +651,8 @@ final class SessionCoordinator: ObservableObject {
     }
 
     fileprivate func flyPointer(to point: CGPoint, displayFrameInPoints: CGRect, label: String?) {
+        // An answer that lands during Stop's drain still reaches the chat as text, but the pointer stays put.
+        guard lifecycle.acceptsPointerFlights else { return }
         pointerFlight.flyPointer(to: point, onDisplayWithFrame: displayFrameInPoints, label: label)
     }
 

@@ -9,6 +9,7 @@
 //  views never change it themselves, except the save sheet's project choice.
 //
 
+import ClickyCore
 import Combine
 import Foundation
 
@@ -70,7 +71,10 @@ struct UsageLimitOffer: Equatable {
 @MainActor
 final class ChatWindowState: ObservableObject {
     @Published var messages: [ChatMessage]
-    @Published var isSessionRunning: Bool
+    /// The same phase the menu panel shows: the chat window reads Starting and Stopping from it too.
+    @Published var sessionPhase: SessionLifecyclePhase
+    /// What Start is waiting for right now, while the phase is Starting.
+    @Published var startStepText: String?
     @Published var questionPhase: QuestionPhase
     @Published var activeProviderName: String
     @Published var activeModel: String
@@ -79,13 +83,16 @@ final class ChatWindowState: ObservableObject {
     /// says it ("right Command"), so a changed key reads right everywhere.
     @Published var questionKeyLabel: String
 
+    var isSessionRunning: Bool { sessionPhase == .running }
+
     var onSwitchProvider: () -> Void
     var onStopSession: () -> Void
     var onStartSession: () -> Void
 
     init(
         messages: [ChatMessage] = [],
-        isSessionRunning: Bool = false,
+        sessionPhase: SessionLifecyclePhase = .idle,
+        startStepText: String? = nil,
         questionPhase: QuestionPhase = .idle,
         activeProviderName: String = "Claude",
         activeModel: String = "sonnet",
@@ -96,7 +103,8 @@ final class ChatWindowState: ObservableObject {
         onStartSession: @escaping () -> Void = {}
     ) {
         self.messages = messages
-        self.isSessionRunning = isSessionRunning
+        self.sessionPhase = sessionPhase
+        self.startStepText = startStepText
         self.questionPhase = questionPhase
         self.activeProviderName = activeProviderName
         self.activeModel = activeModel

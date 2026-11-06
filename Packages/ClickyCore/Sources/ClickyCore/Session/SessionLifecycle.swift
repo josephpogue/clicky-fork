@@ -75,6 +75,10 @@ public struct SessionLifecycle: Equatable, Sendable {
     /// The flow's phase updates reach the screen and the marker only while running.
     public var acceptsFlowPhaseUpdates: Bool { phase == .running }
 
+    /// A pointer flight starts only while the session runs: an answer that lands during Stop's drain still
+    /// reaches the chat as text, but the pointer stays put.
+    public var acceptsPointerFlights: Bool { phase == .running }
+
     public var buttonTitle: String {
         switch phase {
         case .idle: return "Start session"

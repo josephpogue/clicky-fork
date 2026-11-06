@@ -24,6 +24,12 @@ struct SessionLifecycleTests {
 
     private let allPhases: [SessionLifecyclePhase] = [.idle, .starting, .running, .stopping]
 
+    @Test func pointerFlightsAreAcceptedOnlyWhileRunning() {
+        for phase in allPhases {
+            #expect(lifecycle(in: phase).acceptsPointerFlights == (phase == .running))
+        }
+    }
+
     // MARK: Button
 
     @Test func buttonPressDoesTheRightThingInEachPhase() {

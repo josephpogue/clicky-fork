@@ -7,6 +7,7 @@
 //
 
 import AppKit
+import ClickyCore
 import SwiftUI
 
 @MainActor
@@ -65,22 +66,24 @@ enum UIPreviewSamples {
         ]
 
         return [
-            ("chat-empty.png", ChatWindowState(isSessionRunning: true)),
-            ("chat-three-exchanges.png", ChatWindowState(messages: threeExchanges, isSessionRunning: true)),
-            ("chat-latest-long-answer.png", ChatWindowState(messages: latestIsLongMessages, isSessionRunning: true)),
-            ("chat-listening.png", ChatWindowState(messages: threeExchanges, isSessionRunning: true, questionPhase: .listening(audioLevel: 0.7))),
-            ("chat-transcribing.png", ChatWindowState(messages: threeExchanges, isSessionRunning: true, questionPhase: .transcribing)),
-            ("chat-waiting.png", ChatWindowState(messages: threeExchanges + [followUpQuestion], isSessionRunning: true, questionPhase: .waitingForAnswer(providerName: "Claude"))),
+            ("chat-empty.png", ChatWindowState(sessionPhase: .running)),
+            ("chat-three-exchanges.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running)),
+            ("chat-latest-long-answer.png", ChatWindowState(messages: latestIsLongMessages, sessionPhase: .running)),
+            ("chat-listening.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running, questionPhase: .listening(audioLevel: 0.7))),
+            ("chat-transcribing.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running, questionPhase: .transcribing)),
+            ("chat-waiting.png", ChatWindowState(messages: threeExchanges + [followUpQuestion], sessionPhase: .running, questionPhase: .waitingForAnswer(providerName: "Claude"))),
             (
                 "chat-usage-limit.png",
                 ChatWindowState(
                     messages: usageLimitMessages,
-                    isSessionRunning: true,
+                    sessionPhase: .running,
                     usageLimitOffer: UsageLimitOffer(message: "Your Claude plan has hit its usage limit. It resets at 3:00 PM.", switchToProviderName: "ChatGPT")
                 )
             ),
-            ("chat-switched-to-chatgpt.png", ChatWindowState(messages: switchedMessages, isSessionRunning: true, activeProviderName: "ChatGPT", activeModel: "gpt-5")),
-            ("chat-session-stopped.png", ChatWindowState(messages: threeExchanges, isSessionRunning: false)),
+            ("chat-switched-to-chatgpt.png", ChatWindowState(messages: switchedMessages, sessionPhase: .running, activeProviderName: "ChatGPT", activeModel: "gpt-5")),
+            ("chat-session-stopped.png", ChatWindowState(messages: threeExchanges, sessionPhase: .idle)),
+            ("chat-starting.png", ChatWindowState(sessionPhase: .starting, startStepText: SessionStartStep.waitingForMicrophonePermission.statusText)),
+            ("chat-stopping.png", ChatWindowState(messages: threeExchanges, sessionPhase: .stopping)),
         ]
     }
 

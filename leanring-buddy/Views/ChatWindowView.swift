@@ -8,6 +8,7 @@
 //  and one status line at the very bottom says what the app is doing now.
 //
 
+import ClickyCore
 import SwiftUI
 
 struct ChatWindowView: View {
@@ -62,7 +63,7 @@ struct ChatWindowView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(state.isSessionRunning ? DS.Colors.destructive : DS.Colors.textTertiary)
+                .fill(headerDotColor)
                 .frame(width: 8, height: 8)
                 .shadow(color: state.isSessionRunning ? DS.Colors.destructive.opacity(0.55) : .clear, radius: 3, x: 0, y: 0.5)
 
@@ -74,7 +75,7 @@ struct ChatWindowView: View {
                     .font(DS.WindowText.meta)
                     .foregroundColor(DS.Colors.textMuted)
             } else {
-                Text("Session ended")
+                Text(headerTitleWhenNotRunning)
                     .font(DS.WindowText.bodyEmphasis)
                     .foregroundColor(DS.Colors.textSecondary)
             }
@@ -95,6 +96,23 @@ struct ChatWindowView: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
+    }
+
+    /// Red means the app is watching. Starting and Stopping use amber, like the menu panel's dot.
+    private var headerDotColor: Color {
+        switch state.sessionPhase {
+        case .running: return DS.Colors.destructive
+        case .starting, .stopping: return DS.Colors.warning
+        case .idle: return DS.Colors.textTertiary
+        }
+    }
+
+    private var headerTitleWhenNotRunning: String {
+        switch state.sessionPhase {
+        case .starting: return "Starting session"
+        case .stopping: return "Stopping session"
+        case .idle, .running: return "Session ended"
+        }
     }
 
     // MARK: - Conversation
@@ -349,12 +367,12 @@ struct ChatWindowView: View {
         VStack(spacing: 14) {
             QuestionKeyCap(keyLabel: state.questionKeyLabel, isLarge: true)
             VStack(spacing: 6) {
-                Text(state.isSessionRunning ? "Ask about what's on your screen" : "No session running")
+                Text(state.isSessionRunning ? "Ask about what's on your screen" : emptyTitleWhenNotRunning)
                     .font(DS.WindowText.sectionTitle)
                     .foregroundColor(DS.Colors.textPrimary)
                 Text(state.isSessionRunning
                      ? "Press \(state.questionKeyLabel), say your question, then press it again. The answer shows up here."
-                     : "Start a session, then press \(state.questionKeyLabel) to ask a question.")
+                     : emptyBodyWhenNotRunning)
                     .font(DS.WindowText.body)
                     .lineSpacing(DS.WindowText.bodyLineSpacing)
                     .foregroundColor(DS.Colors.textMuted)
@@ -366,6 +384,22 @@ struct ChatWindowView: View {
         .padding(24)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat.empty")
+    }
+
+    private var emptyTitleWhenNotRunning: String {
+        switch state.sessionPhase {
+        case .starting: return "Starting session"
+        case .stopping: return "Stopping session"
+        case .idle, .running: return "No session running"
+        }
+    }
+
+    private var emptyBodyWhenNotRunning: String {
+        switch state.sessionPhase {
+        case .starting: return "Nothing is watched until the session is running. Press Starting... to cancel."
+        case .stopping: return "Finishing the session log."
+        case .idle, .running: return "Start a session, then press \(state.questionKeyLabel) to ask a question."
+        }
     }
 
     // MARK: - Usage limit
@@ -409,16 +443,19 @@ struct ChatWindowView: View {
             } else {
                 statusLeadingMark
                 statusText
-                    .lineLimit(1)
+                    // A start step ("Waiting for microphone permission") is longer than the room beside the button.
+                    .lineLimit(state.sessionPhase == .starting ? 2 : 1)
                     .truncationMode(.tail)
                     .accessibilityIdentifier("chat.status")
             }
             Spacer(minLength: 6)
             if !state.isSessionRunning {
+                // Same button as the menu panel: Start session, Starting... (press to cancel), Stopping... (disabled).
                 Button(action: state.onStartSession) {
-                    Text("Start session")
+                    Text(sessionButtonTitle)
                 }
-                .clickyWindowButton(.primary, isCompact: true)
+                .clickyWindowButton(state.sessionPhase == .idle ? .primary : .secondary, isCompact: true)
+                .disabled(state.sessionPhase == .stopping)
                 .accessibilityIdentifier("chat.startSession")
             }
         }
@@ -427,9 +464,19 @@ struct ChatWindowView: View {
         .background(DS.Colors.surface1)
     }
 
+    private var sessionButtonTitle: String {
+        switch state.sessionPhase {
+        case .idle, .running: return "Start session"
+        case .starting: return "Starting..."
+        case .stopping: return "Stopping..."
+        }
+    }
+
     @ViewBuilder
     private var statusLeadingMark: some View {
-        if !state.isSessionRunning {
+        if state.sessionPhase == .starting || state.sessionPhase == .stopping {
+            WindowSpinner(diameter: 13)
+        } else if !state.isSessionRunning {
             Image(systemName: "pause.circle")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(DS.Colors.textMuted)
@@ -446,6 +493,16 @@ struct ChatWindowView: View {
     }
 
     private var statusText: Text {
+        if state.sessionPhase == .starting {
+            return Text(state.startStepText ?? "Starting session")
+                .font(DS.WindowText.meta)
+                .foregroundColor(DS.Colors.textSecondary)
+        }
+        if state.sessionPhase == .stopping {
+            return Text("Stopping session")
+                .font(DS.WindowText.meta)
+                .foregroundColor(DS.Colors.textSecondary)
+        }
         if !state.isSessionRunning {
             return Text("Start a session to ask again.")
                 .font(DS.WindowText.meta)
