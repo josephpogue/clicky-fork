@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Placement and size rules for the answer bubble beside the cursor. Pure, so the flips and the
 /// short/long choice are tested without a screen. Placement uses AppKit global coordinates
@@ -45,11 +46,14 @@ public enum CursorBubbleLayout {
         }
 
         /// Under the pointer's label, left-aligned with it; flips to right-align, or above the label.
-        public static func belowLabel(_ labelFrame: CGRect) -> Anchor {
-            Anchor(
+        /// `clearing` is the pointer and the spot it points at: a bubble flipped up sits above the top of
+        /// the union of that frame and the label, so it never covers either.
+        public static func belowLabel(_ labelFrame: CGRect, clearing: CGRect? = nil) -> Anchor {
+            let top = clearing.map { max(labelFrame.maxY, $0.maxY) } ?? labelFrame.maxY
+            return Anchor(
                 defaultTopLeft: CGPoint(x: labelFrame.minX, y: labelFrame.minY - gapBelowPointerLabel),
                 flippedRightEdgeX: labelFrame.maxX,
-                flippedBottomEdgeY: labelFrame.maxY + gapBelowPointerLabel)
+                flippedBottomEdgeY: top + gapBelowPointerLabel)
         }
     }
 
@@ -98,6 +102,43 @@ public enum CursorBubbleLayout {
             y: globalCenterY - labelSize.height / 2,
             width: labelSize.width,
             height: labelSize.height)
+    }
+
+    /// The pointer triangle's size, as the overlay draws it.
+    public static let pointerSize: CGFloat = 16
+    /// Room kept around the spot the pointer points at.
+    public static let targetClearance: CGFloat = 4
+
+    /// What a bubble flipped above the label must clear, in AppKit global coordinates: the pointer triangle
+    /// (from its position in the overlay's top-left coordinates) and the target it points at, when known.
+    public static func pointerClearanceFrame(
+        pointerPosition: CGPoint,
+        screenFrame: CGRect,
+        target: CGPoint?
+    ) -> CGRect {
+        let pointerFrame = CGRect(
+            x: screenFrame.minX + pointerPosition.x - pointerSize / 2,
+            y: screenFrame.maxY - pointerPosition.y - pointerSize / 2,
+            width: pointerSize,
+            height: pointerSize)
+        guard let target else { return pointerFrame }
+        let targetFrame = CGRect(x: target.x, y: target.y, width: 0, height: 0)
+            .insetBy(dx: -targetClearance, dy: -targetClearance)
+        return pointerFrame.union(targetFrame)
+    }
+
+    /// The index of the display holding `point`: edges count as inside (the top pixel row and the rightmost
+    /// column are where the mouse can rest), and a point on no display goes to the nearest one.
+    public static func displayIndex(containing point: CGPoint, in frames: [CGRect]) -> Int? {
+        var best: (index: Int, distance: CGFloat)?
+        for (index, frame) in frames.enumerated() {
+            let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+            let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+            let distance = hypot(dx, dy)
+            if distance == 0 { return index }
+            if best == nil || distance < best!.distance { best = (index, distance) }
+        }
+        return best?.index
     }
 
     public struct TextLayout: Equatable, Sendable {

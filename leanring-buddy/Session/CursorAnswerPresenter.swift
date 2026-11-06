@@ -180,7 +180,7 @@ final class CursorAnswerPresenter {
         let anchor: CursorBubbleLayout.Anchor
         let anchorPoint: CGPoint
         if let labelFrame = pointerFlight.pointerLabelGlobalFrame {
-            anchor = .belowLabel(labelFrame)
+            anchor = .belowLabel(labelFrame, clearing: pointerFlight.pointerClearanceGlobalFrame)
             anchorPoint = CGPoint(x: labelFrame.midX, y: labelFrame.midY)
         } else {
             anchor = .cursor(at: mouseLocation)
@@ -207,7 +207,10 @@ final class CursorAnswerPresenter {
 
     /// The usable area of the display holding `point` (below the menu bar, clear of the Dock).
     private func visibleFrame(containing point: CGPoint) -> CGRect {
-        NSScreen.screens.first { $0.frame.contains(point) }?.visibleFrame
-            ?? NSScreen.main?.visibleFrame ?? .zero
+        let screens = NSScreen.screens
+        guard let index = CursorBubbleLayout.displayIndex(containing: point, in: screens.map(\.frame)) else {
+            return NSScreen.main?.visibleFrame ?? .zero
+        }
+        return screens[index].visibleFrame
     }
 }

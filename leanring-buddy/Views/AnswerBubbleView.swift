@@ -48,10 +48,14 @@ enum AnswerBubbleMetrics {
             .filter { !$0.isEmpty }
     }
 
+    /// The measuring width is this much narrower than the width SwiftUI draws at, so a line that only just
+    /// fits is counted as wrapped. At worst that leaves a blank line of room; it can never clip a line.
+    static let measuringSlack: CGFloat = 1.5
+
     static func lineCount(of paragraph: String, textWidth: CGFloat) -> Int {
         let textStorage = NSTextStorage(string: paragraph, attributes: [.font: font])
         let layoutManager = NSLayoutManager()
-        let textContainer = NSTextContainer(size: CGSize(width: textWidth, height: .greatestFiniteMagnitude))
+        let textContainer = NSTextContainer(size: CGSize(width: textWidth - measuringSlack, height: .greatestFiniteMagnitude))
         textContainer.lineFragmentPadding = 0
         layoutManager.addTextContainer(textContainer)
         textStorage.addLayoutManager(layoutManager)
@@ -153,8 +157,10 @@ struct AnswerBubbleView: View {
         }
         .frame(
             width: content.layout.width - 2 * AnswerBubbleMetrics.horizontalPadding,
-            height: bodyHeight,
+            height: content.layout.isBodyCut ? bodyHeight : nil,
             alignment: .topLeading)
+        // Only a cut body is held to a height; an uncut one sizes itself, so a line SwiftUI wraps differently
+        // from the measurement is never clipped.
         .clipped()
         .mask(fadeMask(bodyHeight: bodyHeight))
         // One element for the test Mac driver: the whole answer is its value, even where the bubble cuts it.

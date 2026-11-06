@@ -168,6 +168,8 @@ struct BlueCursorView: View {
     /// at the midpoint of the arc and shrinks back to 1.0x on landing, creating
     /// an energetic "swooping" feel.
     @State private var buddyFlightScale: CGFloat = 1.0
+    /// The token of the pointer flight this overlay is flying; see `PointerFlightController`.
+    @State private var activeFlightToken: Int?
 
     /// Scale factor for the navigation speech bubble's pop-in entrance.
     /// Starts at 0.5 and springs to 1.0 when the first character appears.
@@ -340,14 +342,20 @@ struct BlueCursorView: View {
     /// and counts as zero), so the answer bubble can sit just under it. Only the display that is flying
     /// publishes; a pointer back with the cursor publishes nothing.
     private func publishPointerLabelFrameForAnswerBubble() {
-        guard buddyNavigationMode != .followingCursor else { return }
+        guard buddyNavigationMode != .followingCursor, let flightToken = activeFlightToken else { return }
         let labelWidth = buddyNavigationMode == .pointingAtTarget ? navigationBubbleFullWidth : 0
         let labelHeight = navigationBubbleSize.height > 0 ? navigationBubbleSize.height : 22
-        pointerFlight.publishPointerLabelFrame(CursorBubbleLayout.pointerLabelFrame(
-            pointerPosition: cursorPosition,
-            labelSize: CGSize(width: labelWidth, height: labelHeight),
-            fullLabelWidth: labelWidth,
-            screenFrame: screenFrame))
+        pointerFlight.publishPointerLabelFrame(
+            CursorBubbleLayout.pointerLabelFrame(
+                pointerPosition: cursorPosition,
+                labelSize: CGSize(width: labelWidth, height: labelHeight),
+                fullLabelWidth: labelWidth,
+                screenFrame: screenFrame),
+            clearance: CursorBubbleLayout.pointerClearanceFrame(
+                pointerPosition: cursorPosition,
+                screenFrame: screenFrame,
+                target: pointerFlight.targetLocation),
+            flightToken: flightToken)
     }
 
     /// Starts the flight when a target is set and it is on THIS screen. Called when the
@@ -456,6 +464,9 @@ struct BlueCursorView: View {
         // moves the mouse enough to cancel the return flight
         let mouseLocation = NSEvent.mouseLocation
         cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
+
+        // This flight's token: its hold and return timers and its finish act only while it is the current one.
+        activeFlightToken = pointerFlight.currentFlightToken
 
         // Enter navigation mode — stop cursor following
         buddyNavigationMode = .navigatingToTarget
@@ -568,13 +579,14 @@ struct BlueCursorView: View {
 
         navigationBubbleFullWidth = PointerLabelMetrics.fullWidth(ofText: pointerPhrase)
 
+        let flightToken = activeFlightToken
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
             // All characters streamed — hold for 3 seconds, then fly back
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                guard self.isCurrentFlight(flightToken), self.buddyNavigationMode == .pointingAtTarget else { return }
                 self.navigationBubbleOpacity = 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                    guard self.isCurrentFlight(flightToken), self.buddyNavigationMode == .pointingAtTarget else { return }
                     self.startFlyingBackToCursor()
                 }
             }
@@ -650,7 +662,16 @@ struct BlueCursorView: View {
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
-        pointerFlight.finishFlight()
+        if let flightToken = activeFlightToken {
+            activeFlightToken = nil
+            pointerFlight.finishFlight(flightToken: flightToken)
+        }
+    }
+
+    /// Whether the flight this overlay started is still the one running.
+    private func isCurrentFlight(_ flightToken: Int?) -> Bool {
+        guard let flightToken else { return false }
+        return pointerFlight.isCurrentFlight(flightToken)
     }
 
     // MARK: - Welcome Animation
