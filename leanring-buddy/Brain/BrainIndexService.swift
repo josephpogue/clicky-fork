@@ -25,9 +25,10 @@ final class BrainIndexService: @unchecked Sendable {
     /// The folders the last COMPLETED update covered (written to `folders.json` so the helper can say a folder is still
     /// being indexed). Nil until the first write reads it back from the file.
     private var indexedFolderPaths: [String]?
-    /// False after the folder list file could not be written (twice) and the stale file could not be trusted:
-    /// passages stop being attached until a write succeeds, because the helper can no longer follow the list.
-    private var folderListFileIsCurrent = true
+    /// The one serialized writer of `folders.json`; it reads the newest state itself on every write. Its
+    /// `fileIsCurrent` is false after a write failed twice and the stale file could not be trusted: passages stop being
+    /// attached until a write succeeds, because the helper can no longer follow the list.
+    private var folderListWriter: BrainServiceFolderListWriter!
     /// The folders the Claude helper was launched with at the last `toolServer()`. A passage is attached only for a
     /// folder in this list AND in Settings now, the same rule the helper applies to `read_brain_file`. Nil while no
     /// helper was launched (ChatGPT has none): the current list alone.
@@ -37,6 +38,20 @@ final class BrainIndexService: @unchecked Sendable {
     /// synchronous SQLite and file work for a big folder, and blocking pool threads that long starves every other
     /// task in the app (timers, streaming) as well as the tests that share the process.
     private let indexUpdateQueue = DispatchQueue(label: "clicky.brain-index-update", qos: .utility)
+
+    private init() {
+        folderListWriter = BrainServiceFolderListWriter(
+            listFileURL: BrainServiceFolderListFile.url(
+                besideIndexDatabase: AppDataLocations.standard().brainIndexDatabaseURL),
+            indexDatabaseURL: AppDataLocations.standard().brainIndexDatabaseURL,
+            currentFolders: { [unowned self] in BrainServiceFolders.expand(paths: lockedFolderPaths()) },
+            coveredFolders: { [unowned self] in
+                lock.lock()
+                defer { lock.unlock() }
+                return indexedFolderPaths?.map { URL(fileURLWithPath: $0) }
+            },
+            log: { NSLog("%@", $0) })
+    }
 
     /// Called on the main actor each time the status line changes, so Settings shows it live.
     @MainActor var onStatusChange: ((BrainServiceStatus?) -> Void)?
@@ -103,10 +118,17 @@ final class BrainIndexService: @unchecked Sendable {
     /// How a provider starts the helper; nil while the brain is off or the helper is missing from the bundle.
     func toolServer() -> BrainToolServer? {
         let folderPaths = lockedFolderPaths()
+        // Every early return forgets the launch list, so an earlier session's list never narrows this one's passages.
         guard !folderPaths.isEmpty,
-              let helperFolder = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
+              let helperFolder = Bundle.main.executableURL?.deletingLastPathComponent() else {
+            forgetHelperLaunchFolders()
+            return nil
+        }
         let helperURL = helperFolder.appendingPathComponent("ClickyBrainTools", isDirectory: false)
-        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else { return nil }
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            forgetHelperLaunchFolders()
+            return nil
+        }
         let searchFolders = BrainServiceFolders.expand(paths: folderPaths)
         lock.lock()
         helperLaunchFolders = searchFolders
@@ -135,9 +157,7 @@ final class BrainIndexService: @unchecked Sendable {
     }
 
     private func isFolderListFileCurrent() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return folderListFileIsCurrent
+        folderListWriter.fileIsCurrent
     }
 
     /// The maps the instructions name: the knowledge base index under the notes folder and any indexed `registry.md`.
@@ -171,46 +191,10 @@ final class BrainIndexService: @unchecked Sendable {
         let request = coalescer.request(folders: folderPaths)
         lock.unlock()
         // Before any build starts or queues, so a removal reaches a running session's helper at once.
-        writeFolderListFile(folderPaths: folderPaths)
+        folderListWriter.writeNewest()
         publishStatus()
         if request.shouldStartNow { startRun(folderPaths: folderPaths) }
         return request.run
-    }
-
-    /// `<data>/brain-index/folders.json`: the current list and the folders the last completed update covered, for the
-    /// helper to re-read on every tool call. Written at every list change, every refresh and every finished update.
-    /// With the brain off and no index folder yet, nothing is created. A write that fails is retried once; when it
-    /// still fails the stale file is removed (the helper then uses its launch list) and no passages are attached
-    /// until a write succeeds.
-    private func writeFolderListFile(folderPaths: [String]) {
-        let databaseURL = AppDataLocations.standard().brainIndexDatabaseURL
-        let listFileURL = BrainServiceFolderListFile.url(besideIndexDatabase: databaseURL)
-        if folderPaths.isEmpty,
-           !FileManager.default.fileExists(atPath: databaseURL.deletingLastPathComponent().path) { return }
-        let indexedFolders = indexedFoldersForListFile(listFileURL: listFileURL, databaseURL: databaseURL)
-        let succeeded = BrainServiceFolderListFile.writeRetryingOnce(
-            folders: BrainServiceFolders.expand(paths: folderPaths), indexedFolders: indexedFolders, to: listFileURL,
-            log: { NSLog("%@", $0) })
-        lock.lock()
-        folderListFileIsCurrent = succeeded
-        lock.unlock()
-    }
-
-    /// What the last completed update covered. In this launch it is remembered; before the first update of this
-    /// launch it is read back from the file (a bare list from the first wave counts as covered, as that service
-    /// indexed what it listed), and with no index database on disk nothing is covered.
-    private func indexedFoldersForListFile(listFileURL: URL, databaseURL: URL) -> [URL] {
-        lock.lock()
-        defer { lock.unlock() }
-        if indexedFolderPaths == nil {
-            if FileManager.default.fileExists(atPath: databaseURL.path),
-               let listing = BrainServiceFolderListFile.readListing(from: listFileURL) {
-                indexedFolderPaths = listing.indexedFolders ?? listing.folders
-            } else {
-                indexedFolderPaths = []
-            }
-        }
-        return (indexedFolderPaths ?? []).map { URL(fileURLWithPath: $0) }
     }
 
     private func startRun(folderPaths: [String]) {
@@ -225,13 +209,13 @@ final class BrainIndexService: @unchecked Sendable {
                     cachedProjectNames = nil
                     indexedFolderPaths = outcome.coveredFolderPaths
                 }
-                let folderPathsNow = currentSearchFolderPaths
                 let nextRun = coalescer.finishRun()
                 let finishedWaiters = waitersByRun.filter { coalescer.hasCompleted(run: $0.run) }
                 waitersByRun.removeAll { coalescer.hasCompleted(run: $0.run) }
                 lock.unlock()
                 // The update is committed: tell the helper which folders it now covers, before any waiter is released.
-                if outcome != nil { writeFolderListFile(folderPaths: folderPathsNow) }
+                // The writer reads the newest folder list itself, so this never undoes a removal made meanwhile.
+                if outcome != nil { folderListWriter.writeNewest() }
                 for waiter in finishedWaiters { waiter.continuation.resume() }
                 await publishStatusOnMain()
                 guard let nextRun else { return }
