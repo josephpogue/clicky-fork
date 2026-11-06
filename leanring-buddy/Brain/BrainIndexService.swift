@@ -3,7 +3,7 @@
 //  leanring-buddy
 //
 //  Keeps the brain index for the search folders in Settings and answers the question flow's passage lookups.
-//  Owned by the app-brain-settings slice. Foundation stub: the brain is always off.
+//  Owned by the app-brain-settings slice. With no folders listed the brain is off: nothing is read, no helper starts.
 //
 
 import ClickyCore
@@ -12,24 +12,234 @@ import Foundation
 final class BrainIndexService: @unchecked Sendable {
     static let shared = BrainIndexService()
 
-    /// True when Settings lists at least one search folder.
-    var isBrainOn: Bool { false }
+    /// Guards every field below; never held across the index work or an await.
+    private let lock = NSLock()
+    private var coalescer = BrainServiceRefreshCoalescer()
+    private var waitersByRun: [(run: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var isBrainOnCopy = false
+    private var index: BrainIndex?
+    private var lastSummary: BrainIndexUpdateSummary?
+    private var firstUnreadableFolderPath: String?
+    private var cachedProjectNames: [String]?
+    private var currentSearchFolderPaths: [String] = []
+
+    /// Called on the main actor each time the status line changes, so Settings shows it live.
+    @MainActor var onStatusChange: ((BrainServiceStatus?) -> Void)?
+
+    /// True when Settings lists at least one search folder. A lock-guarded copy, updated on the main actor whenever the
+    /// list is read, so any thread may ask.
+    var isBrainOn: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isBrainOnCopy
+    }
+
+    /// The status line for the current state; nil when there are no folders.
+    var currentStatus: BrainServiceStatus? {
+        lock.lock()
+        defer { lock.unlock() }
+        return statusLocked()
+    }
 
     /// Builds or refreshes the index off the main thread: at launch, at session Start and when the folder list changes.
-    func refreshInBackground() {}
+    func refreshInBackground() {
+        Task { @MainActor in
+            _ = self.requestRefreshOnMain()
+        }
+    }
+
+    /// The same, started synchronously from the main actor (Settings calls it right after the list changes).
+    @MainActor
+    func folderListDidChange() {
+        _ = requestRefreshOnMain()
+    }
 
     /// Brings the index up to date before a session's first question (by modification time, well under a second when
     /// little changed). Session Start awaits it; it never throws, a failure only leaves the old index in place.
-    func refreshForSessionStart() async {}
+    func refreshForSessionStart() async {
+        let run = await MainActor.run { self.requestRefreshOnMain() }
+        await waitForCompletion(of: run)
+    }
 
     /// The passages for one question; empty while the brain is off or nothing clears the floor.
     func passages(forQuestion question: String, frontAppName: String?, frontWindowTitle: String?) async -> [BrainPassage] {
-        []
+        guard isBrainOn else { return [] }
+        let projectNames = await projectNamesForPassages()
+        return await Task.detached(priority: .userInitiated) { [self] () -> [BrainPassage] in
+            guard let index = openIndex() else { return [] }
+            do {
+                return try index.passages(
+                    forQuestion: question, frontAppName: frontAppName, frontWindowTitle: frontWindowTitle,
+                    projectNames: projectNames)
+            } catch {
+                return []
+            }
+        }.value
     }
 
     /// How a provider starts the helper; nil while the brain is off or the helper is missing from the bundle.
-    func toolServer() -> BrainToolServer? { nil }
+    func toolServer() -> BrainToolServer? {
+        let folderPaths = lockedFolderPaths()
+        guard !folderPaths.isEmpty,
+              let helperFolder = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
+        let helperURL = helperFolder.appendingPathComponent("ClickyBrainTools", isDirectory: false)
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else { return nil }
+        let searchFolders = BrainServiceFolders.expand(paths: folderPaths)
+        return BrainToolServer(
+            executableURL: helperURL,
+            arguments: BrainToolServer.helperArguments(
+                indexDatabaseURL: AppDataLocations.standard().brainIndexDatabaseURL, searchFolders: searchFolders))
+    }
 
     /// The maps the instructions name: the knowledge base index under the notes folder and any indexed `registry.md`.
-    func mapPaths() async -> [String] { [] }
+    func mapPaths() async -> [String] {
+        guard isBrainOn else { return [] }
+        let (folderPaths, notesFolder) = await MainActor.run { () -> ([String], URL?) in
+            (AppSettings.shared.brainSearchFolderPaths, Self.notesFolderURL())
+        }
+        return await Task.detached(priority: .userInitiated) { [self] () -> [String] in
+            let registryPaths = (try? openIndex()?.indexedFiles(named: "registry.md")) ?? []
+            return BrainServiceMapPaths.make(
+                notesFolder: notesFolder, searchFolders: BrainServiceFolders.expand(paths: folderPaths),
+                registryPaths: registryPaths)
+        }.value
+    }
+
+    // MARK: - Refresh
+
+    /// Reads the folder list, then starts a run, joins one or queues one. Returns the run that covers this list.
+    @MainActor
+    private func requestRefreshOnMain() -> Int {
+        let folderPaths = AppSettings.shared.brainSearchFolderPaths
+        lock.lock()
+        isBrainOnCopy = !folderPaths.isEmpty
+        currentSearchFolderPaths = folderPaths
+        let request = coalescer.request(folders: folderPaths)
+        lock.unlock()
+        publishStatus()
+        if request.shouldStartNow { startRun(folderPaths: folderPaths) }
+        return request.run
+    }
+
+    private func startRun(folderPaths: [String]) {
+        Task.detached(priority: .utility) { [self] in
+            var folderPathsToRun = folderPaths
+            while true {
+                let outcome = runIndexUpdate(folderPaths: folderPathsToRun)
+                lock.lock()
+                if let outcome {
+                    lastSummary = outcome.summary
+                    firstUnreadableFolderPath = outcome.firstUnreadableFolderPath
+                    cachedProjectNames = nil
+                }
+                let nextRun = coalescer.finishRun()
+                let finishedWaiters = waitersByRun.filter { coalescer.hasCompleted(run: $0.run) }
+                waitersByRun.removeAll { coalescer.hasCompleted(run: $0.run) }
+                lock.unlock()
+                for waiter in finishedWaiters { waiter.continuation.resume() }
+                await publishStatusOnMain()
+                guard let nextRun else { return }
+                folderPathsToRun = nextRun.folders
+            }
+        }
+    }
+
+    private struct RunOutcome {
+        var summary: BrainIndexUpdateSummary
+        var firstUnreadableFolderPath: String?
+    }
+
+    /// One index update. Never throws: on error the old index stays and the old status stays. An empty list empties
+    /// the index (a folder that is gone from the list must not stay searchable).
+    private func runIndexUpdate(folderPaths: [String]) -> RunOutcome? {
+        // Brain off and no index file on disk: nothing to empty, and no file is created.
+        if folderPaths.isEmpty,
+           !FileManager.default.fileExists(atPath: AppDataLocations.standard().brainIndexDatabaseURL.path) {
+            return nil
+        }
+        guard let index = openIndex() else { return nil }
+        let folders = BrainServiceFolders.expand(paths: folderPaths)
+        let unreadable = BrainServiceFolders.firstUnreadable(folders)
+        do {
+            let summary = try index.update(searchFolders: BrainServiceFolders.readable(folders))
+            return RunOutcome(summary: summary, firstUnreadableFolderPath: unreadable?.path)
+        } catch {
+            return nil
+        }
+    }
+
+    private func waitForCompletion(of run: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if coalescer.hasCompleted(run: run) {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waitersByRun.append((run, continuation))
+                lock.unlock()
+            }
+        }
+    }
+
+    // MARK: - Index and status
+
+    private func openIndex() -> BrainIndex? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let index { return index }
+        let databaseURL = AppDataLocations.standard().brainIndexDatabaseURL
+        try? FileManager.default.createDirectory(
+            at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        index = try? BrainIndex(databaseURL: databaseURL)
+        return index
+    }
+
+    private func lockedFolderPaths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentSearchFolderPaths
+    }
+
+    /// Project page names of the notes folder Save uses, cached until the next refresh.
+    private func projectNamesForPassages() async -> [String] {
+        lock.lock()
+        let cached = cachedProjectNames
+        lock.unlock()
+        if let cached { return cached }
+        let notesFolder = await MainActor.run { Self.notesFolderURL() }
+        let names = await Task.detached(priority: .userInitiated) { () -> [String] in
+            guard let notesFolder else { return [] }
+            return VaultProjects.list(vaultRoot: notesFolder)
+        }.value
+        lock.lock()
+        cachedProjectNames = names
+        lock.unlock()
+        return names
+    }
+
+    /// The notes folder Save really uses (CLICKY_VAULT_ROOT wins over the Settings choice).
+    @MainActor
+    private static func notesFolderURL() -> URL? {
+        VaultRootResolver.resolve(
+            notesFolderSetting: AppSettings.shared.notesFolderPath, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Caller holds the lock.
+    private func statusLocked() -> BrainServiceStatus? {
+        BrainServiceStatus.make(
+            hasFolders: !currentSearchFolderPaths.isEmpty,
+            isRefreshing: coalescer.runningFolders != nil,
+            lastSummary: lastSummary,
+            firstUnreadableFolderPath: firstUnreadableFolderPath,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    @MainActor
+    private func publishStatus() {
+        onStatusChange?(currentStatus)
+    }
+
+    private func publishStatusOnMain() async {
+        await MainActor.run { self.publishStatus() }
+    }
 }
