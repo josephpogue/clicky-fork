@@ -7,12 +7,17 @@ import Testing
 private final class FakeMicrophoneEngine: MicrophoneEngine, @unchecked Sendable {
     private let lock = NSLock()
     private let failsToStart: Bool
+    /// How long `start` takes before the engine counts as running, like real hardware under load.
+    private let secondsToStart: Double
     private var deliverSamples: (@Sendable ([Float]) -> Void)?
     private var announceConfigurationChange: (@Sendable () -> Void)?
     private var started = false
     private var stopCount = 0
 
-    init(failsToStart: Bool = false) { self.failsToStart = failsToStart }
+    init(failsToStart: Bool = false, secondsToStart: Double = 0) {
+        self.failsToStart = failsToStart
+        self.secondsToStart = secondsToStart
+    }
 
     var isRunning: Bool { lock.withLock { started } }
     var timesStopped: Int { lock.withLock { stopCount } }
@@ -22,6 +27,7 @@ private final class FakeMicrophoneEngine: MicrophoneEngine, @unchecked Sendable 
         onConfigurationChange: @escaping @Sendable () -> Void
     ) throws {
         if failsToStart { throw SpeechError.microphoneUnavailable("no usable input device") }
+        if secondsToStart > 0 { Thread.sleep(forTimeInterval: secondsToStart) }
         lock.withLock {
             deliverSamples = onSamples
             announceConfigurationChange = onConfigurationChange
@@ -116,13 +122,17 @@ private final class HeardSamples: @unchecked Sendable {
         // The first engine works; after the change, two attempts find nothing, the third succeeds.
         let supply = EngineSupply([
             FakeMicrophoneEngine(), FakeMicrophoneEngine(failsToStart: true), FakeMicrophoneEngine(failsToStart: true),
+            // Slow to start: the supply hands it out (and counts it) a moment before it is running.
+            FakeMicrophoneEngine(secondsToStart: 0.3),
         ])
         let source = makeSource(supply)
         let heard = HeardSamples()
         try await source.start(onSamples: { heard.add($0) }, onFinished: {})
         supply.engines[0].inputDeviceChanged()
 
-        try await waitUntil { supply.engines.count == 4 }
+        // The supply counts an engine when it is handed out, before the source has started it, so wait
+        // for the condition asserted below: a fourth engine that is running.
+        try await waitUntil { supply.engines.count == 4 && supply.engines[3].isRunning }
         #expect(supply.engines.count == 4)
         let recovered = supply.engines[3]
         #expect(recovered.isRunning)
