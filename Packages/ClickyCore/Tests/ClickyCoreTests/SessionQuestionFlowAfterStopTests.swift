@@ -129,9 +129,37 @@ struct SessionQuestionFlowAfterStopTests {
         #expect(logEndsWithStop(harness))
     }
 
-    /// The old answer's stop does not wait for the new question's log line: a slow log write never keeps the ended
-    /// answer running.
-    @Test func aSlowQuestionStartedLogWriteDoesNotHoldTheOldAnswersStop() async throws {
+    /// Stop begins while the new question's listening report is going out and is still stopping the old answer when the
+    /// report returns: the stopping session starts no question (no marker, no start line, the tap is not accepted).
+    @Test func aListeningReportThatReturnsWhileStopIsStoppingStartsNoQuestion() async throws {
+        let harness = try await startedHarness(questions: ["first question", "second question"])
+        harness.claude.scriptStreams([Stream(progress: [.textSoFar("Partial answer")], pausesAfterProgress: true)])
+        let first = Task { await harness.askQuestion() }
+        for _ in 0..<200 where harness.output.textChanges.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        let listeningGate = TestGate()
+        harness.output.holdNextPhaseChange(to: .listening, at: listeningGate)
+        let stopGate = TestGate()
+        harness.claude.holdNextStop(at: stopGate)
+
+        let tap = Task { await harness.flow.handle(.questionStarted(at: FlowHarness.startTime.addingTimeInterval(5))) }
+        await listeningGate.waitUntilReached()
+        let stopping = Task { await harness.flow.finish(summaryEnabled: false) }
+        await stopGate.waitUntilReached()
+        listeningGate.open()
+        let tapResult = await tap.value
+        stopGate.open()
+        _ = await stopping.value
+        _ = await first.value
+
+        #expect(tapResult == .ignoredBecauseBusy)
+        #expect(harness.output.timeline.filter { $0 == "markStarted" }.count == 1)
+        #expect(harness.log.kinds.filter { $0 == .questionStarted }.count == 1)
+        #expect(logEndsWithStop(harness))
+    }
+
+    /// A send that arrives while the new question's start line is still being written waits for it: the question's
+    /// own lines follow its start line.
+    @Test func aSendDuringTheStartLineWriteLogsTheQuestionAfterIt() async throws {
         let harness = try await startedHarness(questions: ["first question", "second question"])
         harness.claude.scriptStreams([
             Stream(progress: [.textSoFar("Partial answer")], pausesAfterProgress: true),
@@ -144,13 +172,25 @@ struct SessionQuestionFlowAfterStopTests {
 
         let tap = Task { await harness.flow.handle(.questionStarted(at: FlowHarness.startTime.addingTimeInterval(5))) }
         await logGate.waitUntilReached()
-        for _ in 0..<200 where harness.claude.stopRequestCount == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
-        let stoppedWhileTheLogWriteWasHeld = harness.claude.stopRequestCount == 1
+        let send = Task {
+            await harness.flow.handle(.sendQuestion(
+                speechFrom: FlowHarness.startTime.addingTimeInterval(5), speechTo: FlowHarness.startTime.addingTimeInterval(8)
+            ))
+        }
+        // Room for the send to run ahead of the held start line, if it were going to.
+        try await Task.sleep(nanoseconds: 200_000_000)
         logGate.open()
         _ = await tap.value
+        _ = await send.value
         _ = await first.value
 
-        #expect(stoppedWhileTheLogWriteWasHeld)
+        let kinds = harness.log.kinds
+        let startedIndexes = kinds.indices.filter { kinds[$0] == .questionStarted }
+        let secondQuestionIndex = try #require(kinds.firstIndex {
+            if case .question(let text, _, _) = $0 { return text == "second question" } else { return false }
+        })
+        #expect(startedIndexes.count == 2)
+        #expect(startedIndexes.count == 2 && startedIndexes[1] < secondQuestionIndex)
         _ = await harness.flow.finish(summaryEnabled: false)
     }
 

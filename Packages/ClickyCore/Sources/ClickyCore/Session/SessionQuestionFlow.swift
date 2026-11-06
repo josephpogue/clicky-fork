@@ -248,21 +248,21 @@ public actor SessionQuestionFlow {
                 // answer is stopped off this path (see `stopEndedAnswerOffTheListeningPath`).
                 questionSerial += 1
                 phase = .listening
-                // The listening report and the marker go out as one unit, as a task the old answer's stop waits for:
-                // the ended answer's cut-short report can then never land between them, and the marker follows the
-                // listening report at once. The log line is written after it, so a slow log write never holds the
-                // old answer's stop back.
+                // The listening report, the marker and the log line go out as one unit, as a task the old answer's
+                // stop (and so this question's send) waits for: the ended answer's cut-short report can never land
+                // between the report and the marker, and the question's own lines are logged after its start line.
+                // Stop beginning at any point (`isStopping`) ends the unit: a stopping session starts no question.
                 let announcement = Task { [self] () -> Bool in
                     await output.phaseChanged(.listening)
-                    guard !isFinished else { return false }
+                    guard !isFinished, !isStopping else { return false }
                     await dependencies.markQuestionStarted(date)
+                    guard !isFinished, !isStopping else { return false }
+                    await noteEvent(SessionEvent(time: date, kind: .questionStarted))
                     return true
                 }
                 // The stop starts before the first await, so a send that arrives during any of them waits for it.
                 stopEndedAnswerOffTheListeningPath(after: announcement)
-                guard await announcement.value, !isFinished else { return .ignoredBecauseBusy }
-                await noteEvent(SessionEvent(time: date, kind: .questionStarted))
-                return .accepted
+                return await announcement.value ? .accepted : .ignoredBecauseBusy
             case .listening, .transcribing:
                 return .ignoredBecauseBusy
             }

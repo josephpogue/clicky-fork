@@ -364,8 +364,9 @@ public final class BrainIndex: @unchecked Sendable {
         let wantedCount = max(wantedCount, 1)
         let pageSize = wantedCount * Self.overFetchFactor
         var readable: [BrainPassage] = []
-        // Each page is its own statement, so an index update committing between two pages can shift rows by one: a
-        // passage seen on an earlier page is not taken twice.
+        // Each page is its own statement, so an index update committing between two pages can shift rows: a passage
+        // seen on an earlier page is not taken twice (a row that shifts up past a page edge is missed; the next
+        // search sees it).
         var takenPassageKeys = Set<String>()
         var offset = 0
         while readable.count < wantedCount {
