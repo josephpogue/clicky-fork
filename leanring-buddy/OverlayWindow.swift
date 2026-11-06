@@ -327,6 +327,27 @@ struct BlueCursorView: View {
         .onChange(of: pointerFlight.targetLocation) { _ in
             navigateToPointerFlightTargetIfOnThisScreen()
         }
+        // The answer bubble rides under the pointer's label while the triangle is away from the cursor.
+        .onChange(of: cursorPosition) { _ in
+            publishPointerLabelFrameForAnswerBubble()
+        }
+        .onChange(of: navigationBubbleFullWidth) { _ in
+            publishPointerLabelFrameForAnswerBubble()
+        }
+    }
+
+    /// Tells the pointer flight where the label is (or would be: before it types out, its width is unknown
+    /// and counts as zero), so the answer bubble can sit just under it. Only the display that is flying
+    /// publishes; a pointer back with the cursor publishes nothing.
+    private func publishPointerLabelFrameForAnswerBubble() {
+        guard buddyNavigationMode != .followingCursor else { return }
+        let labelWidth = buddyNavigationMode == .pointingAtTarget ? navigationBubbleFullWidth : 0
+        let labelHeight = navigationBubbleSize.height > 0 ? navigationBubbleSize.height : 22
+        pointerFlight.publishPointerLabelFrame(CursorBubbleLayout.pointerLabelFrame(
+            pointerPosition: cursorPosition,
+            labelSize: CGSize(width: labelWidth, height: labelHeight),
+            fullLabelWidth: labelWidth,
+            screenFrame: screenFrame))
     }
 
     /// Starts the flight when a target is set and it is on THIS screen. Called when the

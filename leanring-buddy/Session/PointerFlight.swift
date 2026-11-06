@@ -21,7 +21,17 @@ final class PointerFlightController: ObservableObject {
     /// What the pointer says on arrival. Nil lets the overlay pick its own short phrase.
     @Published private(set) var targetLabel: String?
 
+    /// Where the pointer's label is while the blue triangle is away from the cursor (flying out, pointing,
+    /// flying back), in global AppKit coordinates. The answer bubble rides under it. Nil when the pointer is
+    /// with the cursor, so the bubble sits beside the cursor.
+    private(set) var pointerLabelGlobalFrame: CGRect?
+
     private let overlayWindowManager = OverlayWindowManager()
+
+    /// The overlay publishes the label's frame on every step of the flight.
+    func publishPointerLabelFrame(_ labelGlobalFrame: CGRect?) {
+        pointerLabelGlobalFrame = labelGlobalFrame
+    }
 
     /// Shows the overlay on every display and flies to `location`.
     func flyPointer(to location: CGPoint, onDisplayWithFrame displayFrame: CGRect, label: String?) {
@@ -36,6 +46,7 @@ final class PointerFlightController: ObservableObject {
         targetLocation = nil
         targetDisplayFrame = nil
         targetLabel = nil
+        pointerLabelGlobalFrame = nil
         // The call comes from inside the overlay view's own animation timer, so the windows go on the next turn.
         Task { @MainActor [weak self] in
             guard let self, self.targetLocation == nil else { return }
@@ -48,6 +59,7 @@ final class PointerFlightController: ObservableObject {
         targetLocation = nil
         targetDisplayFrame = nil
         targetLabel = nil
+        pointerLabelGlobalFrame = nil
         overlayWindowManager.hideOverlay()
     }
 }

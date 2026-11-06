@@ -32,7 +32,7 @@ struct QuestionMarkerView: View {
         case .idle:
             EmptyView()
         case .listening(let audioLevel):
-            markerCapsule {
+            MarkerCapsule {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
@@ -41,7 +41,7 @@ struct QuestionMarkerView: View {
             .accessibilityLabel("Listening")
             .accessibilityIdentifier("marker.listening")
         case .transcribing:
-            markerCapsule {
+            MarkerCapsule {
                 Image(systemName: "waveform")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(DS.Colors.textSecondary)
@@ -56,7 +56,7 @@ struct QuestionMarkerView: View {
             .accessibilityLabel("Transcribing your question")
             .accessibilityIdentifier("marker.transcribing")
         case .waitingForAnswer(let providerName):
-            markerCapsule {
+            MarkerCapsule {
                 WindowSpinner(diameter: 10, tint: DS.Colors.listeningWave, lineWidth: 1.6)
                 Text(providerName)
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
@@ -67,19 +67,25 @@ struct QuestionMarkerView: View {
             .accessibilityIdentifier("marker.waiting")
         }
     }
+}
 
-    private func markerCapsule<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+/// The capsule every marker beside the cursor sits in: a 24 pt dark pill with a thin light outline.
+/// The question marker and the speaker capsule share it so they look the same.
+struct MarkerCapsule<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
         HStack(spacing: 6) {
             content()
         }
         .padding(.horizontal, 9)
-        .frame(height: Self.markerHeight)
+        .frame(height: QuestionMarkerView.markerHeight)
         .background(
             Capsule()
                 .fill(DS.Colors.markerGround)
                 .shadow(color: Color.black.opacity(0.35), radius: 5, x: 0, y: 2)
         )
-        .overlay(PillOutline(height: Self.markerHeight, color: DS.Colors.markerOutline))
+        .overlay(PillOutline(height: QuestionMarkerView.markerHeight, color: DS.Colors.markerOutline))
         .fixedSize()
         .accessibilityElement(children: .ignore)
     }

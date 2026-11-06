@@ -18,6 +18,8 @@ usage: clicky-driver <command>
   menu-bar-click                open the app's menu bar item
   tap-right-command             press and release the right Command key, 80 ms apart
   chord-right-command <key>     hold right Command, press one letter or digit key, release both
+  click-at <x> <y>              move the pointer to screen point x,y and click it with a real left mouse down and up
+  press-key <key>               press and release one letter or digit key with no modifier
   cursor <x> <y>                move the mouse pointer to screen point x,y
   listen [secs]                 print keyboard and mouse events seen by a listen-only tap (default 5 s)
 """
@@ -284,6 +286,18 @@ case "chord-right-command":
     }
     postRightCommand(down: false, source: source)
     print("posted right Command + \(key)")
+case "click-at":
+    guard arguments.count >= 3, let x = Double(arguments[1]), let y = Double(arguments[2]) else { fail(usageText, code: 64) }
+    mouseClick(at: CGPoint(x: x, y: y))
+    print("clicked at \(Int(x)),\(Int(y))")
+case "press-key":
+    guard arguments.count >= 2, let key = arguments[1].lowercased().first, let keyCode = letterKeyCodes[key] else { fail(usageText, code: 64) }
+    let source = CGEventSource(stateID: .hidSystemState)
+    for isDown in [true, false] {
+        CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown)?.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.04)
+    }
+    print("pressed \(key)")
 case "cursor":
     guard arguments.count >= 3, let x = Double(arguments[1]), let y = Double(arguments[2]) else { fail(usageText, code: 64) }
     let point = CGPoint(x: x, y: y)

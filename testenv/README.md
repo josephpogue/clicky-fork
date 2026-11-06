@@ -29,6 +29,8 @@ Shorthand below: `D` means `testenv exec <id> -- /Users/admin/testenv-driver/cli
 | `D menu-bar-click` | Opens the app's menu-bar panel | 0, 1 no menu-bar item |
 | `D tap-right-command` | Presses and releases the right Command key, 80 ms apart | 0 |
 | `D chord-right-command <key>` | Holds right Command while pressing one letter or digit key, then releases both. Use it for the "this must not start a question" case | 0, 64 |
+| `D click-at <x> <y>` | Moves the pointer to a screen point and clicks it with a real left mouse down and up. Use it to prove a click hides the answer text | 0, 64 |
+| `D press-key <key>` | Presses and releases one letter or digit key with no modifier (a plain typed key). Use it to prove typing hides the answer text | 0, 64 |
 | `D cursor <x> <y>` | Moves the pointer to a screen point | 0 |
 | `D listen [secs]` | Prints the keyboard and mouse events a listen-only tap sees. Proves the posted taps arrive | 0 |
 
@@ -37,7 +39,8 @@ Exit 64 is a usage mistake in the command.
 Screen controls have identifiers. Click by text for the menu panel and by identifier elsewhere:
 
 - Menu-bar panel (after `menu-bar-click`): `Start session` or `Stop session` (one button that flips), rows `Open chat`, `Sessions`, `Settings`, and `Quit Clicky Fork`.
-- Chat window: `chat.latestAnswer` (the newest answer text), `chat.status`.
+- Beside the cursor (a small window with no title, listed by `D read` only while it shows): `cursor.answer` (the answer text; its value is the whole answer even when the bubble cuts it), `cursor.notice` (a notice such as a failed Start or the usage limit), `cursor.answer.more` (the footer "The rest is in Open chat, in the menu bar", shown only when the answer is cut), `cursor.speaking` (the speaker capsule while an answer is read aloud and no text shows).
+- Chat window (opens only after `Open chat` in the panel): `chat.latestAnswer` (the newest answer text), `chat.status`.
 - Settings: `settings.signIn.claude`, `settings.status.claude` (and the ChatGPT pair).
 - Sessions: `sessions.row.0` (the first row); inside a session `sessionDetail.save`; the Save sheet has `save.project`, `save.confirm`, `save.result`.
 
@@ -51,7 +54,7 @@ The start/stop state shows in the menu-bar icon (an amber ring while it starts, 
 2. Press right Command once: `D tap-right-command`. Wait a second.
 3. Play the clip (section 5). It plays for the clip's length; the command returns when it ends.
 4. Press right Command again: `D tap-right-command`.
-5. Read the answer: `D wait chat.latestAnswer 30`, then `D read`. `testenv shot <id> answer` shows the pointer.
+5. Read the answer: `D wait cursor.answer 30`, then `D read`; the chat window does not open at Start, so `chat.latestAnswer` exists only after `Open chat` from the panel. `testenv shot <id> answer` shows the bubble beside the cursor and the pointer. Moving the pointer (`D cursor <x> <y>`) keeps the bubble and it follows. Then `D click-at <x> <y>` on an empty spot, or `D press-key a`, hides it: `D wait cursor.answer 3` now fails and `D read` shows no `cursor.answer`.
 6. Negative case: `D chord-right-command a` (right Command with another key) must not start a question.
 7. `D click "Stop session"`.
 
