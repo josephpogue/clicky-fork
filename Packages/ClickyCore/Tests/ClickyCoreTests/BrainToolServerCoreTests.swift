@@ -161,6 +161,17 @@ struct BrainToolServerCoreTests {
         #expect(BrainToolText.paths(inToolResult: result.text) == ["/n/a.md", "/n/b.md"])
     }
 
+    @Test func aPassageWithNoPathIsTheBackendsNoteAndHasNoFileLine() {
+        let (server, backend) = makeServer()
+        backend.passagesToReturn = [
+            BrainPassage(path: "", heading: "Search incomplete", startLine: 0, endLine: 0, text: "Still indexing.", score: 0),
+            BrainPassage(path: "/n/a.md", heading: nil, startLine: 1, endLine: 1, text: "alpha", score: 1),
+        ]
+        let result = toolResult(server.response(toLine: callLine("search_brain", #"{"query":"alpha"}"#)))
+        #expect(result.text == "Heading: Search incomplete\nStill indexing.\n\nFile: /n/a.md lines 1-1\nalpha")
+        #expect(BrainToolText.paths(inToolResult: result.text) == ["/n/a.md"])
+    }
+
     @Test func noHitsSaysSo() {
         let (server, _) = makeServer()
         let result = toolResult(server.response(toLine: callLine("search_brain", #"{"query":"zebra"}"#)))

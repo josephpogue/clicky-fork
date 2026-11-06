@@ -17,6 +17,8 @@ enum SessionProviderFactory {
             // With search folders set, Claude gets the bundled helper as its only tools; nil keeps today's flags.
             return ClaudeCLIProvider(locations: locations, brainToolServer: BrainIndexService.shared.toolServer())
         case .chatgpt:
+            // ChatGPT has no helper, so passages follow the current Settings list, not an earlier Claude helper's.
+            BrainIndexService.shared.forgetHelperLaunchFolders()
             return CodexCLIProvider(locations: locations)
         }
     }

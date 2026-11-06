@@ -87,7 +87,9 @@ public struct BrainToolServerCore: Sendable {
             }
             var blocks: [String] = []
             for passage in passages {
-                var blockLines = [BrainToolText.fileLine(path: passage.path, startLine: passage.startLine, endLine: passage.endLine)]
+                // A passage with no path is the backend's own note (notes still being indexed), not a file: no File line.
+                var blockLines = passage.path.isEmpty
+                    ? [] : [BrainToolText.fileLine(path: passage.path, startLine: passage.startLine, endLine: passage.endLine)]
                 if let heading = passage.heading, !heading.isEmpty {
                     blockLines.append("Heading: \(heading)")
                 }
