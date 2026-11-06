@@ -69,7 +69,11 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         guard isOnScreen else { return }
         isOnScreen = false
         isDismissed = true
-        hasNewFindingSinceDismissal = false
+        // A bubble that held only "Checking your notes" had no finding yet: the search it announced is still under
+        // way, so the first text after it is that search's finding and brings the bubble back.
+        let heldOnlyTheCheckingLine = showsCheckingLine
+            && shownText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        hasNewFindingSinceDismissal = heldOnlyTheCheckingLine
         showsCheckingLine = false
     }
 

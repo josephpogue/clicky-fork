@@ -121,4 +121,29 @@ struct GrowingAnswerBubbleStateTests {
         var state = GrowingAnswerBubbleState()
         #expect(state.textReported("  ") == .nothing)
     }
+
+    // Wave 2 finding 4: a click on a bubble that held only "Checking your notes".
+    @Test func clickOnTheCheckingOnlyBubbleThenFirstTextReshowsOnceAndGrowthUpdatesInPlace() {
+        var state = GrowingAnswerBubbleState()
+        #expect(state.checkingLineReported() == .show(text: "", showsCheckingLine: true))
+        state.userDismissed()
+        #expect(state.textReported("Found it") == .show(text: "Found it", showsCheckingLine: false))
+        #expect(state.textReported("Found it in May.") == .update(text: "Found it in May.", showsCheckingLine: false))
+    }
+
+    @Test func clickOnTheCheckingOnlyBubbleThenNoTextStaysHidden() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.checkingLineReported()
+        state.userDismissed()
+        #expect(state.checkingLineReported() == .nothing)
+        #expect(state.finalAnswerReported("   ") == .nothing)
+    }
+
+    @Test func clickOnTextWithTheCheckingLineStillNeedsALaterFindingToReshow() {
+        var state = GrowingAnswerBubbleState()
+        _ = state.textReported("Let me look.")
+        _ = state.checkingLineReported()
+        state.userDismissed()
+        #expect(state.textReported("Let me look. And") == .nothing)
+    }
 }
