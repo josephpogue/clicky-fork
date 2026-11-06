@@ -269,7 +269,7 @@ struct SessionQuestionFlowOverlapTests {
         #expect(harness.output.notices == ["broke"])
     }
 
-    @Test func aFailureOfAnAnswerANewerQuestionEndedShowsNoCutShortAndNoNotice() async throws {
+    @Test func aFailureOfAnAnswerANewerQuestionEndedShowsNoNoticeAndReportsItsEndOnce() async throws {
         let harness = try await startedHarness(questions: ["first question", "second question"])
         harness.claude.scriptStreams([
             Stream(progress: [.textSoFar("Half")], pausesAfterProgress: true, failureAfterProgress: .failed(message: "late")),
@@ -280,7 +280,9 @@ struct SessionQuestionFlowOverlapTests {
         await harness.askQuestion()
         _ = await first.value
 
-        #expect(harness.output.cutShorts.isEmpty)
+        // The one ended report the app pairs with the card it retired; no text is known, so the card keeps its own.
+        #expect(harness.output.cutShorts.map(\.visibleText) == [""])
+        #expect(harness.output.cutReasons == [.newerQuestion])
         #expect(harness.output.notices.isEmpty)
         #expect(harness.output.answers.map(\.spokenText) == ["Second."])
     }
