@@ -33,6 +33,16 @@ public struct ListedSpokenVoice: Sendable, Equatable {
 /// Which voices Settings lists for spoken answers and which one reads. A voice of another language reads
 /// English answers badly, and novelty voices (Bells, Zarvox) are jokes, so neither is listed.
 public enum SpokenVoiceChoice {
+    /// The user's language as "<language>-<region>" ("en-US"), or just the language with no region. Built from
+    /// the locale's parts, because its identifier can carry modifiers ("en_US@rg=gbzzzz").
+    public static func userLanguageCode(for locale: Locale) -> String {
+        guard let language = locale.language.languageCode?.identifier else {
+            return locale.identifier.replacingOccurrences(of: "_", with: "-")
+        }
+        guard let region = locale.language.region?.identifier else { return language }
+        return "\(language)-\(region)"
+    }
+
     public static func listedVoices(from candidates: [SpokenVoiceCandidate], userLanguageCode: String) -> [ListedSpokenVoice] {
         let userLanguage = normalizedLanguage(userLanguageCode)
         let userLanguagePrefix = languagePrefix(of: userLanguage)

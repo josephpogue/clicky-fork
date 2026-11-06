@@ -55,3 +55,22 @@ struct SpokenVoiceChoiceTests {
         #expect(SpokenVoiceChoice.listedVoices(from: [], userLanguageCode: "en-US").isEmpty)
     }
 }
+
+/// The user's language as `<language>-<region>`, even when the locale identifier carries modifiers.
+struct SpokenVoiceUserLanguageTests {
+    @Test func plainLocale() {
+        #expect(SpokenVoiceChoice.userLanguageCode(for: Locale(identifier: "en_US")) == "en-US")
+    }
+
+    @Test func regionOverrideModifierIsDropped() {
+        #expect(SpokenVoiceChoice.userLanguageCode(for: Locale(identifier: "en_US@rg=gbzzzz")) == "en-US")
+    }
+
+    @Test func languageWithNoRegion() {
+        #expect(SpokenVoiceChoice.userLanguageCode(for: Locale(identifier: "en")) == "en")
+    }
+
+    @Test func scriptIsDropped() {
+        #expect(SpokenVoiceChoice.userLanguageCode(for: Locale(identifier: "zh-Hans_CN")) == "zh-CN")
+    }
+}

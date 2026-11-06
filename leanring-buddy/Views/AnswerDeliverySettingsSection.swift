@@ -54,24 +54,33 @@ final class AnswerDeliverySettingsState: ObservableObject {
     }
 }
 
-/// Wires `AnswerDeliverySettingsState` to AppSettings and to its own synthesizer for the sample, apart from
-/// the session's player so a sample never interrupts or reports as an answer.
+/// Wires `AnswerDeliverySettingsState` to AppSettings and to the shared `SpeechOwner`, so the sample and a
+/// session answer never talk over each other.
 @MainActor
-final class AnswerDeliverySettingsController: NSObject, AVSpeechSynthesizerDelegate {
+final class AnswerDeliverySettingsController {
     static let sampleSentence = "This is how answers will sound."
 
     let state: AnswerDeliverySettingsState
-    private let sampleSynthesizer = AVSpeechSynthesizer()
-    private var sampleUtterance: AVSpeechUtterance?
+    private var windowCloseObserver: NSObjectProtocol?
 
-    override init() {
+    init() {
         state = AnswerDeliverySettingsState()
-        super.init()
-        sampleSynthesizer.delegate = self
+        SpeechOwner.shared.setSpeakingHandler(for: .sample) { [weak self] isSpeaking in
+            self?.state.isPlayingSample = isSpeaking
+        }
+        // Closing the Settings window stops the sample (the window is kept and reused, so no view goes away).
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard (notification.object as? NSWindow)?.identifier?.rawValue == "settings.nswindow" else { return }
+            Task { @MainActor in self?.stopSample() }
+        }
         state.onSelectMode = { [weak self] mode in
             // Applies from the next answer: the session reads the mode when an answer arrives.
             AppSettings.shared.answerDeliveryMode = mode
             self?.state.selectedMode = mode
+            // The voice row (and the sample button) goes away with the spoken modes.
+            if !mode.speaksAloud { self?.stopSample() }
         }
         state.onSelectVoice = { [weak self] voiceIdentifier in
             AppSettings.shared.spokenAnswerVoiceIdentifier = voiceIdentifier
@@ -80,6 +89,10 @@ final class AnswerDeliverySettingsController: NSObject, AVSpeechSynthesizerDeleg
         }
         state.onToggleSample = { [weak self] in self?.toggleSample() }
         reloadFromSettings()
+    }
+
+    deinit {
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
     }
 
     /// Re-reads the mode, the installed voices and the saved voice; called when Settings opens.
@@ -92,8 +105,7 @@ final class AnswerDeliverySettingsController: NSObject, AVSpeechSynthesizerDeleg
     }
 
     func stopSample() {
-        sampleUtterance = nil
-        sampleSynthesizer.stopSpeaking(at: .immediate)
+        SpeechOwner.shared.stop(.sample)
         state.isPlayingSample = false
     }
 
@@ -102,28 +114,9 @@ final class AnswerDeliverySettingsController: NSObject, AVSpeechSynthesizerDeleg
             stopSample()
             return
         }
-        // The sample uses the voice the menu shows, not a stale saved one.
-        let utterance = AVSpeechUtterance(string: Self.sampleSentence)
-        utterance.voice = InstalledSpokenVoices.voice(savedIdentifier: state.selectedVoiceIdentifier)
-        sampleUtterance = utterance
-        state.isPlayingSample = true
-        sampleSynthesizer.speak(utterance)
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        nonisolated(unsafe) let finishedUtterance = utterance
-        Task { @MainActor [weak self] in self?.sampleEnded(finishedUtterance) }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        nonisolated(unsafe) let cancelledUtterance = utterance
-        Task { @MainActor [weak self] in self?.sampleEnded(cancelledUtterance) }
-    }
-
-    private func sampleEnded(_ utterance: AVSpeechUtterance) {
-        guard utterance === sampleUtterance else { return }
-        sampleUtterance = nil
-        state.isPlayingSample = false
+        // The sample uses the voice the menu shows, not a stale saved one. Starting it stops an answer being read.
+        let voice = InstalledSpokenVoices.voice(savedIdentifier: state.selectedVoiceIdentifier)
+        SpeechOwner.shared.speak(text: Self.sampleSentence, voice: voice, as: .sample)
     }
 }
 

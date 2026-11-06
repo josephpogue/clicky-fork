@@ -57,6 +57,9 @@ final class SessionCoordinator: ObservableObject {
     private let cursorAnswerPresenter: CursorAnswerPresenter
     /// Reads answers aloud when Settings asks for spoken answers.
     private let spokenAnswerPlayer = SpokenAnswerPlayer()
+    private var settingsSubscriptions = Set<AnyCancellable>()
+    /// The provider the open usage-limit offer switches to; an answer from any other provider clears the offer.
+    private var usageLimitSwitchTarget: ProviderID?
     private let questionKeyMonitor = QuestionKeyMonitor()
     private let frontmostWindowTracker = FrontmostWindowTracker()
 
@@ -102,6 +105,13 @@ final class SessionCoordinator: ObservableObject {
         spokenAnswerPlayer.onSpeakingChanged = { [weak self] isSpeaking in
             self?.cursorAnswerPresenter.showSpeaking(isSpeaking)
         }
+        // Switching to a mode that does not speak stops a reading in progress; switching to Spoken starts nothing.
+        settings.$answerDeliveryMode
+            .removeDuplicates()
+            .sink { [weak self] mode in
+                if !mode.speaksAloud { self?.spokenAnswerPlayer.stopSpeaking() }
+            }
+            .store(in: &settingsSubscriptions)
 
         // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
         chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
@@ -644,6 +654,10 @@ final class SessionCoordinator: ObservableObject {
         ))
         chatWindowState.activeModel = model.isEmpty ? "default" : model
         settings.recordMeasuredAnswerSeconds(secondsToAnswer, for: provider)
+        if chatWindowState.usageLimitOffer != nil, let switchTarget = usageLimitSwitchTarget,
+           UsageLimitOfferRules.answerClearsOffer(switchTarget: switchTarget, answeredBy: provider) {
+            chatWindowState.usageLimitOffer = nil
+        }
         // An answer that lands during Stop's drain reaches the chat only, like the pointer.
         guard lifecycle.acceptsPointerFlights else { return }
         let deliveryMode = settings.answerDeliveryMode
@@ -660,9 +674,11 @@ final class SessionCoordinator: ObservableObject {
     fileprivate func showUsageLimitOffer(message: String, switchTo provider: ProviderID) {
         let switchToProviderName = ProviderFailureNotice.displayName(for: provider)
         chatWindowState.usageLimitOffer = UsageLimitOffer(message: message, switchToProviderName: switchToProviderName)
+        usageLimitSwitchTarget = provider
         // The one-tap switch lives in the menu-bar panel; the cursor only says where to find it.
         guard lifecycle.acceptsPointerFlights else { return }
-        cursorAnswerPresenter.showNotice(text: "\(message) Switch to \(switchToProviderName) from the menu bar.")
+        cursorAnswerPresenter.showNotice(
+            text: UsageLimitOfferRules.cursorNotice(message: message, switchToProviderName: switchToProviderName))
     }
 
     fileprivate func clearUsageLimitOffer() {

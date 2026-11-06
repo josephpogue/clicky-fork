@@ -29,6 +29,8 @@ extension UIPreviewRendering {
         )
         try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, onSwitch: {}) },
                    size: nil, fileName: "menu-panel-usage-limit-offer.png", into: directory)
+        try render(PanelRowsPreview { PanelUsageLimitOffer(offer: offer, isSwitchEnabled: false, onSwitch: {}) },
+                   size: nil, fileName: "menu-panel-usage-limit-offer-switch-waiting.png", into: directory)
     }
 }
 
