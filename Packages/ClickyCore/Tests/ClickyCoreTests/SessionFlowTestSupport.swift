@@ -67,6 +67,8 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     private var pausedStreamContinuation: CheckedContinuation<Void, Never>?
     private var toolsAreSupported = false
     private var nextStopGate: TestGate?
+    private var nextEndGate: TestGate?
+    private var nextStartFailsWithOtherError = false
 
     init(providerID: ProviderID) {
         self.providerID = providerID
@@ -155,6 +157,18 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         nextStartFailure = failure
     }
 
+    /// The next endConversation call is counted, then waits at this gate before it returns.
+    func holdNextEnd(at gate: TestGate) {
+        lock.lock(); defer { lock.unlock() }
+        nextEndGate = gate
+    }
+
+    /// The next startConversation call throws an error that is not a ProviderFailure.
+    func failNextStartWithOtherError() {
+        lock.lock(); defer { lock.unlock() }
+        nextStartFailsWithOtherError = true
+    }
+
     func setSummaryResult(_ result: Result<String, ProviderFailure>) {
         lock.lock(); defer { lock.unlock() }
         summaryResult = result
@@ -180,9 +194,12 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         nextStartGate = nil
         let failure = nextStartFailure
         nextStartFailure = nil
+        let failsWithOtherError = nextStartFailsWithOtherError
+        nextStartFailsWithOtherError = false
         lock.unlock()
         await gate?.pass()
         if let failure { throw failure }
+        if failsWithOtherError { throw CocoaError(.fileReadUnknown) }
     }
 
     func ask(_ turn: QuestionTurn, model: String) async throws -> ProviderAnswer {
@@ -296,8 +313,12 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     }
 
     func endConversation() async {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         endCount += 1
+        let gate = nextEndGate
+        nextEndGate = nil
+        lock.unlock()
+        await gate?.pass()
     }
 }
 
@@ -399,7 +420,16 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
         callOrder.append("answer"); timeline.append("answer")
         lock.unlock()
     }
-    func noticeShown(_ text: String) async { lock.lock(); notices.append(text); timeline.append("notice"); lock.unlock() }
+    func noticeShown(_ text: String) async {
+        lock.lock(); notices.append(text); timeline.append("notice")
+        let gate = noticeGate
+        noticeGate = nil
+        lock.unlock()
+        await gate?.pass()
+    }
+    private var noticeGate: TestGate?
+    /// The next notice is recorded, then its report waits at this gate (Stop can land during the notice).
+    func holdNextNotice(at gate: TestGate) { lock.lock(); noticeGate = gate; lock.unlock() }
     func usageLimitOffered(message: String, switchTo: ProviderID) async {
         lock.lock(); offers.append((message, switchTo)); lock.unlock()
     }
@@ -468,15 +498,18 @@ final class FlowHarness: @unchecked Sendable {
                 },
                 transcribeQuestion: { [output] _, _ in
                     output.recordTimeline("transcribe")
+                    if holder.takeTranscriptionFailure() { throw CocoaError(.fileReadUnknown) }
                     return holder.nextTranscription()
                 },
                 captureCurrentGroup: {
                     await captureHold.takeGate()?.pass()
+                    if holder.takeCaptureFailure() { throw CocoaError(.fileReadUnknown) }
                     return holder.makeGroup(shots: screenShots)
                 },
                 logEvent: { [log] event in
                     await logHold.takeGate(for: event.kind)?.pass()
                     log.append(event)
+                    await logHold.takeGateAfterWrite(for: event.kind)?.pass()
                 },
                 shotsDirectory: URL(fileURLWithPath: "/tmp/clicky-flow-test-shots", isDirectory: true),
                 timeZone: QuestionsFixtures.utc,
@@ -495,6 +528,10 @@ final class FlowHarness: @unchecked Sendable {
     }
 
     private let state = HarnessState()
+
+    /// The next question's transcription throws, or its screen capture throws.
+    func failNextTranscription() { state.failNextTranscription() }
+    func failNextCapture() { state.failNextCapture() }
 
     /// Every passage search the flow made, in order.
     var passageSearches: [(query: String, appName: String?, windowTitle: String?)] { state.passageSearches }
@@ -523,6 +560,16 @@ final class LogHold: @unchecked Sendable {
     func holdNextWrite(where matches: @escaping @Sendable (SessionEventKind) -> Bool, at gate: TestGate) {
         lock.lock(); holds.append((matches, gate)); lock.unlock()
     }
+    private var holdsAfterWrite: [(matches: @Sendable (SessionEventKind) -> Bool, gate: TestGate)] = []
+    /// Like `holdNextWrite`, but the line is already written when the gate holds: a log call that is slow to return.
+    func holdNextWriteAfterItIsWritten(where matches: @escaping @Sendable (SessionEventKind) -> Bool, at gate: TestGate) {
+        lock.lock(); holdsAfterWrite.append((matches, gate)); lock.unlock()
+    }
+    func takeGateAfterWrite(for kind: SessionEventKind) -> TestGate? {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = holdsAfterWrite.firstIndex(where: { $0.matches(kind) }) else { return nil }
+        return holdsAfterWrite.remove(at: index).gate
+    }
     func takeGate(for kind: SessionEventKind) -> TestGate? {
         lock.lock(); defer { lock.unlock() }
         guard let index = holds.firstIndex(where: { $0.matches(kind) }) else { return nil }
@@ -544,6 +591,20 @@ final class HarnessState: @unchecked Sendable {
     }
     var passageSearches: [(query: String, appName: String?, windowTitle: String?)] {
         lock.lock(); defer { lock.unlock() }; return searches
+    }
+    private var transcriptionFails = false
+    private var captureFails = false
+    func failNextTranscription() { lock.lock(); transcriptionFails = true; lock.unlock() }
+    func failNextCapture() { lock.lock(); captureFails = true; lock.unlock() }
+    func takeTranscriptionFailure() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        defer { transcriptionFails = false }
+        return transcriptionFails
+    }
+    func takeCaptureFailure() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        defer { captureFails = false }
+        return captureFails
     }
     func recordStart(_ date: Date) { lock.lock(); starts.append(date); lock.unlock() }
     func nextTranscription() -> String {

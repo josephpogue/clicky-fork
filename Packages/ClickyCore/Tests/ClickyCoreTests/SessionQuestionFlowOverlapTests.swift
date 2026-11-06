@@ -154,6 +154,31 @@ struct SessionQuestionFlowOverlapTests {
         #expect(await harness.flow.answeredQuestionCount == 1)
     }
 
+    /// The old answer's stop and its cut-short report must not slip between the listening report and the marker call,
+    /// however long the listening report takes: the flow holds the stop until the marker is out.
+    @Test func theOldAnswerIsNotEndedBetweenTheListeningReportAndTheMarker() async throws {
+        let harness = try await startedHarness(questions: ["first question", "second question"])
+        harness.claude.scriptStreams([
+            Stream(progress: [.textSoFar("Partial answer")], pausesAfterProgress: true),
+            Stream(progress: [.textSoFar("Second answer.")], finalText: "Second answer."),
+        ])
+        let first = Task { await harness.askQuestion() }
+        try await waitUntil { !harness.output.textChanges.isEmpty }
+        let listeningGate = TestGate()
+        harness.output.holdNextPhaseChange(to: .listening, at: listeningGate)
+
+        let tap = Task { await harness.flow.handle(.questionStarted(at: FlowHarness.startTime.addingTimeInterval(5))) }
+        await listeningGate.waitUntilReached()
+        // Long enough for an unheld old answer to be stopped and to report its cut.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        listeningGate.open()
+        _ = await tap.value
+
+        #expect(secondListeningIsFollowedByTheMarker(harness))
+        _ = await harness.flow.finish(summaryEnabled: false)
+        _ = await first.value
+    }
+
     @Test func twoNewQuestionsInARowEndEachOldAnswerAndOnlyTheLastOneAnswers() async throws {
         let harness = try await startedHarness(questions: ["one", "two", "three"])
         harness.claude.scriptStreams([

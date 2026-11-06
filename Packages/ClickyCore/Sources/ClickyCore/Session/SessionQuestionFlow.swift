@@ -248,13 +248,19 @@ public actor SessionQuestionFlow {
                 // answer is stopped off this path (see `stopEndedAnswerOffTheListeningPath`).
                 questionSerial += 1
                 phase = .listening
+                // The listening report and the marker go out as one unit, as a task the old answer's stop waits for:
+                // the ended answer's cut-short report can then never land between them, and the marker follows the
+                // listening report at once.
+                let announcement = Task { [self] () -> Bool in
+                    await output.phaseChanged(.listening)
+                    guard !isFinished else { return false }
+                    await dependencies.markQuestionStarted(date)
+                    await noteEvent(SessionEvent(time: date, kind: .questionStarted))
+                    return true
+                }
                 // The stop starts before the first await, so a send that arrives during any of them waits for it.
-                stopEndedAnswerOffTheListeningPath()
-                await output.phaseChanged(.listening)
-                guard !isFinished else { return .ignoredBecauseBusy }
-                await dependencies.markQuestionStarted(date)
-                await noteEvent(SessionEvent(time: date, kind: .questionStarted))
-                return .accepted
+                stopEndedAnswerOffTheListeningPath(after: announcement)
+                return await announcement.value ? .accepted : .ignoredBecauseBusy
             case .listening, .transcribing:
                 return .ignoredBecauseBusy
             }
@@ -270,9 +276,10 @@ public actor SessionQuestionFlow {
 
     /// Stops the answer a new question ended without holding the new question's listening back: the provider may take
     /// up to its grace period to hand the answer back. The question's send waits for this task.
-    private func stopEndedAnswerOffTheListeningPath() {
+    private func stopEndedAnswerOffTheListeningPath(after announcement: Task<Bool, Never>) {
         let stoppingProvider = provider
         pendingAnswerStop = Task { [self] in
+            _ = await announcement.value
             await stoppingProvider.stopCurrentAnswer()
             await waitForEndedAnswersToBeLogged()
         }
@@ -299,12 +306,14 @@ public actor SessionQuestionFlow {
         } catch {
             guard isCurrent(serial) else { return }
             await output.noticeShown("Could not hear that. Try again.")
+            guard !isFinished else { return }
             await setPhase(.idle)
             return
         }
         guard isCurrent(serial) else { return }
         guard !questionText.isEmpty else {
             await output.noticeShown("Didn't catch that")
+            guard !isFinished else { return }
             await setPhase(.idle)
             return
         }
@@ -322,11 +331,13 @@ public actor SessionQuestionFlow {
             } catch let failure as ProviderFailure {
                 guard isCurrent(serial) else { return }
                 await output.noticeShown(ProviderFailureNotice.text(for: failure, provider: activeProviderID))
+                guard !isFinished else { return }
                 await setPhase(.idle)
                 return
             } catch {
                 guard isCurrent(serial) else { return }
                 await output.noticeShown("The conversation could not be restarted.")
+                guard !isFinished else { return }
                 await setPhase(.idle)
                 return
             }
@@ -344,6 +355,7 @@ public actor SessionQuestionFlow {
         } catch {
             guard isCurrent(serial) else { return }
             await output.noticeShown("The screen could not be captured.")
+            guard !isFinished else { return }
             await setPhase(.idle)
             return
         }
@@ -402,12 +414,17 @@ public actor SessionQuestionFlow {
             shotGroupID: currentGroup.id,
             earlierShotGroupIDs: earlierGroup.map { [$0.id] } ?? []
         )))
+        // Stop landing while the question line was being written: no passage line may follow the stop line.
+        guard isCurrent(serial) else { return }
         var passagePaths: [String] = []
         for passage in passages where !passagePaths.contains(passage.path) { passagePaths.append(passage.path) }
         if !passagePaths.isEmpty {
             await noteEvent(SessionEvent(time: now, kind: .passagesAttached(paths: passagePaths)))
         }
         // A "dig deeper" question is not itself the earlier question the next "dig deeper" should search with.
+        // Stop (or a newer question) may have landed while the question was being logged: it was never shown, so
+        // nothing about it is reported and the chat gets no card for a dead number.
+        guard isCurrent(serial) else { return }
         if digDeeperMatch == nil { previousQuestionText = questionText }
         await output.questionAsked(questionText, answerNumber: serial)
 
@@ -723,14 +740,19 @@ public actor SessionQuestionFlow {
             await newProvider.endConversation()
             return
         }
-        await oldProvider.endConversation()
+        // The new provider takes over before the old conversation ends: Stop landing during that end then summarizes
+        // and ends the new provider, and each provider's conversation is ended exactly once.
         provider = newProvider
         activeProviderID = newProviderID
         budget.reset()
+        await oldProvider.endConversation()
+        guard !isFinished else { return }
         await noteEvent(SessionEvent(
             time: dependencies.now(), kind: .providerSwitched(from: oldProviderID, to: newProviderID)
         ))
+        guard !isFinished else { return }
         await output.usageLimitOfferCleared()
+        guard !isFinished else { return }
         await output.providerChanged(to: newProviderID, model: model)
     }
 
