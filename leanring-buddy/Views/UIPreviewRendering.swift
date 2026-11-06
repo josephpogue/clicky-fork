@@ -13,6 +13,7 @@
 //
 
 import AppKit
+import ClickyCore
 import SwiftUI
 
 enum UIPreviewRendering {
@@ -55,6 +56,32 @@ enum UIPreviewRendering {
             fileName: "detail-shot-open.png",
             into: directory
         )
+
+        let runningDetailState = UIPreviewSamples.runningSessionDetailState(shotFileURLs: sampleShotFileURLs)
+        try render(SessionDetailView(state: runningDetailState, onSave: {}, onRevealInFinder: {}), size: CGSize(width: 620, height: 420), fileName: "detail-running-save-disabled.png", into: directory)
+
+        // Settings on a 1024x768 display: 25 for the menu bar and 70 for the Dock leave 673 high, and the 28
+        // title bar leaves 645 for the content. The content scrolls.
+        let smallDisplaySettings = SettingsState(
+            providers: [UIPreviewSamples.settingsClaudeRow(isSignedIn: true), UIPreviewSamples.settingsChatGPTRow(isSignedIn: false, isBusy: true)],
+            selectedProviderName: "Claude", notesFolderPath: "/Users/sample/Notes/vault")
+        try render(SettingsView(state: smallDisplaySettings), size: CGSize(width: 520, height: 645), fileName: "settings-1024x768.png", into: directory)
+
+        // CLICKY_VAULT_ROOT sets the notes folder: the folder Save will use, with the note saying why.
+        let environmentFolderSettings = SettingsState(
+            providers: [UIPreviewSamples.settingsClaudeRow(isSignedIn: true), UIPreviewSamples.settingsChatGPTRow(isSignedIn: true)],
+            selectedProviderName: "Claude", notesFolderPath: "/Users/sample/Notes/vault", isNotesFolderSetByEnvironment: true)
+        try render(SettingsView(state: environmentFolderSettings), size: settingsWindowSize, fileName: "settings-notes-folder-from-environment.png", into: directory)
+
+        // The label beside the pointer, with the pointer 20 points from the right edge, then near the bottom and top.
+        for (fileName, pointerPosition) in [
+            ("pointer-label-right-edge.png", CGPoint(x: 460, y: 120)),
+            ("pointer-label-bottom-edge.png", CGPoint(x: 150, y: 290)),
+            ("pointer-label-top-edge.png", CGPoint(x: 150, y: 6)),
+            ("pointer-label-roomy.png", CGPoint(x: 150, y: 120)),
+        ] {
+            try render(PointerLabelEdgePreview(pointerPosition: pointerPosition), size: CGSize(width: 480, height: 300), fileName: fileName, into: directory)
+        }
 
         for (fileName, saveState) in UIPreviewSamples.saveStates() {
             try render(SaveToVaultSheet(state: saveState, onConfirm: { _ in }, onCancel: {}, onOpenSettings: {}), size: nil, fileName: fileName, into: directory)
@@ -156,6 +183,40 @@ private struct MarkerInContextPreview: View {
                 )
         }
         .frame(width: 200, height: 86, alignment: .topLeading)
+        .clipped()
+    }
+}
+
+/// A made-up 480 x 300 screen with the pointer and its label laid out by the same function the overlay uses.
+/// The label copies the overlay's style; the overlay itself needs a real display, so it is not drawn here.
+private struct PointerLabelEdgePreview: View {
+    let pointerPosition: CGPoint
+    private let screenSize = CGSize(width: 480, height: 300)
+    private let labelText = "save button"
+
+    var body: some View {
+        let fullLabelWidth = PointerLabelMetrics.fullWidth(ofText: labelText)
+        ZStack(alignment: .topLeading) {
+            Color(hex: "#1E2022")
+            Triangle()
+                .fill(DS.Colors.overlayCursorBlue)
+                .frame(width: 16, height: 16)
+                .rotationEffect(.degrees(-35))
+                .position(pointerPosition)
+            Text(labelText)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(DS.Colors.overlayCursorBlue))
+                .fixedSize()
+                .position(PointerLabelLayout.center(
+                    pointerPosition: pointerPosition,
+                    currentLabelSize: CGSize(width: fullLabelWidth, height: 22),
+                    fullLabelWidth: fullLabelWidth,
+                    screenSize: screenSize))
+        }
+        .frame(width: screenSize.width, height: screenSize.height)
         .clipped()
     }
 }

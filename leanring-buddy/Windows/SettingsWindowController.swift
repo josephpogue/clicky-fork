@@ -21,6 +21,8 @@ final class SettingsWindowController {
     private let accountsByProvider: [ProviderID: any ProviderAccount]
     private let state: SettingsState
     private var window: NSWindow?
+    /// Providers whose sign-in the user cancelled, so the ended login shows as cancelled, not as a failure.
+    private var providersWithCancelledSignIn: Set<ProviderID> = []
 
     init() {
         // Both accounts are made with the app's own data folders, which is what
@@ -33,7 +35,8 @@ final class SettingsWindowController {
         state = SettingsState(
             providers: ProviderID.allCases.map { ProviderSettingsRow(providerName: $0.windowDisplayName) },
             selectedProviderName: AppSettings.shared.selectedProvider.windowDisplayName,
-            notesFolderPath: AppSettings.shared.notesFolderPath,
+            notesFolderPath: Self.effectiveNotesFolderPath(notesFolderSetting: AppSettings.shared.notesFolderPath),
+            isNotesFolderSetByEnvironment: Self.isNotesFolderSetByEnvironment,
             isSummaryAtStopEnabled: AppSettings.shared.summaryAtStopEnabled
         )
         connectClosures()
@@ -47,6 +50,7 @@ final class SettingsWindowController {
                 title: "Clicky Fork Settings", contentSize: Self.contentSize, isResizable: true, identifier: "settings.nswindow")
             newWindow.contentMinSize = CGSize(width: 480, height: 420)
             newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state), contentSize: Self.contentSize)
+            fitInsideVisibleScreen(newWindow)
             window = newWindow
         }
         reloadFromSettings()
@@ -55,10 +59,21 @@ final class SettingsWindowController {
         Task { await refreshAccounts(clearMessages: true) }
     }
 
+    /// The window is 760 high, which runs under the Dock on a 1024x768 display. Shrink it to the part of
+    /// the screen the menu bar and Dock leave free; the view scrolls, so nothing is lost.
+    private func fitInsideVisibleScreen(_ settingsWindow: NSWindow) {
+        guard let visibleFrame = (settingsWindow.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let windowChromeHeight = settingsWindow.frame.height - settingsWindow.contentLayoutRect.height
+        let fittedFrame = WindowFit.frame(
+            desiredContentSize: Self.contentSize, windowChromeHeight: windowChromeHeight, visibleFrame: visibleFrame)
+        settingsWindow.setFrame(fittedFrame, display: false)
+    }
+
     // MARK: - Closures the view calls
 
     private func connectClosures() {
         state.onSignIn = { [weak self] providerName in self?.signIn(providerName: providerName) }
+        state.onCancelSignIn = { [weak self] providerName in self?.cancelSignIn(providerName: providerName) }
         state.onSignOut = { [weak self] providerName in self?.signOut(providerName: providerName) }
         state.onSelectModel = { [weak self] providerName, model in self?.selectModel(model, providerName: providerName) }
         state.onSelectProvider = { [weak self] providerName in self?.selectProvider(providerName: providerName) }
@@ -82,8 +97,40 @@ final class SettingsWindowController {
             } catch {
                 failureMessage = Self.plainMessage(for: error, fallback: "Sign-in did not finish.")
             }
+            if providersWithCancelledSignIn.remove(providerID) != nil {
+                failureMessage = "Sign-in cancelled."
+            }
             await refreshAccounts(clearMessages: false)
             finishBusyWork(for: providerID, message: failureMessage)
+        }
+    }
+
+    /// Ends the login tool that is waiting for the browser. The sign-in task then returns on its own,
+    /// which refreshes the row and frees the button.
+    private func cancelSignIn(providerName: String) {
+        guard let providerID = ProviderID(windowDisplayName: providerName),
+              let rowIndex = rowIndex(for: providerID), state.providers[rowIndex].isBusy,
+              !state.providers[rowIndex].isSignedIn else { return }
+        providersWithCancelledSignIn.insert(providerID)
+        Task {
+            // The tool starts a moment after the button is pressed, so a very early Cancel tries again briefly.
+            for _ in 0..<10 {
+                // Off the main thread: ending a process waits for it to exit.
+                let endedCount = await Task.detached { Self.endLogin(of: providerID) }.value
+                if endedCount > 0 { return }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard providersWithCancelledSignIn.contains(providerID) else { return }
+            }
+        }
+    }
+
+    @discardableResult
+    private nonisolated static func endLogin(of providerID: ProviderID) -> Int {
+        switch providerID {
+        case .claude:
+            return SignInProcessEnder.endLoginProcesses(toolName: "claude", loginArguments: ["auth", "login"])
+        case .chatgpt:
+            return SignInProcessEnder.endLoginProcesses(toolName: "codex", loginArguments: ["login"])
         }
     }
 
@@ -143,7 +190,7 @@ final class SettingsWindowController {
         let handleResult: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .OK, let folderURL = openPanel.url else { return }
             self?.settings.notesFolderPath = folderURL.path
-            self?.state.notesFolderPath = folderURL.path
+            self?.reloadNotesFolder()
         }
         if let window {
             openPanel.beginSheetModal(for: window, completionHandler: handleResult)
@@ -157,13 +204,28 @@ final class SettingsWindowController {
     /// Copies the plain settings into the state each time the window opens.
     private func reloadFromSettings() {
         state.selectedProviderName = settings.selectedProvider.windowDisplayName
-        state.notesFolderPath = settings.notesFolderPath
+        reloadNotesFolder()
         state.isSummaryAtStopEnabled = settings.summaryAtStopEnabled
         for providerID in ProviderID.allCases {
             guard let rowIndex = rowIndex(for: providerID) else { continue }
             state.providers[rowIndex].measuredAnswerSeconds = settings.measuredAnswerSeconds[providerID.rawValue]
             state.providers[rowIndex].selectedModel = savedModel(for: providerID)
         }
+    }
+
+    /// Shows the folder Save will really use: CLICKY_VAULT_ROOT wins over the folder chosen here.
+    private func reloadNotesFolder() {
+        state.notesFolderPath = Self.effectiveNotesFolderPath(notesFolderSetting: settings.notesFolderPath)
+        state.isNotesFolderSetByEnvironment = Self.isNotesFolderSetByEnvironment
+    }
+
+    private static func effectiveNotesFolderPath(notesFolderSetting: String?) -> String? {
+        VaultRootResolver.resolve(
+            notesFolderSetting: notesFolderSetting, environment: ProcessInfo.processInfo.environment)?.path
+    }
+
+    private static var isNotesFolderSetByEnvironment: Bool {
+        VaultRootResolver.resolve(notesFolderSetting: nil, environment: ProcessInfo.processInfo.environment) != nil
     }
 
     /// Asks both CLIs whether they are signed in and which models they accept.

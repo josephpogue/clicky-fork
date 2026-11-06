@@ -9,6 +9,7 @@
 
 import AppKit
 import AVFoundation
+import ClickyCore
 import SwiftUI
 
 class OverlayWindow: NSWindow {
@@ -53,6 +54,15 @@ class OverlayWindow: NSWindow {
 }
 
 // Cursor-like triangle shape (equilateral)
+enum PointerLabelMetrics {
+    /// The width the label takes once all of `text` is typed: the text at the label's font (11 pt medium)
+    /// plus its 8 pt padding on each side.
+    static func fullWidth(ofText text: String) -> CGFloat {
+        let textWidth = (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width
+        return ceil(textWidth) + 16
+    }
+}
+
 struct Triangle: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -143,6 +153,8 @@ struct BlueCursorView: View {
     @State private var navigationBubbleText: String = ""
     @State private var navigationBubbleOpacity: Double = 0.0
     @State private var navigationBubbleSize: CGSize = .zero
+    /// Width of the finished label text, known before it types out, so the label picks its side once.
+    @State private var navigationBubbleFullWidth: CGFloat = 0
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
@@ -237,7 +249,13 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    // Left of the pointer near the right screen edge, and kept inside the screen top
+                    // and bottom, so the label is never cut off.
+                    .position(PointerLabelLayout.center(
+                        pointerPosition: cursorPosition,
+                        currentLabelSize: navigationBubbleSize,
+                        fullLabelWidth: navigationBubbleFullWidth,
+                        screenSize: screenFrame.size))
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
@@ -526,6 +544,8 @@ struct BlueCursorView: View {
         let pointerPhrase = pointerFlight.targetLabel
             ?? navigationPointerPhrases.randomElement()
             ?? "right here!"
+
+        navigationBubbleFullWidth = PointerLabelMetrics.fullWidth(ofText: pointerPhrase)
 
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
             // All characters streamed — hold for 3 seconds, then fly back

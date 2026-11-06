@@ -7,6 +7,7 @@
 //  asked for and kept, so the window keeps its place and its state.
 //
 
+import ClickyCore
 import Foundation
 
 @MainActor
@@ -34,6 +35,7 @@ final class AppWindowRouter {
     /// Ends any `claude auth login` or `codex login` that Settings started, so quitting the app
     /// leaves no login process behind. Called from `applicationShouldTerminate`.
     func endRunningSignIns() {
-        // Filled in by the Settings fix: end the login processes Settings started.
+        // Works from the process list, not the Settings controller, so quitting never has to build it.
+        SignInProcessEnder.endAllSignIns()
     }
 }

@@ -89,12 +89,26 @@ struct SettingsView: View {
                 providerAccountButton(providerRow)
             }
 
-            if let statusMessage = providerRow.statusMessage {
-                Text(statusMessage)
-                    .font(DS.WindowText.meta)
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("settings.statusMessage.\(slug)")
+            // While the browser sign-in is open, Cancel ends it so the row is not stuck waiting.
+            let isWaitingForBrowser = providerRow.isBusy && !providerRow.isSignedIn
+            if providerRow.statusMessage != nil || isWaitingForBrowser {
+                HStack(alignment: .center, spacing: 12) {
+                    if let statusMessage = providerRow.statusMessage {
+                        Text(statusMessage)
+                            .font(DS.WindowText.meta)
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings.statusMessage.\(slug)")
+                    }
+                    Spacer(minLength: 8)
+                    if isWaitingForBrowser {
+                        Button(action: { state.onCancelSignIn(providerRow.providerName) }) {
+                            Text("Cancel")
+                        }
+                        .clickyWindowButton(.secondary, isCompact: true)
+                        .accessibilityIdentifier("settings.cancelSignIn.\(slug)")
+                    }
+                }
             }
 
             if providerRow.isSignedIn && !providerRow.models.isEmpty {
@@ -232,6 +246,12 @@ struct SettingsView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .accessibilityIdentifier("settings.notesFolderPath")
+                            if state.isNotesFolderSetByEnvironment {
+                                Text("Set by CLICKY_VAULT_ROOT")
+                                    .font(DS.WindowText.meta)
+                                    .foregroundColor(DS.Colors.textSecondary)
+                                    .accessibilityIdentifier("settings.notesFolderOverrideNote")
+                            }
                         } else {
                             Text("Not chosen yet. Save to vault needs it.")
                                 .font(DS.WindowText.meta)

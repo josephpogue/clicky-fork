@@ -153,10 +153,14 @@ struct ProviderSettingsRow: Identifiable, Equatable {
 final class SettingsState: ObservableObject {
     @Published var providers: [ProviderSettingsRow]
     @Published var selectedProviderName: String
+    /// The folder Save will really use, which may come from CLICKY_VAULT_ROOT rather than the user's choice.
     @Published var notesFolderPath: String?
+    /// True when CLICKY_VAULT_ROOT sets the notes folder, so the window can say why a choice does not apply.
+    @Published var isNotesFolderSetByEnvironment: Bool
     @Published var isSummaryAtStopEnabled: Bool
 
     var onSignIn: (_ providerName: String) -> Void
+    var onCancelSignIn: (_ providerName: String) -> Void
     var onSignOut: (_ providerName: String) -> Void
     var onSelectModel: (_ providerName: String, _ model: String) -> Void
     var onSelectProvider: (_ providerName: String) -> Void
@@ -167,8 +171,10 @@ final class SettingsState: ObservableObject {
         providers: [ProviderSettingsRow] = [],
         selectedProviderName: String = "Claude",
         notesFolderPath: String? = nil,
+        isNotesFolderSetByEnvironment: Bool = false,
         isSummaryAtStopEnabled: Bool = true,
         onSignIn: @escaping (String) -> Void = { _ in },
+        onCancelSignIn: @escaping (String) -> Void = { _ in },
         onSignOut: @escaping (String) -> Void = { _ in },
         onSelectModel: @escaping (String, String) -> Void = { _, _ in },
         onSelectProvider: @escaping (String) -> Void = { _ in },
@@ -178,8 +184,10 @@ final class SettingsState: ObservableObject {
         self.providers = providers
         self.selectedProviderName = selectedProviderName
         self.notesFolderPath = notesFolderPath
+        self.isNotesFolderSetByEnvironment = isNotesFolderSetByEnvironment
         self.isSummaryAtStopEnabled = isSummaryAtStopEnabled
         self.onSignIn = onSignIn
+        self.onCancelSignIn = onCancelSignIn
         self.onSignOut = onSignOut
         self.onSelectModel = onSelectModel
         self.onSelectProvider = onSelectProvider
@@ -244,13 +252,16 @@ struct SessionDetailState: Equatable {
     var rows: [SessionTimelineRow]
     /// Where Save last wrote the note; nil until the session is saved.
     var savedNotePath: String?
+    /// False while the session is running or has not finished (no end time yet); Save waits for it.
+    var isFinished: Bool
 
-    init(title: String, startedAt: Date, summary: String? = nil, rows: [SessionTimelineRow] = [], savedNotePath: String? = nil) {
+    init(title: String, startedAt: Date, summary: String? = nil, rows: [SessionTimelineRow] = [], savedNotePath: String? = nil, isFinished: Bool = true) {
         self.title = title
         self.startedAt = startedAt
         self.summary = summary
         self.rows = rows
         self.savedNotePath = savedNotePath
+        self.isFinished = isFinished
     }
 }
 

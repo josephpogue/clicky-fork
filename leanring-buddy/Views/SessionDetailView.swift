@@ -81,22 +81,33 @@ struct SessionDetailView: View {
             }
             Spacer(minLength: 12)
 
-            if state.savedNotePath != nil {
-                Button(action: onSave) {
-                    Text("Save again")
-                }
-                .clickyWindowButton(.secondary, isCompact: true)
-                .accessibilityIdentifier("sessionDetail.save")
-            } else {
-                Button(action: onSave) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "tray.and.arrow.down")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("Save to vault")
+            VStack(alignment: .trailing, spacing: 6) {
+                if state.savedNotePath != nil {
+                    Button(action: onSave) {
+                        Text("Save again")
                     }
+                    .clickyWindowButton(.secondary, isCompact: true)
+                    .disabled(!state.isFinished)
+                    .accessibilityIdentifier("sessionDetail.save")
+                } else {
+                    Button(action: onSave) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "tray.and.arrow.down")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Save to vault")
+                        }
+                    }
+                    .clickyWindowButton(.primary)
+                    .disabled(!state.isFinished)
+                    .accessibilityIdentifier("sessionDetail.save")
                 }
-                .clickyWindowButton(.primary)
-                .accessibilityIdentifier("sessionDetail.save")
+
+                if !state.isFinished {
+                    Text("Stop the session to save it")
+                        .font(DS.WindowText.meta)
+                        .foregroundColor(DS.Colors.textMuted)
+                        .accessibilityIdentifier("sessionDetail.saveReason")
+                }
             }
         }
         .padding(.horizontal, 24)

@@ -98,7 +98,7 @@ enum UIPreviewSamples {
 
     // MARK: - Settings
 
-    private static func claudeRow(isSignedIn: Bool, isBusy: Bool = false) -> ProviderSettingsRow {
+    static func settingsClaudeRow(isSignedIn: Bool, isBusy: Bool = false) -> ProviderSettingsRow {
         ProviderSettingsRow(
             providerName: "Claude",
             isSignedIn: isSignedIn,
@@ -110,7 +110,7 @@ enum UIPreviewSamples {
         )
     }
 
-    private static func chatGPTRow(isSignedIn: Bool, isBusy: Bool = false) -> ProviderSettingsRow {
+    static func settingsChatGPTRow(isSignedIn: Bool, isBusy: Bool = false) -> ProviderSettingsRow {
         ProviderSettingsRow(
             providerName: "ChatGPT",
             isSignedIn: isSignedIn,
@@ -126,10 +126,10 @@ enum UIPreviewSamples {
     static func settingsStates() -> [(String, SettingsState)] {
         let sampleNotesFolder = "/Users/sample/Notes/vault"
         return [
-            ("settings-signed-out.png", SettingsState(providers: [claudeRow(isSignedIn: false), chatGPTRow(isSignedIn: false)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
-            ("settings-claude-signed-in.png", SettingsState(providers: [claudeRow(isSignedIn: true), chatGPTRow(isSignedIn: false)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
-            ("settings-signing-in.png", SettingsState(providers: [claudeRow(isSignedIn: true), chatGPTRow(isSignedIn: false, isBusy: true)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
-            ("settings-no-notes-folder.png", SettingsState(providers: [claudeRow(isSignedIn: true), chatGPTRow(isSignedIn: true)], selectedProviderName: "ChatGPT", notesFolderPath: nil, isSummaryAtStopEnabled: false)),
+            ("settings-signed-out.png", SettingsState(providers: [settingsClaudeRow(isSignedIn: false), settingsChatGPTRow(isSignedIn: false)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
+            ("settings-claude-signed-in.png", SettingsState(providers: [settingsClaudeRow(isSignedIn: true), settingsChatGPTRow(isSignedIn: false)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
+            ("settings-signing-in.png", SettingsState(providers: [settingsClaudeRow(isSignedIn: true), settingsChatGPTRow(isSignedIn: false, isBusy: true)], selectedProviderName: "Claude", notesFolderPath: sampleNotesFolder)),
+            ("settings-no-notes-folder.png", SettingsState(providers: [settingsClaudeRow(isSignedIn: true), settingsChatGPTRow(isSignedIn: true)], selectedProviderName: "ChatGPT", notesFolderPath: nil, isSummaryAtStopEnabled: false)),
         ]
     }
 
@@ -143,6 +143,14 @@ enum UIPreviewSamples {
             SessionListItem(id: "session-2", title: "Pivot table for the garden budget", startedAt: now.addingTimeInterval(-28 * 3600), durationSeconds: 18 * 60, questionCount: 4, savedProject: "garden-planner"),
             SessionListItem(id: "session-1", title: "Router settings and a second network for guests at home", startedAt: now.addingTimeInterval(-4 * 86400), durationSeconds: 75 * 60, questionCount: 1, savedProject: nil),
         ]
+    }
+
+    /// The same session while it is still running: no summary yet, and Save waits for Stop.
+    static func runningSessionDetailState(shotFileURLs: [URL]) -> SessionDetailState {
+        var runningState = sessionDetailState(shotFileURLs: shotFileURLs, isSaved: false)
+        runningState.summary = nil
+        runningState.isFinished = false
+        return runningState
     }
 
     static func sessionDetailState(shotFileURLs: [URL], isSaved: Bool) -> SessionDetailState {

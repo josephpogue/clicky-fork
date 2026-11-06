@@ -48,6 +48,7 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var saveSheet: NSWindow?
     private var saveState: SaveToVaultState?
+    private var finishedSubscription: AnyCancellable?
 
     init(session: LoadedSession, store: SessionStore, onSaved: @escaping () -> Void, onClosed: @escaping (String) -> Void) {
         sessionID = session.metadata.id
@@ -57,6 +58,14 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
         self.onClosed = onClosed
         model = SessionDetailModel(state: Self.detailState(for: session, store: store, timeZone: timeZone, settings: AppSettings.shared))
         super.init()
+        // The window may have been opened while the session was still running. When the session finishes,
+        // show its finished log and summary, and let Save work.
+        finishedSubscription = SessionCoordinator.shared.sessionFinished
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] finishedSessionID in
+                guard let self, finishedSessionID == self.sessionID else { return }
+                Task { await self.reloadFromStore() }
+            }
     }
 
     func show() {
@@ -75,6 +84,18 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Replaces what the window holds with the session as the store has it now. Returns the fresh session,
+    /// or nil when it cannot be read (the window then keeps what it has).
+    @discardableResult
+    private func reloadFromStore() async -> LoadedSession? {
+        guard let freshSession = try? await store.loadSession(id: sessionID) else { return nil }
+        loadedSession = freshSession
+        let freshState = Self.detailState(for: freshSession, store: store, timeZone: timeZone, settings: settings)
+        model.state = freshState
+        window?.title = freshState.title
+        return freshSession
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -96,7 +117,8 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
                 SessionTimelineRow(
                     time: row.time, kind: rowKind(for: row.kind), text: row.text, detail: row.detail, shotFileURL: row.shotFileURL)
             },
-            savedNotePath: savedNotePath(for: session.metadata, settings: settings)
+            savedNotePath: savedNotePath(for: session.metadata, settings: settings),
+            isFinished: session.metadata.endedAt != nil
         )
     }
 
@@ -126,6 +148,16 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
     // MARK: - Save sheet
 
     private func presentSaveSheet() {
+        guard window != nil, saveSheet == nil else { return }
+        Task {
+            // Read the session again first: this window may hold an older copy than the store.
+            await reloadFromStore()
+            guard model.state.isFinished else { return }
+            showSaveSheet()
+        }
+    }
+
+    private func showSaveSheet() {
         guard let window, saveSheet == nil else { return }
         let state = makeSaveState()
         saveState = state
@@ -180,11 +212,12 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
     private func confirmSave(project: String?) {
         guard let saveState, let vaultRoot = currentVaultRoot() else { return }
         saveState.phase = .saving
-        let session = loadedSession
         let shotsDirectory = store.shotsDirectory(sessionID: sessionID)
         let isDryRun = VaultRootResolver.isDryRun(environment: ProcessInfo.processInfo.environment)
         let timeZone = timeZone
         Task {
+            // Filed from the session as the store has it at this moment, not as it was when the window opened.
+            let session = await reloadFromStore() ?? loadedSession
             // The copy and the git commit can take a moment, so they run off the main thread.
             let result = await Task.detached {
                 Self.writeToVault(
@@ -245,19 +278,21 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Writes where the session went into its own metadata and shows the saved strip.
+    /// Writes where the session went into its own metadata and shows the saved strip. The store loads the
+    /// metadata fresh and changes only the two save fields, so a finished session keeps its end time,
+    /// summary and cleanup flag.
     private func recordSave(notePath: URL, project: String?, vaultRoot: URL) {
         let rootPrefix = vaultRoot.standardizedFileURL.path + "/"
         let notePathText = notePath.standardizedFileURL.path
         let relativeNotePath = notePathText.hasPrefix(rootPrefix) ? String(notePathText.dropFirst(rootPrefix.count)) : notePathText
-        var metadata = loadedSession.metadata
-        metadata.savedVaultNotePath = relativeNotePath
-        metadata.savedProject = project
-        loadedSession.metadata = metadata
         model.state.savedNotePath = notePath.path
         let store = store
+        let sessionID = sessionID
         Task {
-            try? await store.updateMetadata(metadata)
+            if let savedMetadata = try? await store.recordSave(
+                sessionID: sessionID, savedVaultNotePath: relativeNotePath, savedProject: project) {
+                loadedSession.metadata = savedMetadata
+            }
             onSaved()
         }
     }
