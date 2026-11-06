@@ -366,7 +366,15 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     func phaseChanged(_ phase: SessionFlowPhase) async {
         lock.lock(); phases.append(phase)
         if phase == .listening { timeline.append("listening") }
+        var gate: TestGate?
+        if let index = phaseGates.firstIndex(where: { $0.phase == phase }) { gate = phaseGates.remove(at: index).gate }
         lock.unlock()
+        await gate?.pass()
+    }
+    private var phaseGates: [(phase: SessionFlowPhase, gate: TestGate)] = []
+    /// The next time the flow reports this phase, the report waits at this gate (the flow has already moved on inside).
+    func holdNextPhaseChange(to phase: SessionFlowPhase, at gate: TestGate) {
+        lock.lock(); phaseGates.append((phase, gate)); lock.unlock()
     }
     func questionAsked(_ text: String, answerNumber: Int) async {
         lock.lock()
@@ -427,6 +435,8 @@ final class FlowHarness: @unchecked Sendable {
     let flow: SessionQuestionFlow
     /// When set, the next screen capture waits here until the test opens the gate.
     let captureHold = CaptureHold()
+    /// When set, the next log write of a matching kind waits here until the test opens the gate.
+    let logHold = LogHold()
 
     private let lock = NSLock()
     private var transcriptions: [String] = []
@@ -444,6 +454,7 @@ final class FlowHarness: @unchecked Sendable {
         let claudeProvider = claude
         let chatgptProvider = chatgpt
         let captureHold = self.captureHold
+        let logHold = self.logHold
         let holder = state
         flow = SessionQuestionFlow(
             initialProvider: .claude,
@@ -463,7 +474,10 @@ final class FlowHarness: @unchecked Sendable {
                     await captureHold.takeGate()?.pass()
                     return holder.makeGroup(shots: screenShots)
                 },
-                logEvent: { [log] event in log.append(event) },
+                logEvent: { [log] event in
+                    await logHold.takeGate(for: event.kind)?.pass()
+                    log.append(event)
+                },
                 shotsDirectory: URL(fileURLWithPath: "/tmp/clicky-flow-test-shots", isDirectory: true),
                 timeZone: QuestionsFixtures.utc,
                 now: { holder.tick() },
@@ -500,6 +514,20 @@ final class CaptureHold: @unchecked Sendable {
     private var gate: TestGate?
     func holdNextCapture(at newGate: TestGate) { lock.lock(); gate = newGate; lock.unlock() }
     func takeGate() -> TestGate? { lock.lock(); defer { lock.unlock() }; let held = gate; gate = nil; return held }
+}
+
+/// Lets a test hold the next log write of one kind, the moment between the flow's checks and its next output call.
+final class LogHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var holds: [(matches: @Sendable (SessionEventKind) -> Bool, gate: TestGate)] = []
+    func holdNextWrite(where matches: @escaping @Sendable (SessionEventKind) -> Bool, at gate: TestGate) {
+        lock.lock(); holds.append((matches, gate)); lock.unlock()
+    }
+    func takeGate(for kind: SessionEventKind) -> TestGate? {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = holds.firstIndex(where: { $0.matches(kind) }) else { return nil }
+        return holds.remove(at: index).gate
+    }
 }
 
 /// Mutable bits behind the closures, kept in one lock so the harness stays Sendable.

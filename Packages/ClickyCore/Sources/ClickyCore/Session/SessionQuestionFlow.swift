@@ -14,8 +14,6 @@ public enum SessionSignalOutcome: Equatable, Sendable {
     case ignoredBecauseBusy
 }
 
-/// Everything the flow tells the screen. The app implements it and moves the words onto the chat window,
-/// the marker and the pointer; the flow itself knows nothing about windows.
 /// Why an answer ended before it was complete; the chat's last line for that answer says it.
 public enum AnswerCutReason: Sendable, Equatable {
     /// A newer question ended it: "(Cut short by your next question.)"
@@ -28,6 +26,15 @@ public enum AnswerCutReason: Sendable, Equatable {
     case completedAfterNewerQuestion
 }
 
+/// Everything the flow tells the screen. The app implements it and moves the words onto the chat window,
+/// the marker and the pointer; the flow itself knows nothing about windows.
+///
+/// The contract for answer reports (the app relies on it). Every question has its own `answerNumber`, given first by
+/// `questionAsked`. For each number the flow sends exactly one `answerReceived` or exactly one `answerCutShort`, or
+/// nothing (an answer Stop ended, or a question that never reached the provider). Every report for an answer a newer
+/// question already ended is nothing or that one `answerCutShort`, so a late report of an ended answer is never a
+/// second card. After a newer question or Stop ended an answer, no `answerReceived`, notice, usage-limit offer or
+/// pointer goes out for it. Once Stop begins nothing is reported at all.
 public protocol SessionFlowOutput: Sendable {
     func phaseChanged(_ phase: SessionFlowPhase) async
     /// `answerNumber` names this question's answer in every later answer report (text, checking line, tool call,
@@ -154,8 +161,9 @@ public actor SessionQuestionFlow {
     private var answersInFlight: Set<Int> = []
     /// The words of the question asked before the current one; "dig deeper" searches with them.
     private var previousQuestionText: String?
-    /// What the current answer has shown so far; nil between answers.
-    private var streamingAnswer: StreamingAnswerState?
+    /// What each running answer has shown so far, by question number; an entry leaves when its question ends. Keyed by
+    /// number so an ended answer's failure reports its own streamed text, never a newer answer's.
+    private var streamingAnswers: [Int: StreamingAnswerState] = [:]
     /// The provider's stop of the answer a new question ended, running off the listening path. The new question waits
     /// for it before it is transcribed, so the old answer is in the log first.
     private var pendingAnswerStop: Task<Void, Never>?
@@ -230,6 +238,8 @@ public actor SessionQuestionFlow {
         case .questionStarted(let date):
             switch phase {
             case .idle:
+                // Every question has its own number, also one asked with nothing running.
+                questionSerial += 1
                 await setPhase(.listening)
             case .waitingForAnswer:
                 // A new question ends the answer still coming. The number moves on first, so everything the old
@@ -238,11 +248,12 @@ public actor SessionQuestionFlow {
                 // answer is stopped off this path (see `stopEndedAnswerOffTheListeningPath`).
                 questionSerial += 1
                 phase = .listening
+                // The stop starts before the first await, so a send that arrives during any of them waits for it.
+                stopEndedAnswerOffTheListeningPath()
                 await output.phaseChanged(.listening)
                 guard !isFinished else { return .ignoredBecauseBusy }
                 await dependencies.markQuestionStarted(date)
                 await noteEvent(SessionEvent(time: date, kind: .questionStarted))
-                stopEndedAnswerOffTheListeningPath()
                 return .accepted
             case .listening, .transcribing:
                 return .ignoredBecauseBusy
@@ -396,17 +407,29 @@ public actor SessionQuestionFlow {
         if !passagePaths.isEmpty {
             await noteEvent(SessionEvent(time: now, kind: .passagesAttached(paths: passagePaths)))
         }
-        previousQuestionText = questionText
+        // A "dig deeper" question is not itself the earlier question the next "dig deeper" should search with.
+        if digDeeperMatch == nil { previousQuestionText = questionText }
         await output.questionAsked(questionText, answerNumber: serial)
 
         // Stop may have landed while the question was being logged and shown; nothing goes to the AI after it.
-        guard isCurrent(serial) else { return }
-        await setPhase(.waitingForAnswer(provider: askedProviderID))
-        guard isCurrent(serial) else { return }
-
-        streamingAnswer = StreamingAnswerState(group: currentGroup, provider: askedProviderID, model: request.model)
+        guard isCurrent(serial) else {
+            await reportEndedBeforeAnswering(serial: serial, provider: askedProviderID, model: request.model, notesRead: passagePaths)
+            return
+        }
+        // The phase, the in-flight mark and the streamed state are in place before the phase report is awaited: a new
+        // question tapped during that await is accepted, and this answer must already be known to it and to Stop.
+        phase = .waitingForAnswer(provider: askedProviderID)
+        streamingAnswers[serial] = StreamingAnswerState(group: currentGroup, provider: askedProviderID, model: request.model)
         answersInFlight.insert(serial)
-        defer { answersInFlight.remove(serial) }
+        defer {
+            answersInFlight.remove(serial)
+            streamingAnswers[serial] = nil
+        }
+        await output.phaseChanged(.waitingForAnswer(provider: askedProviderID))
+        guard isCurrent(serial) else {
+            await reportEndedBeforeAnswering(serial: serial, provider: askedProviderID, model: request.model, notesRead: passagePaths)
+            return
+        }
 
         // The dig deeper line is written once the provider has answered, because only then is it known whether the
         // stronger effort was really applied.
@@ -432,8 +455,8 @@ public actor SessionQuestionFlow {
                 return
             }
             guard !isFinished else { return }
-            let streamedState = streamingAnswer
-            streamingAnswer = nil
+            let streamedState = streamingAnswers[serial]
+            streamingAnswers[serial] = nil
             await noteDigDeeperAsked(for: answer)
             await showAnswer(
                 answer, for: turn, group: currentGroup, provider: askedProviderID,
@@ -444,7 +467,7 @@ public actor SessionQuestionFlow {
             guard !isFinished else { return }
             await noteDigDeeperAsked(for: nil)
             await showFailure(
-                failure, provider: askedProviderID, model: request.model, showsNotice: serial == questionSerial,
+                failure, provider: askedProviderID, model: request.model,
                 notesRead: passagePaths, serial: serial
             )
         } catch {
@@ -452,13 +475,22 @@ public actor SessionQuestionFlow {
             await noteDigDeeperAsked(for: nil)
             await showFailure(
                 .failed(message: "The answer could not be fetched."), provider: askedProviderID, model: request.model,
-                showsNotice: serial == questionSerial, notesRead: passagePaths, serial: serial
+                notesRead: passagePaths, serial: serial
             )
         }
         // A superseded question leaves the phase to the newer one.
         guard isCurrent(serial) else { return }
-        streamingAnswer = nil
         await setPhase(.idle)
+    }
+
+    /// The one ended report of a question that was shown but never reached the provider because a newer question took
+    /// over. After Stop began nothing is sent.
+    private func reportEndedBeforeAnswering(serial: Int, provider providerID: ProviderID, model: String, notesRead: [String]) async {
+        guard !isFinished, !isStopping else { return }
+        await output.answerCutShort(
+            answerNumber: serial, visibleText: "", provider: providerID, model: model, notesRead: notesRead,
+            reason: .newerQuestion
+        )
     }
 
     private static func withoutRepeats(_ paths: [String]) -> [String] {
@@ -471,7 +503,7 @@ public actor SessionQuestionFlow {
     /// A report from the provider while the answer is coming. Reports of an answer that a newer question or
     /// Stop ended are dropped.
     private func receiveProgress(_ progress: AnswerProgress, serial: Int) async {
-        guard isCurrent(serial), var state = streamingAnswer else { return }
+        guard isCurrent(serial), var state = streamingAnswers[serial] else { return }
         switch progress {
         case .textSoFar(let rawTextSoFar):
             let view = StreamingAnswerText.visible(rawTextSoFar: rawTextSoFar)
@@ -488,7 +520,7 @@ public actor SessionQuestionFlow {
                 state.flownTag = tag
                 pointerToFly = (mapped.point, mapped.shot.displayFrameInPoints, tag.label.flatMap { $0 == "none" ? nil : $0 })
             }
-            streamingAnswer = state
+            streamingAnswers[serial] = state
             if visibleTextChanged {
                 await output.answerTextChanged(answerNumber: serial, visibleText: view.visibleText, provider: state.provider, model: state.model)
             }
@@ -499,9 +531,9 @@ public actor SessionQuestionFlow {
             }
         case .toolCallStarted:
             let shouldShowLine = state.checkingNotesRule.toolCallStarted(visibleTextSoFar: state.visibleText)
-            streamingAnswer = state
+            streamingAnswers[serial] = state
             await output.toolCallStarted(answerNumber: serial)
-            if shouldShowLine { await output.checkingNotesShown(answerNumber: serial) }
+            if shouldShowLine, isCurrent(serial) { await output.checkingNotesShown(answerNumber: serial) }
         case .toolCallMade(let call):
             await noteEvent(SessionEvent(time: dependencies.now(), kind: .brainToolCalled(
                 tool: call.tool.rawValue, argument: call.argument
@@ -533,9 +565,10 @@ public actor SessionQuestionFlow {
         // pairing of reports to retired answers stays in step.
         guard !isStopping, !isFinished else { return }
         await output.answerCutShort(
-                answerNumber: serial,
+            answerNumber: serial,
             visibleText: StreamingAnswerText.visible(rawTextSoFar: answer.text).visibleText,
-            provider: providerID, model: answer.model, notesRead: notesRead, reason: .newerQuestion
+            provider: providerID, model: answer.model, notesRead: notesRead,
+            reason: answer.wasCutShort ? .newerQuestion : .completedAfterNewerQuestion
         )
     }
 
@@ -556,7 +589,7 @@ public actor SessionQuestionFlow {
         guard !parsed.spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             await showFailure(
                 .failed(message: "No answer came back. Try again."), provider: providerID,
-                model: answer.model, showsNotice: true, notesRead: notesRead, serial: serial
+                model: answer.model, notesRead: notesRead, serial: serial
             )
             return
         }
@@ -569,6 +602,19 @@ public actor SessionQuestionFlow {
             text: answer.text, provider: providerID, model: answer.model,
             secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel
         )))
+        // The log writes above were awaited, so a newer question or Stop may have taken over since the caller's check.
+        // The answer is then ended: its one report says so, and the screen, voice and pointer get nothing from it.
+        guard isCurrent(serial) else {
+            recordTurnInBudget(turn, answer: answer)
+            guard !isFinished, !isStopping else { return }
+            await output.answerCutShort(
+                answerNumber: serial,
+                visibleText: StreamingAnswerText.visible(rawTextSoFar: answer.text).visibleText,
+                provider: providerID, model: answer.model, notesRead: notesRead,
+                reason: answer.wasCutShort ? .newerQuestion : .completedAfterNewerQuestion
+            )
+            return
+        }
         if answer.wasCutShort {
             // The provider ended this answer on its own (the repeat guard) while it was still the current question:
             // it is not a complete answer, so the chat finishes the message as cut short instead of receiving it.
@@ -603,10 +649,11 @@ public actor SessionQuestionFlow {
         finalTag.coordinate != flownTag.coordinate || finalTag.screenNumber != flownTag.screenNumber
     }
 
-    /// Logs a failed answer. `showsNotice` is false for a question a newer question or Stop already replaced. When
-    /// the current answer had already shown text, its chat message is finished as cut short before the notice.
+    /// Logs a failed answer. Whether the answer is still the current one is decided after the log write, because a new
+    /// question can land during it; an ended answer shows no notice or offer, only its one ended report. When the
+    /// current answer had already shown text, its chat message is finished as cut short before the notice.
     private func showFailure(
-        _ failure: ProviderFailure, provider providerID: ProviderID, model: String, showsNotice: Bool,
+        _ failure: ProviderFailure, provider providerID: ProviderID, model: String,
         notesRead: [String] = [], serial: Int
     ) async {
         let notice = ProviderFailureNotice.text(for: failure, provider: providerID)
@@ -615,23 +662,27 @@ public actor SessionQuestionFlow {
         await noteEvent(SessionEvent(time: dependencies.now(), kind: .answerFailed(
             message: notice, provider: providerID, model: model, usageLimitReached: isUsageLimit
         )))
-        guard showsNotice else {
-            // A newer question already replaced this answer: no notice, but its one ended report still goes out so
-            // the app's pairing of reports to retired answers stays in step (it keeps the text it already has).
+        let streamedText = streamingAnswers[serial]?.visibleText ?? ""
+        guard isCurrent(serial) else {
+            // A newer question (or Stop) replaced this answer: no notice, but the one ended report still goes out so
+            // the app's pairing of reports to retired answers stays in step.
             if !isStopping, !isFinished {
                 await output.answerCutShort(
-                answerNumber: serial,
-                    visibleText: "", provider: providerID, model: model, notesRead: notesRead, reason: .newerQuestion
+                    answerNumber: serial, visibleText: streamedText, provider: providerID, model: model,
+                    notesRead: notesRead, reason: .newerQuestion
                 )
             }
             return
         }
-        if let streamedText = streamingAnswer?.visibleText, !streamedText.isEmpty {
-            streamingAnswer = nil
+        if !streamedText.isEmpty {
+            streamingAnswers[serial] = nil
             await output.answerCutShort(
                 answerNumber: serial,
                 visibleText: streamedText, provider: providerID, model: model, notesRead: notesRead, reason: .failed
             )
+            // The cut report took an await: a newer question may have landed in it, and then its notice would
+            // appear over that question's listening.
+            guard isCurrent(serial) else { return }
         }
         if isUsageLimit, providerID == .claude {
             await output.usageLimitOffered(message: notice, switchTo: .chatgpt)

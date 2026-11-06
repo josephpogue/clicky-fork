@@ -280,8 +280,8 @@ struct SessionQuestionFlowOverlapTests {
         await harness.askQuestion()
         _ = await first.value
 
-        // The one ended report the app pairs with the card it retired; no text is known, so the card keeps its own.
-        #expect(harness.output.cutShorts.map(\.visibleText) == [""])
+        // The one ended report the app pairs with the card it retired, with the text that had streamed (wave 2).
+        #expect(harness.output.cutShorts.map(\.visibleText) == ["Half"])
         #expect(harness.output.cutReasons == [.newerQuestion])
         #expect(harness.output.notices.isEmpty)
         #expect(harness.output.answers.map(\.spokenText) == ["Second."])
@@ -367,7 +367,7 @@ struct SessionQuestionFlowOverlapTests {
         #expect(harness.output.answers.map(\.spokenText) == ["Second."])
         // Still one ended report, so the app pairs it with the card it retired (and not a later answer's report).
         #expect(harness.output.cutShorts.map(\.visibleText) == ["The whole answer."])
-        #expect(harness.output.cutReasons == [.newerQuestion])
+        #expect(harness.output.cutReasons == [.completedAfterNewerQuestion])
     }
 
     @Test func anAnswerThatFailsAfterANewerQuestionEndedItStillReportsOnceWithNoNotice() async throws {
@@ -388,8 +388,8 @@ struct SessionQuestionFlowOverlapTests {
         await harness.askQuestion()
         _ = await second.value
 
-        // One report per ended answer, in question order: the failed first (no text known) then the cut second.
-        #expect(harness.output.cutShorts.map(\.visibleText) == ["", "Partial two"])
+        // One report per ended answer, in question order: the failed first, then the cut second, each with its own text.
+        #expect(harness.output.cutShorts.map(\.visibleText) == ["Partial one", "Partial two"])
         #expect(harness.output.cutReasons == [.newerQuestion, .newerQuestion])
         #expect(harness.output.notices.isEmpty)
         #expect(harness.output.answers.map(\.spokenText) == ["Third."])
