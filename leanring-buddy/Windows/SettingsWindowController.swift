@@ -20,6 +20,7 @@ final class SettingsWindowController {
     private let settings = AppSettings.shared
     private let accountsByProvider: [ProviderID: any ProviderAccount]
     private let state: SettingsState
+    private let answerDeliveryController = AnswerDeliverySettingsController()
     private var window: NSWindow?
     /// Providers whose sign-in the user cancelled, so the ended login shows as cancelled, not as a failure.
     private var providersWithCancelledSignIn: Set<ProviderID> = []
@@ -49,7 +50,7 @@ final class SettingsWindowController {
             let newWindow = WindowHosting.makeStandardWindow(
                 title: "Clicky Fork Settings", contentSize: Self.contentSize, isResizable: true, identifier: "settings.nswindow")
             newWindow.contentMinSize = CGSize(width: 480, height: 420)
-            newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state), contentSize: Self.contentSize)
+            newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state, answerDeliveryState: answerDeliveryController.state), contentSize: Self.contentSize)
             window = newWindow
         }
         reloadFromSettings()
@@ -197,6 +198,7 @@ final class SettingsWindowController {
 
     /// Copies the plain settings into the state each time the window opens.
     private func reloadFromSettings() {
+        answerDeliveryController.reloadFromSettings()
         state.selectedProviderName = settings.selectedProvider.windowDisplayName
         reloadNotesFolder()
         state.isSummaryAtStopEnabled = settings.summaryAtStopEnabled

@@ -12,10 +12,24 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var state: SettingsState
+    @ObservedObject var answerDeliveryState: AnswerDeliverySettingsState
+
+    /// `init(state:)` supplies a default answer-delivery state so previews that build `SettingsView(state:)` keep compiling;
+    /// the default shows Text with no voice row and never reads this Mac's voices.
+    @MainActor
+    init(state: SettingsState) {
+        self.init(state: state, answerDeliveryState: AnswerDeliverySettingsState())
+    }
+
+    init(state: SettingsState, answerDeliveryState: AnswerDeliverySettingsState) {
+        self.state = state
+        self.answerDeliveryState = answerDeliveryState
+    }
 
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 28) {
+                AnswerDeliverySettingsSection(state: answerDeliveryState)
                 providerSection
                 notesSection
                 permissionsSection
