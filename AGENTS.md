@@ -128,7 +128,7 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - Read only channel 0 of a microphone input with more than two channels (the test Mac's fake input has 16).
 - Tests write vault files only under a temporary `CLICKY_VAULT_ROOT`, never the user's real notes folder.
 - Spoken output goes through `SpeechOwner.shared` (one `AVSpeechSynthesizer`; `SpeechTurnTracker` in ClickyCore decides who is reported speaking), so a Settings sample and a session answer never talk over each other. Never create another `AVSpeechSynthesizer`.
-- A pointer flight carries a token (`PointerFlightTokens`): its hold and return timers and `finishFlight` act only for the current flight, never one a newer flight or Stop replaced.
+- A pointer flight carries a token (`PointerFlightTokens`): its hold and return timers and `finishFlight` act only for the current flight, never one a newer flight or Stop replaced. A new question ends a flight with `endCurrentFlightByReturningToCursor()`, never `cancelFlight` (which hides the whole overlay). The target counts in the bubble's clearance frame only while the pointer holds at it.
 - Run the `testenv/` driver commands only inside the test Mac, never on the host.
 - App-target logic that needs a test goes in a new file in `Packages/ClickyCore`: the app target has no test target because the GUI never launches on the build Mac.
 

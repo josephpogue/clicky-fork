@@ -634,7 +634,8 @@ final class SessionCoordinator: ObservableObject {
             // A new question replaces the last answer: its text goes and its reading stops.
             cursorAnswerPresenter.hideAll()
             spokenAnswerPlayer.stopAllSpeaking()
-
+            // The old pointer flies home, so the next answer sits by the cursor, not under the old label.
+            pointerFlight.endCurrentFlightByReturningToCursor()
             lastShownAudioLevel = 0
             chatWindowState.questionPhase = .listening(audioLevel: 0)
             markerPanel.show(phase: .listening(audioLevel: 0))
