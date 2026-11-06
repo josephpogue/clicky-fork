@@ -5,7 +5,7 @@ import Foundation
 /// (arguments, environment, stdin) and answers in the JSON line shapes the real CLI printed on 2026-11-05
 /// (codex-cli 0.155.1). The test picks its behaviour by writing a word into the `mode` file.
 ///
-/// Modes: normal, limit, unauthorized, hang, apikey, notloggedin, hangstatus (login status never answers),
+/// Modes: normal, twomessages (two agent messages), slowtwomessages (one message, then silence), limit, unauthorized, hang, apikey, notloggedin, hangstatus (login status never answers),
 /// quote401 (the answer quotes "401 Unauthorized" and stderr prints it too).
 final class CodexStandIn {
     let folder: URL
@@ -188,6 +188,19 @@ final class CodexStandIn {
       case "$mode" in
         hang)
           echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
+          exec sleep 1000 ;;
+        twomessages)
+          echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
+          echo '{"type":"turn.started"}'
+          echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"First finding."}}'
+          echo '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Second finding. [POINT:40,12:file menu]"}}'
+          echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+          exit 0 ;;
+        slowtwomessages)
+          # One message at once, then a long wait: a stop lands while the second message has not come.
+          echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
+          echo '{"type":"turn.started"}'
+          echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"First finding."}}'
           exec sleep 1000 ;;
         limit)
           echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
