@@ -52,7 +52,7 @@ Nothing is captured, heard or sent outside a session, and nothing goes to any AI
 | `Session/SessionCoordinator.swift` | Start and Stop: permissions check, session store, window tracker, screen recorder, speech pipeline, question key, provider; bridges `SessionQuestionFlow` to the chat state, marker and pointer. |
 | `Session/QuestionMarkerPanel.swift`, `Session/PointerFlight.swift` | The listening marker beside the cursor, and the pointer flight to an answer's point. |
 | `Session/CursorAnswerPresenter.swift`, `Session/CursorAttachedPanel.swift` | The answer, notice and speaker capsule beside the cursor: following, flipping, riding the pointer label, fading on a click or key. |
-| `Session/SpokenAnswerPlayer.swift` | Reads answers aloud with `AVSpeechSynthesizer`; `InstalledSpokenVoices` lists the Mac's voices for Settings. |
+| `Session/SpokenAnswerPlayer.swift` | `SpeechOwner` (the one synthesizer shared by session answers and the Settings sample) and the session's answer player; `InstalledSpokenVoices` lists the Mac's voices for Settings. |
 | `Views/AnswerBubbleView.swift`, `Views/SpeakingMarkerView.swift` | The answer bubble (short, long with the Open chat footer, notice) and the speaker capsule. |
 | `Views/AnswerDeliverySettingsSection.swift` | Settings' Showing answers section: Answer by chips, the Voice picker and Play sample. |
 | `Views/PanelChatRows.swift`, `Views/ChatWindowState+PanelSummary.swift` | The panel's Open chat row (answer count and the start of the last answer) and the usage-limit switch row. |
@@ -127,6 +127,8 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - New windows host SwiftUI through `Windows/WindowHosting.swift` with `sizingOptions = []`, and use the `DS` tokens and `PillOutline` from `DesignSystem.swift` and `WindowComponents.swift`.
 - Read only channel 0 of a microphone input with more than two channels (the test Mac's fake input has 16).
 - Tests write vault files only under a temporary `CLICKY_VAULT_ROOT`, never the user's real notes folder.
+- Spoken output goes through `SpeechOwner.shared` (one `AVSpeechSynthesizer`; `SpeechTurnTracker` in ClickyCore decides who is reported speaking), so a Settings sample and a session answer never talk over each other. Never create another `AVSpeechSynthesizer`.
+- A pointer flight carries a token (`PointerFlightTokens`): its hold and return timers and `finishFlight` act only for the current flight, never one a newer flight or Stop replaced.
 - Run the `testenv/` driver commands only inside the test Mac, never on the host.
 - App-target logic that needs a test goes in a new file in `Packages/ClickyCore`: the app target has no test target because the GUI never launches on the build Mac.
 
