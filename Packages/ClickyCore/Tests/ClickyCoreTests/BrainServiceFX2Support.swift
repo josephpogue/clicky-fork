@@ -27,3 +27,45 @@ struct BrainTempTree {
 
     func cleanUp() { try? FileManager.default.removeItem(at: root) }
 }
+
+/// Heavy synchronous work (SQLite builds, thousands of file writes) started on its OWN thread, never on Swift's
+/// cooperative pool. A test that runs such work on a pool thread holds that thread for seconds, and the timers and
+/// continuations of every other test in the same process wait behind it.
+final class DedicatedThreadJob<Result: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcome: Swift.Result<Result, Error>?
+    private var continuation: CheckedContinuation<Result, Error>?
+
+    init(_ work: @escaping @Sendable () throws -> Result) {
+        let thread = Thread { [self] in
+            let finished: Swift.Result<Result, Error>
+            do { finished = .success(try work()) } catch { finished = .failure(error) }
+            lock.lock()
+            outcome = finished
+            let waiting = continuation
+            continuation = nil
+            lock.unlock()
+            waiting?.resume(with: finished)
+        }
+        thread.qualityOfService = .utility
+        // Room for the deep recursion of a big folder walk.
+        thread.stackSize = 8 * 1024 * 1024
+        thread.start()
+    }
+
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return outcome != nil }
+
+    /// Suspends (without holding a pool thread) until the work ends, then returns its result or throws its error.
+    func value() async throws -> Result {
+        try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Result, Error>) in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                waiter.resume(with: outcome)
+            } else {
+                continuation = waiter
+                lock.unlock()
+            }
+        }
+    }
+}

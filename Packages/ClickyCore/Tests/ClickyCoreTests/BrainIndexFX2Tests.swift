@@ -54,24 +54,25 @@ struct BrainIndexReadsDuringUpdateTests {
         let index = try BrainIndex(databaseURL: url)
         try index.update(searchFolders: [smallFolder])
 
-        // A big folder to add: enough files that the build runs for a good while.
-        let bigFolder = try tree.folder("big")
-        for fileNumber in 0..<3_000 {
-            var text = "# Big \(fileNumber)\n\n"
-            for sectionNumber in 0..<6 {
-                text += "## Section \(sectionNumber)\n\n"
-                text += (0..<40).map { "bigword\(($0 * 7 + fileNumber + sectionNumber) % 500)" }.joined(separator: " ") + "\n\n"
+        // A big folder to add: enough files that the build runs for a good while. The writing and the build run on
+        // their own threads so they never hold a pool thread (the speech tests' timers share this process).
+        let bigFolder = tree.url("big")
+        try await DedicatedThreadJob<Void> {
+            for fileNumber in 0..<3_000 {
+                var text = "# Big \(fileNumber)\n\n"
+                for sectionNumber in 0..<6 {
+                    text += "## Section \(sectionNumber)\n\n"
+                    text += (0..<40).map { "bigword\(($0 * 7 + fileNumber + sectionNumber) % 500)" }.joined(separator: " ") + "\n\n"
+                }
+                try tree.write("big/d\(fileNumber % 30)/f\(fileNumber).md", text)
             }
-            try tree.write("big/d\(fileNumber % 30)/f\(fileNumber).md", text)
-        }
-        let updateDone = DoneFlag()
-        let builder = Task.detached {
+        }.value()
+        let builder = DedicatedThreadJob<Void> {
             _ = try index.update(searchFolders: [smallFolder, bigFolder])
-            updateDone.set()
         }
         // Let the walk end and the writing begin.
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(!updateDone.isSet, "the build must still be running for this test to mean anything")
+        #expect(!builder.isFinished, "the build must still be running for this test to mean anything")
 
         var slowestMilliseconds = 0.0
         for _ in 0..<5 {
@@ -83,8 +84,8 @@ struct BrainIndexReadsDuringUpdateTests {
             _ = try index.repositoryProjectNames()
             slowestMilliseconds = max(slowestMilliseconds, Date().timeIntervalSince(started) * 1000)
         }
-        let stillBuilding = !updateDone.isSet
-        _ = try await builder.value
+        let stillBuilding = !builder.isFinished
+        try await builder.value()
         #expect(stillBuilding, "the reads must have run while the build was running")
         #expect(slowestMilliseconds < 100, "slowest read round \(slowestMilliseconds) ms")
     }
@@ -106,7 +107,8 @@ struct BrainIndexWalkerSafetyTests {
         let index = try BrainIndex(databaseURL: url)
         let finished = DoneFlag()
         let summaryBox = SummaryBox()
-        Task.detached {
+        // Its own thread: if the open ever waits for a writer again, only this thread hangs, not the test pool.
+        Thread.detachNewThread {
             summaryBox.summary = try? index.update(searchFolders: [tree.root])
             finished.set()
         }
@@ -283,15 +285,18 @@ struct BrainIndexScoreFloorTests {
         #expect(deploy.first?.path.hasSuffix("release.md") == true)
     }
 
-    @Test func aLargerCorpusRaisesTheFloorButARareWordNoteStillAttaches() throws {
+    @Test func aLargerCorpusRaisesTheFloorButARareWordNoteStillAttaches() async throws {
         let tree = try BrainTempTree()
         let url = databaseURL()
         defer { tree.cleanUp(); removeDatabase(url) }
         try writeTestMacFixtureBrain(into: tree)
         try tree.write("Wiki/okapi.md", "# Okapi census\n\n## Okapi counts\n\nThe okapi census is counted every Tuesday.\n")
-        try writeFillerNotes(into: tree, count: 1_500)
         let index = try BrainIndex(databaseURL: url)
-        let summary = try index.update(searchFolders: [tree.root])
+        // The 1,500 files and their build run on their own thread, off the cooperative pool.
+        let summary = try await DedicatedThreadJob<BrainIndexUpdateSummary> {
+            try writeFillerNotes(into: tree, count: 1_500)
+            return try index.update(searchFolders: [tree.root])
+        }.value()
         #expect(summary.chunkCount > 4_000)
         #expect(index.currentScoreFloor() > 11)
         let okapi = try index.passages(

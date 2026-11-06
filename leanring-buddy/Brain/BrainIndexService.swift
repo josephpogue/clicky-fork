@@ -22,6 +22,21 @@ final class BrainIndexService: @unchecked Sendable {
     private var firstUnreadableFolderPath: String?
     private var cachedProjectNames: [String]?
     private var currentSearchFolderPaths: [String] = []
+    /// The folders the last COMPLETED update covered (written to `folders.json` so the helper can say a folder is still
+    /// being indexed). Nil until the first write reads it back from the file.
+    private var indexedFolderPaths: [String]?
+    /// False after the folder list file could not be written (twice) and the stale file could not be trusted:
+    /// passages stop being attached until a write succeeds, because the helper can no longer follow the list.
+    private var folderListFileIsCurrent = true
+    /// The folders the Claude helper was launched with at the last `toolServer()`. A passage is attached only for a
+    /// folder in this list AND in Settings now, the same rule the helper applies to `read_brain_file`. Nil while no
+    /// helper was launched (ChatGPT has none): the current list alone.
+    private var helperLaunchFolders: [URL]?
+
+    /// Index updates run here, on one dedicated thread, never on Swift's cooperative pool: an update is minutes of
+    /// synchronous SQLite and file work for a big folder, and blocking pool threads that long starves every other
+    /// task in the app (timers, streaming) as well as the tests that share the process.
+    private let indexUpdateQueue = DispatchQueue(label: "clicky.brain-index-update", qos: .utility)
 
     /// Called on the main actor each time the status line changes, so Settings shows it live.
     @MainActor var onStatusChange: ((BrainServiceStatus?) -> Void)?
@@ -67,13 +82,14 @@ final class BrainIndexService: @unchecked Sendable {
 
     /// The passages for one question; empty while the brain is off or nothing clears the floor.
     func passages(forQuestion question: String, frontAppName: String?, frontWindowTitle: String?) async -> [BrainPassage] {
-        guard isBrainOn else { return [] }
+        guard isBrainOn, isFolderListFileCurrent() else { return [] }
         let projectNames = await projectNamesForPassages()
         return await Task.detached(priority: .userInitiated) { [self] () -> [BrainPassage] in
             guard let index = openIndex() else { return [] }
             // The list as Settings has it right now, read at question time: a folder removed a moment ago is out
-            // even while a build still holds its rows.
-            let currentSearchFolders = BrainServiceFolders.expand(paths: lockedFolderPaths())
+            // even while a build still holds its rows. A folder added since the helper started is out too, because
+            // the helper refuses to read it (a passage the model cannot open is worse than none).
+            let currentSearchFolders = foldersTheSessionMayUse()
             do {
                 return try index.passages(
                     forQuestion: question, frontAppName: frontAppName, frontWindowTitle: frontWindowTitle,
@@ -92,10 +108,36 @@ final class BrainIndexService: @unchecked Sendable {
         let helperURL = helperFolder.appendingPathComponent("ClickyBrainTools", isDirectory: false)
         guard FileManager.default.isExecutableFile(atPath: helperURL.path) else { return nil }
         let searchFolders = BrainServiceFolders.expand(paths: folderPaths)
+        lock.lock()
+        helperLaunchFolders = searchFolders
+        lock.unlock()
         return BrainToolServer(
             executableURL: helperURL,
             arguments: BrainToolServer.helperArguments(
                 indexDatabaseURL: AppDataLocations.standard().brainIndexDatabaseURL, searchFolders: searchFolders))
+    }
+
+    /// Called when a session starts with a provider that has no helper (ChatGPT): its passages follow the current list.
+    func forgetHelperLaunchFolders() {
+        lock.lock()
+        helperLaunchFolders = nil
+        lock.unlock()
+    }
+
+    /// The current Settings list, narrowed to the folders the running helper was launched with when there is one.
+    private func foldersTheSessionMayUse() -> [URL] {
+        let currentSearchFolders = BrainServiceFolders.expand(paths: lockedFolderPaths())
+        lock.lock()
+        let launchFolders = helperLaunchFolders
+        lock.unlock()
+        guard let launchFolders else { return currentSearchFolders }
+        return BrainServiceFolderListFile.foldersInBoth(startList: launchFolders, currentList: currentSearchFolders)
+    }
+
+    private func isFolderListFileCurrent() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return folderListFileIsCurrent
     }
 
     /// The maps the instructions name: the knowledge base index under the notes folder and any indexed `registry.md`.
@@ -135,31 +177,61 @@ final class BrainIndexService: @unchecked Sendable {
         return request.run
     }
 
-    /// `<data>/brain-index/folders.json`: the current list, for the helper to re-read on every tool call. Written at
-    /// every list change and every refresh. With the brain off and no index folder yet, nothing is created.
+    /// `<data>/brain-index/folders.json`: the current list and the folders the last completed update covered, for the
+    /// helper to re-read on every tool call. Written at every list change, every refresh and every finished update.
+    /// With the brain off and no index folder yet, nothing is created. A write that fails is retried once; when it
+    /// still fails the stale file is removed (the helper then uses its launch list) and no passages are attached
+    /// until a write succeeds.
     private func writeFolderListFile(folderPaths: [String]) {
         let databaseURL = AppDataLocations.standard().brainIndexDatabaseURL
         let listFileURL = BrainServiceFolderListFile.url(besideIndexDatabase: databaseURL)
         if folderPaths.isEmpty,
            !FileManager.default.fileExists(atPath: databaseURL.deletingLastPathComponent().path) { return }
-        try? BrainServiceFolderListFile.write(folders: BrainServiceFolders.expand(paths: folderPaths), to: listFileURL)
+        let indexedFolders = indexedFoldersForListFile(listFileURL: listFileURL, databaseURL: databaseURL)
+        let succeeded = BrainServiceFolderListFile.writeRetryingOnce(
+            folders: BrainServiceFolders.expand(paths: folderPaths), indexedFolders: indexedFolders, to: listFileURL,
+            log: { NSLog("%@", $0) })
+        lock.lock()
+        folderListFileIsCurrent = succeeded
+        lock.unlock()
+    }
+
+    /// What the last completed update covered. In this launch it is remembered; before the first update of this
+    /// launch it is read back from the file (a bare list from the first wave counts as covered, as that service
+    /// indexed what it listed), and with no index database on disk nothing is covered.
+    private func indexedFoldersForListFile(listFileURL: URL, databaseURL: URL) -> [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        if indexedFolderPaths == nil {
+            if FileManager.default.fileExists(atPath: databaseURL.path),
+               let listing = BrainServiceFolderListFile.readListing(from: listFileURL) {
+                indexedFolderPaths = listing.indexedFolders ?? listing.folders
+            } else {
+                indexedFolderPaths = []
+            }
+        }
+        return (indexedFolderPaths ?? []).map { URL(fileURLWithPath: $0) }
     }
 
     private func startRun(folderPaths: [String]) {
         Task.detached(priority: .utility) { [self] in
             var folderPathsToRun = folderPaths
             while true {
-                let outcome = runIndexUpdate(folderPaths: folderPathsToRun)
+                let outcome = await runIndexUpdateOnItsOwnThread(folderPaths: folderPathsToRun)
                 lock.lock()
                 if let outcome {
                     lastSummary = outcome.summary
                     firstUnreadableFolderPath = outcome.firstUnreadableFolderPath
                     cachedProjectNames = nil
+                    indexedFolderPaths = outcome.coveredFolderPaths
                 }
+                let folderPathsNow = currentSearchFolderPaths
                 let nextRun = coalescer.finishRun()
                 let finishedWaiters = waitersByRun.filter { coalescer.hasCompleted(run: $0.run) }
                 waitersByRun.removeAll { coalescer.hasCompleted(run: $0.run) }
                 lock.unlock()
+                // The update is committed: tell the helper which folders it now covers, before any waiter is released.
+                if outcome != nil { writeFolderListFile(folderPaths: folderPathsNow) }
                 for waiter in finishedWaiters { waiter.continuation.resume() }
                 await publishStatusOnMain()
                 guard let nextRun else { return }
@@ -171,6 +243,16 @@ final class BrainIndexService: @unchecked Sendable {
     private struct RunOutcome {
         var summary: BrainIndexUpdateSummary
         var firstUnreadableFolderPath: String?
+        /// Every folder of the run's list (an unreadable one is named in the status line, not claimed as pending).
+        var coveredFolderPaths: [String]
+    }
+
+    private func runIndexUpdateOnItsOwnThread(folderPaths: [String]) async -> RunOutcome? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<RunOutcome?, Never>) in
+            indexUpdateQueue.async { [self] in
+                continuation.resume(returning: runIndexUpdate(folderPaths: folderPaths))
+            }
+        }
     }
 
     /// One index update. Never throws: on error the old index stays and the old status stays. An empty list empties
@@ -186,7 +268,8 @@ final class BrainIndexService: @unchecked Sendable {
         let unreadable = BrainServiceFolders.firstUnreadable(folders)
         do {
             let summary = try index.update(searchFolders: BrainServiceFolders.readable(folders))
-            return RunOutcome(summary: summary, firstUnreadableFolderPath: unreadable?.path)
+            return RunOutcome(
+                summary: summary, firstUnreadableFolderPath: unreadable?.path, coveredFolderPaths: folders.map(\.path))
         } catch {
             return nil
         }

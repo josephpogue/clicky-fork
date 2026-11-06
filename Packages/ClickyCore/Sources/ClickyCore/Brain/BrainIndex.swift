@@ -61,6 +61,9 @@ public final class BrainIndex: @unchecked Sendable {
     /// Under this many characters of room left, a passage is skipped instead of cut.
     static let minimumUsefulCutCharacters = 200
     static let candidateCount = 20
+    /// Rows fetched per wanted row when the result is filtered by the CURRENT folders afterwards, so rows of a removed
+    /// folder (still in the index until the next update) cannot crowd out a kept folder's hits.
+    public static let overFetchFactor = 5
 
     /// The connection updates write through (in a read-only index, the one connection there is).
     private let database: SQLiteDatabase
@@ -303,7 +306,10 @@ public final class BrainIndex: @unchecked Sendable {
     /// `O_NONBLOCK` keeps the open of a FIFO from waiting for a writer. Nil when the file is not a plain file with
     /// one name, is over the size cap, or cannot be read.
     static func readIndexableFile(atPath path: String) -> Data? {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        // `O_NOFOLLOW` covers only the last component; `O_NOFOLLOW_ANY` refuses a symlink in ANY component, so a parent
+        // folder swapped for a link between the walk's check and this open is not followed. Every stored path is
+        // already a resolved one, so a link anywhere in it means the tree changed since the walk.
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW_ANY | O_NONBLOCK)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var fileStatus = stat()
@@ -375,10 +381,15 @@ public final class BrainIndex: @unchecked Sendable {
     ) throws -> [BrainPassage] {
         readLock.lock()
         defer { readLock.unlock() }
-        var candidates = try searchLocked(query: question, limit: Self.candidateCount)
+        var candidates: [BrainPassage]
         if let searchFolders {
+            // Over-fetch, filter by the current folders, then cut to the candidate count.
             let reader = BrainFileReader(searchFolders: searchFolders)
-            candidates = candidates.filter { (try? reader.resolveReadableFile($0.path)) != nil }
+            candidates = try searchLocked(query: question, limit: Self.candidateCount * Self.overFetchFactor)
+                .filter { (try? reader.resolveReadableFile($0.path)) != nil }
+            if candidates.count > Self.candidateCount { candidates = Array(candidates.prefix(Self.candidateCount)) }
+        } else {
+            candidates = try searchLocked(query: question, limit: Self.candidateCount)
         }
         guard !candidates.isEmpty else { return [] }
 
