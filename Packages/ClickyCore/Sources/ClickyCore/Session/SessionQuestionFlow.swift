@@ -29,6 +29,9 @@ public protocol SessionFlowOutput: Sendable {
     func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async
     /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
     func checkingNotesShown() async
+    /// A newer question ended this answer while it was still coming. `visibleText` is what had arrived; the app
+    /// finishes the chat message as cut short and shows nothing else for it.
+    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async
     func noticeShown(_ text: String) async
     func usageLimitOffered(message: String, switchTo: ProviderID) async
     func usageLimitOfferCleared() async
@@ -41,6 +44,7 @@ public protocol SessionFlowOutput: Sendable {
 public extension SessionFlowOutput {
     func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {}
     func checkingNotesShown() async {}
+    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {}
 }
 
 /// The outside world the flow works through: the providers, the microphone's speech, the screen and the log.
