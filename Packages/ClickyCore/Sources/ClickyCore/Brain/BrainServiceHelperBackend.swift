@@ -37,11 +37,9 @@ public struct BrainServiceHelperBackend: BrainToolBackend {
             if !notice.isEmpty { return notice }
             throw error
         }
-        // The index may still hold rows of a removed folder until the next update; the reader is the boundary. Fetch
-        // more than asked, filter, then cut, so those rows cannot crowd out a kept folder's hits.
-        let wantedCount = max(limit, 1)
-        let candidates = try index.search(query: query, limit: wantedCount * BrainIndex.overFetchFactor)
-        let hits = candidates.filter { (try? reader.resolveReadableFile($0.path)) != nil }.prefix(wantedCount)
+        // The index may still hold rows of a removed folder until the next update; the reader is the boundary. The
+        // index pages through the ranked rows until `limit` readable hits are found or the rows run out.
+        let hits = try index.readableSearch(query: query, wantedCount: max(limit, 1), reader: reader)
         return notice + hits
     }
 

@@ -15,6 +15,10 @@ public struct BrainFileReader: Sendable {
     /// The search folders after resolving symlinks, computed once. A folder that does not exist keeps its standardized path.
     private let resolvedSearchFolderPaths: [String]
 
+    /// The search folders as the kernel names them (`F_GETPATH` of the opened folder): the on-disk case and spelling.
+    /// A folder that cannot be opened keeps its resolved path. Every path check accepts a match against either form.
+    private let canonicalSearchFolderPaths: [String]
+
     /// The search folders as given, standardized (no symlink resolution), for checking the path as the model typed it.
     private let givenSearchFolderPaths: [String]
 
@@ -27,6 +31,7 @@ public struct BrainFileReader: Sendable {
         self.resolvedSearchFolderPaths = searchFolders.map { folder in
             Self.resolvedPath(of: folder.path) ?? (folder.path as NSString).standardizingPath
         }
+        self.canonicalSearchFolderPaths = self.resolvedSearchFolderPaths.map { Self.canonicalPath(of: $0) ?? $0 }
     }
 
     /// The file a path names, after resolving symlinks, when it may be read. Throws `BrainFileRefusal` otherwise.
@@ -62,8 +67,15 @@ public struct BrainFileReader: Sendable {
             throw BrainFileRefusal.neverReadable
         }
 
-        let resolvedFilePath = Self.resolvedPathAllowingMissingTail(of: chosenCandidatePath)
+        var resolvedFilePath = Self.resolvedPathAllowingMissingTail(of: chosenCandidatePath)
         try refuseUnlessPermitted(resolvedPath: resolvedFilePath)
+        // The on-disk spelling, so a path typed in another case is judged and returned the way the disk names it.
+        // Used only when it passes the rules: a file with a second name can report that other name, and the open's
+        // own checks (one-link rule, descriptor path) are the boundary and name the right refusal.
+        if let canonicalFilePath = Self.canonicalPath(of: resolvedFilePath),
+           (try? refuseUnlessPermitted(resolvedPath: canonicalFilePath)) != nil {
+            resolvedFilePath = canonicalFilePath
+        }
 
         // Everything under a hidden folder inside a search folder (`.claude/settings.local.json`, `.config/gh/hosts.yml`)
         // holds tool state and logins. The search folder itself may sit inside a hidden folder.
@@ -109,7 +121,7 @@ public struct BrainFileReader: Sendable {
             // A second name for the same bytes (a hard link to a key file called notes.md) passes every path rule.
             guard fileStatus.st_nlink == 1 else { throw BrainFileRefusal.neverReadable }
             guard fileStatus.st_size <= Int64(Self.maximumFileBytes) else { throw BrainFileRefusal.notText }
-            try verifyDescriptorPath(descriptor, expectedPath: path)
+            try verifyDescriptorPath(descriptor)
         } catch {
             close(descriptor)
             throw error
@@ -118,14 +130,26 @@ public struct BrainFileReader: Sendable {
     }
 
     /// Reads the path the kernel says the descriptor is open on (`F_GETPATH`) and runs the path rules on it again, so a
-    /// swap between the check and the open cannot read a file outside the folders. A path that differs from the one
-    /// checked is refused too.
-    func verifyDescriptorPath(_ descriptor: Int32, expectedPath: String) throws {
+    /// swap between the check and the open cannot read a file outside the folders. The opened path is not required to
+    /// equal the checked one byte for byte: on a case-insensitive disk the kernel names the on-disk case, which differs
+    /// from a path typed in another case. With `O_NOFOLLOW_ANY` (no symlink in any component) and the one-link rule, the
+    /// opened file is the checked file, so equality would add no safety.
+    func verifyDescriptorPath(_ descriptor: Int32) throws {
         var pathBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
         guard fcntl(descriptor, F_GETPATH, &pathBuffer) == 0 else { throw BrainFileRefusal.notFound }
         let openedPath = String(cString: pathBuffer)
         try refuseUnlessPermitted(resolvedPath: openedPath)
-        guard openedPath == expectedPath else { throw BrainFileRefusal.notFound }
+    }
+
+    /// The path the kernel reports for an existing file or folder (`F_GETPATH`), the on-disk spelling. Nil when it
+    /// cannot be opened. The path is already symlink-free (realpath), and no symlink is followed.
+    static func canonicalPath(of path: String) -> String? {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW_ANY | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var pathBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        guard fcntl(descriptor, F_GETPATH, &pathBuffer) == 0 else { return nil }
+        return String(cString: pathBuffer)
     }
 
     private static func readBytes(from descriptor: Int32, upTo byteLimit: Int) throws -> Data {
@@ -148,7 +172,7 @@ public struct BrainFileReader: Sendable {
     /// inside another (`~/brain` and `~/brain/.claude/routing`), the nearer folder makes the path fine.
     private func isUnderHiddenFolderBelowEverySearchFolder(_ path: String) -> Bool {
         var foundContainingFolder = false
-        for folderPath in resolvedSearchFolderPaths + givenSearchFolderPaths {
+        for folderPath in resolvedSearchFolderPaths + canonicalSearchFolderPaths + givenSearchFolderPaths {
             let folderPrefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
             guard path.hasPrefix(folderPrefix) else { continue }
             foundContainingFolder = true
@@ -217,7 +241,7 @@ public struct BrainFileReader: Sendable {
     // MARK: Path handling
 
     private func isInsideSearchFolders(_ resolvedFilePath: String) -> Bool {
-        for folderPath in resolvedSearchFolderPaths {
+        for folderPath in resolvedSearchFolderPaths + canonicalSearchFolderPaths {
             if resolvedFilePath == folderPath { return true }
             // Component-wise: "/a/brain2" is not inside "/a/brain".
             let folderPrefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"

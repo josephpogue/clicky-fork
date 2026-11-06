@@ -351,15 +351,42 @@ public final class BrainIndex: @unchecked Sendable {
         return try searchLocked(query: query, limit: limit)
     }
 
-    private func searchLocked(query: String, limit: Int) throws -> [BrainPassage] {
+    /// The best `wantedCount` passages the reader may read, best first. Pages through the ranked rows until enough
+    /// readable ones are found or the rows run out, so rows of a removed folder (however many) cannot crowd out the kept
+    /// folders' hits. The reader is the boundary.
+    public func readableSearch(query: String, wantedCount: Int, reader: BrainFileReader) throws -> [BrainPassage] {
+        readLock.lock()
+        defer { readLock.unlock() }
+        return try readableSearchLocked(query: query, wantedCount: wantedCount, reader: reader)
+    }
+
+    private func readableSearchLocked(query: String, wantedCount: Int, reader: BrainFileReader) throws -> [BrainPassage] {
+        let wantedCount = max(wantedCount, 1)
+        let pageSize = wantedCount * Self.overFetchFactor
+        var readable: [BrainPassage] = []
+        var offset = 0
+        while readable.count < wantedCount {
+            let page = try searchLocked(query: query, limit: pageSize, offset: offset)
+            for passage in page where (try? reader.resolveReadableFile(passage.path)) != nil {
+                readable.append(passage)
+                if readable.count == wantedCount { break }
+            }
+            // A short page means the ranked rows are used up.
+            if page.count < pageSize { break }
+            offset += pageSize
+        }
+        return readable
+    }
+
+    private func searchLocked(query: String, limit: Int, offset: Int = 0) throws -> [BrainPassage] {
         guard let matchExpression = BrainSearchQuery.matchExpression(for: query) else { return [] }
         var passages: [BrainPassage] = []
         try readDatabase.prepare(
             """
             SELECT path, heading, start_line, end_line, body, -\(Self.rankExpression) AS score
-            FROM chunks WHERE chunks MATCH ? ORDER BY \(Self.rankExpression) LIMIT ?
+            FROM chunks WHERE chunks MATCH ? ORDER BY \(Self.rankExpression) LIMIT ? OFFSET ?
             """
-        ).rows([.text(matchExpression), .integer(Int64(max(limit, 1)))]) { row in
+        ).rows([.text(matchExpression), .integer(Int64(max(limit, 1))), .integer(Int64(max(offset, 0)))]) { row in
             passages.append(
                 BrainPassage(
                     path: row.text(at: 0) ?? "", heading: row.text(at: 1), startLine: Int(row.integer(at: 2)),
@@ -374,20 +401,19 @@ public final class BrainIndex: @unchecked Sendable {
     ///
     /// `searchFolders` is the CURRENT folder list: a passage whose file is not readable under it (a folder removed in
     /// Settings whose rows are still in the index, or a path that should never have been stored) is dropped. Nil skips
-    /// that check, for callers that have no list.
+    /// that check, for callers that have no list. `scoreFloorOverride` replaces the floor for this call only (tests;
+    /// the shared `passageScoreFloor` is global and tests run in parallel).
     public func passages(
         forQuestion question: String, frontAppName: String?, frontWindowTitle: String?, projectNames: [String],
-        searchFolders: [URL]? = nil
+        searchFolders: [URL]? = nil, scoreFloorOverride: Double? = nil
     ) throws -> [BrainPassage] {
         readLock.lock()
         defer { readLock.unlock() }
         var candidates: [BrainPassage]
         if let searchFolders {
-            // Over-fetch, filter by the current folders, then cut to the candidate count.
+            // Page through the ranked rows, keeping those the current folders allow, until the candidate count is met.
             let reader = BrainFileReader(searchFolders: searchFolders)
-            candidates = try searchLocked(query: question, limit: Self.candidateCount * Self.overFetchFactor)
-                .filter { (try? reader.resolveReadableFile($0.path)) != nil }
-            if candidates.count > Self.candidateCount { candidates = Array(candidates.prefix(Self.candidateCount)) }
+            candidates = try readableSearchLocked(query: question, wantedCount: Self.candidateCount, reader: reader)
         } else {
             candidates = try searchLocked(query: question, limit: Self.candidateCount)
         }
@@ -405,7 +431,7 @@ public final class BrainIndex: @unchecked Sendable {
             candidates.sort { $0.score > $1.score }
         }
 
-        let scoreFloor = Self.effectiveScoreFloor(override: Self.passageScoreFloor, chunkCount: try storedChunkCountLocked())
+        let scoreFloor = Self.effectiveScoreFloor(override: scoreFloorOverride ?? Self.passageScoreFloor, chunkCount: try storedChunkCountLocked())
         guard let topScore = candidates.first?.score, topScore >= scoreFloor else { return [] }
         var chosen: [BrainPassage] = []
         var passagesPerFile: [String: Int] = [:]

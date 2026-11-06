@@ -288,11 +288,8 @@ struct BrainFileReaderTests {
         let outsideDescriptor = open(fixture.outsideFile.path, O_RDONLY)
         #expect(outsideDescriptor >= 0)
         defer { close(outsideDescriptor) }
-        #expect(throwsRefusal { try reader.verifyDescriptorPath(outsideDescriptor, expectedPath: fixture.outsideFile.path) }
-            == .outsideSearchFolders)
-        // The checked path claims to be inside, but the descriptor is not that file: any difference is refused.
-        let insidePath = fixture.folder.path + "/notes/a.md"
-        #expect(throwsRefusal { try reader.verifyDescriptorPath(outsideDescriptor, expectedPath: insidePath) } != nil)
+        // Wave 3: the descriptor's own path is judged; it is no longer compared with the path that was checked.
+        #expect(throwsRefusal { try reader.verifyDescriptorPath(outsideDescriptor) } == .outsideSearchFolders)
     }
 
     @Test func descriptorInsideAHiddenFolderOrOnTheNeverReadableListIsRefused() throws {
@@ -304,7 +301,7 @@ struct BrainFileReaderTests {
             let path = fixture.folder.path + "/" + relativePath
             let descriptor = open(path, O_RDONLY)
             defer { close(descriptor) }
-            #expect(throwsRefusal { try reader.verifyDescriptorPath(descriptor, expectedPath: path) } == .neverReadable)
+            #expect(throwsRefusal { try reader.verifyDescriptorPath(descriptor) } == .neverReadable)
         }
     }
 
