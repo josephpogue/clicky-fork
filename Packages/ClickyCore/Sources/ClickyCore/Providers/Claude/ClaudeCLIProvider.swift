@@ -63,6 +63,9 @@ actor ClaudeConversationEngine {
     /// Earlier-turns text a freshly restarted process has not been told yet; it rides on the next question.
     private var recapWaitingForNextQuestion: String?
     private var nextControlRequestNumber = 0
+    /// Moves on every `startConversation` and `endConversation`. A question remembers the number it started under
+    /// and refuses to go on once it has moved, because the actor is re-entered whenever a question waits.
+    private var conversationGeneration = 0
 
     private static let modelChangeTimeoutSeconds = 10.0
     private static let gracePeriodSeconds = 1.0
@@ -82,20 +85,20 @@ actor ClaudeConversationEngine {
     // MARK: Conversation
 
     func startConversation(instructions: String, model: String, recap: String?) async throws {
+        conversationGeneration += 1
+        let generation = conversationGeneration
         await stopActiveProcess(gracePeriodSeconds: Self.gracePeriodSeconds)
+        // Another start or a Stop ran while the old process was being stopped: that call owns the state now.
+        try refuseWhenConversationMoved(since: generation)
         self.instructions = instructions
         openingRecap = recap
         answeredTurns = []
-        recapWaitingForNextQuestion = nil
+        // Nothing is sent to Claude here: starting the process sends nothing, and the recap rides on the first
+        // question, so nothing goes to any AI between questions.
+        recapWaitingForNextQuestion = recap
         hasStartedConversation = true
 
-        let process = try launchProcess(model: model)
-        guard let recap else { return }
-
-        // The recap is a real first message, so the tool has taken it in (and the login has been checked)
-        // before the first question arrives.
-        try process.send(Self.userLine(content: [Self.textBlock(recap)]))
-        _ = try await waitForResult(from: process)
+        _ = try launchProcess(model: model, generation: generation)
     }
 
     func ask(_ turn: QuestionTurn, model: String) async throws -> ProviderAnswer {
@@ -103,7 +106,10 @@ actor ClaudeConversationEngine {
             throw ProviderFailure.failed(message: "Claude is not started yet.")
         }
 
-        let process = try await processReady(forModel: model)
+        let generation = conversationGeneration
+        let process = try await processReady(forModel: model, generation: generation)
+        // Nothing suspends between this check and the send, so a Stop cannot slip in between them.
+        try refuseWhenConversationMoved(since: generation)
 
         var contentBlocks: [[String: Any]] = []
         if let recapText = recapWaitingForNextQuestion {
@@ -121,12 +127,14 @@ actor ClaudeConversationEngine {
         try process.send(Self.userLine(content: contentBlocks))
         recapWaitingForNextQuestion = nil
         let result = try await waitForResult(from: process)
+        try refuseWhenConversationMoved(since: generation)
 
         answeredTurns.append((question: turn.questionText, answer: result.text))
         return ProviderAnswer(text: result.text, model: model, secondsToAnswer: result.secondsToAnswer)
     }
 
     func endConversation() async {
+        conversationGeneration += 1
         hasStartedConversation = false
         await stopActiveProcess(gracePeriodSeconds: Self.gracePeriodSeconds)
     }
@@ -158,7 +166,17 @@ actor ClaudeConversationEngine {
 
     // MARK: Process lifecycle
 
-    private func launchProcess(model: String) throws -> ClaudeConversationProcess {
+    /// Throws when Stop or a new conversation ran since `generation` was taken, so a question that was waiting
+    /// never starts a process or sends a line for a conversation that is over.
+    private func refuseWhenConversationMoved(since generation: Int) throws {
+        if generation != conversationGeneration {
+            throw ProviderFailure.failed(message: "The question was stopped.")
+        }
+    }
+
+    private func launchProcess(model: String, generation: Int) throws -> ClaudeConversationProcess {
+        // The last gate before a process exists: no await sits between this check and the launch.
+        try refuseWhenConversationMoved(since: generation)
         let executableURL = try ClaudeCommandLine.resolveExecutable(explicit: explicitExecutableURL, environment: parentEnvironment)
         try? locations.createDirectories()
         let process = try ClaudeConversationProcess(
@@ -180,23 +198,27 @@ actor ClaudeConversationEngine {
 
     /// A running process answering with `model`: the current one, the current one switched in place,
     /// or a fresh one seeded with the earlier turns as text.
-    private func processReady(forModel model: String) async throws -> ClaudeConversationProcess {
+    private func processReady(forModel model: String, generation: Int) async throws -> ClaudeConversationProcess {
         guard let process = activeProcess, process.isRunning else {
             await stopActiveProcess(gracePeriodSeconds: 0)
-            return try restartSeededWithEarlierTurns(model: model)
+            return try restartSeededWithEarlierTurns(model: model, generation: generation)
         }
         if process.model == model { return process }
 
-        if await changeModelInPlace(of: process, to: model) {
+        let changedInPlace = await changeModelInPlace(of: process, to: model)
+        // Stop during the wait kills the process, which reads as a refused change; it must not restart one.
+        try refuseWhenConversationMoved(since: generation)
+        if changedInPlace {
             return process
         }
         await stopActiveProcess(gracePeriodSeconds: 0.2)
-        return try restartSeededWithEarlierTurns(model: model)
+        return try restartSeededWithEarlierTurns(model: model, generation: generation)
     }
 
-    private func restartSeededWithEarlierTurns(model: String) throws -> ClaudeConversationProcess {
+    private func restartSeededWithEarlierTurns(model: String, generation: Int) throws -> ClaudeConversationProcess {
+        try refuseWhenConversationMoved(since: generation)
         recapWaitingForNextQuestion = recapOfEarlierTurns()
-        return try launchProcess(model: model)
+        return try launchProcess(model: model, generation: generation)
     }
 
     /// Asks the running tool to switch models (the same `set_model` request the Claude Agent SDK sends).

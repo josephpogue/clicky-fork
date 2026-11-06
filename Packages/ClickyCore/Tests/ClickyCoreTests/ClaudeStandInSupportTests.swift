@@ -13,7 +13,8 @@ extension Array {
 struct ClaudeStandIn {
     static let defaultAnswer = "The Save button is at the top right. [POINT:1180,40:save button]"
 
-    /// How the stand-in behaves, passed through `STANDIN_MODE`.
+    /// How the stand-in behaves, read from the `mode` file next to the script (the provider hands the child only an
+    /// allowlist of environment variables, so a test cannot pass a mode through the environment).
     enum Mode: String {
         case normal
         /// Answers with the plan-limit error
@@ -28,6 +29,10 @@ struct ClaudeStandIn {
         case refuseModelChange = "nosetmodel"
         /// Answers the first question, then exits
         case exitAfterFirstAnswer = "exitafterfirst"
+        /// Takes 30 seconds to answer a model change request, so a test can press Stop in the middle of it
+        case slowModelChange = "slowsetmodel"
+        /// The one-shot run (the summary) ignores the polite stop request and never ends on its own
+        case ignoreTerminate = "ignoreterm"
     }
 
     let directory: URL
@@ -42,17 +47,40 @@ struct ClaudeStandIn {
         executableURL = directory.appendingPathComponent("claude")
         try Self.script.write(to: executableURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        try mode.rawValue.write(to: directory.appendingPathComponent("mode"), atomically: true, encoding: .utf8)
     }
 
-    /// The parent environment the provider is given: a real PATH, a stand-in API key that must not reach the child,
-    /// and a base URL that must not reach the child either.
+    /// Variables that must never reach a child: keys and tokens, a base URL, the keychain folder switch, and
+    /// other login folders.
+    static let variablesThatMustNotReachTheChild: [String: String] = [
+        "ANTHROPIC_API_KEY": "sk-test",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:1",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/elsewhere/keychain",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-test",
+        "OPENAI_API_KEY": "sk-openai-test",
+        "CODEX_HOME": "/elsewhere/codex",
+        "CLAUDE_CONFIG_DIR": "/elsewhere/claude",
+    ]
+
+    /// The parent environment the provider is given: a real PATH plus every variable that must not reach the child.
     var parentEnvironment: [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        environment["STANDIN_DIR"] = directory.path
-        environment["STANDIN_MODE"] = mode.rawValue
-        environment["ANTHROPIC_API_KEY"] = "sk-test"
-        environment["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:1"
+        for (name, value) in Self.variablesThatMustNotReachTheChild {
+            environment[name] = value
+        }
         return environment
+    }
+
+    /// What a child may have seen of the parent's environment: the allowlist, `LC_*`, and the app's own folder
+    /// variable. Python adds `__PYVENV_LAUNCHER__` to itself on macOS when it is started through a launcher.
+    static func unexpectedVariableNames(in childEnvironment: [String: String]) -> [String] {
+        let allowedNames: Set<String> = [
+            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM", "__CF_USER_TEXT_ENCODING",
+            "CLAUDE_CONFIG_DIR", "__PYVENV_LAUNCHER__",
+        ]
+        return childEnvironment.keys
+            .filter { !allowedNames.contains($0) && !$0.hasPrefix("LC_") }
+            .sorted()
     }
 
     func locations() -> AppDataLocations {
@@ -87,6 +115,12 @@ struct ClaudeStandIn {
         starts[safe: index]?["env"] as? [String: String] ?? [:]
     }
 
+    /// The environment of the auth run whose command word (after `auth`) is `command`.
+    func environment(ofAuthCommand command: String) -> [String: String]? {
+        let run = authRuns.first { ($0["argv"] as? [String])?[safe: 1] == command }
+        return run?["env"] as? [String: String]
+    }
+
     func pid(ofStart index: Int) -> Int {
         starts[safe: index]?["pid"] as? Int ?? -1
     }
@@ -116,11 +150,11 @@ struct ClaudeStandIn {
 
     private static let script = #"""
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, signal, sys, time
 
-directory = os.environ["STANDIN_DIR"]
-mode = os.environ.get("STANDIN_MODE", "normal")
-answer = os.environ.get("STANDIN_ANSWER", "The Save button is at the top right. [POINT:1180,40:save button]")
+directory = os.path.dirname(os.path.realpath(__file__))
+mode = open(os.path.join(directory, "mode")).read().strip()
+answer = "The Save button is at the top right. [POINT:1180,40:save button]"
 pid = os.getpid()
 argv = sys.argv[1:]
 
@@ -135,7 +169,8 @@ def emit(record):
 signed_in_marker = os.path.join(directory, "signed-in")
 
 if argv and argv[0] == "auth":
-    append("auth.jsonl", {"pid": pid, "argv": argv, "config": os.environ.get("CLAUDE_CONFIG_DIR")})
+    append("auth.jsonl", {"pid": pid, "argv": argv, "config": os.environ.get("CLAUDE_CONFIG_DIR"),
+                                  "env": dict(os.environ)})
     if argv[1] == "status":
         signed_in = os.path.exists(signed_in_marker)
         emit({"loggedIn": signed_in, "authMethod": "claude.ai" if signed_in else "none",
@@ -155,6 +190,9 @@ append("starts.jsonl", {"pid": pid, "argv": argv, "env": dict(os.environ)})
 if "--input-format" not in argv:
     prompt = sys.stdin.read()
     append("summarize.jsonl", {"pid": pid, "argv": argv, "stdin": prompt})
+    if mode == "ignoreterm":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        time.sleep(1000)
     if mode == "limit":
         print("You've hit your limit · resets 3pm")
         sys.exit(1)
@@ -182,6 +220,8 @@ for line in sys.stdin:
     append("stdin.jsonl", {"pid": pid, "message": message})
     if message["type"] == "control_request":
         request = message["request"]
+        if mode == "slowsetmodel":
+            time.sleep(30)
         if mode == "nosetmodel":
             emit({"type": "control_response", "response": {"subtype": "error",
                   "request_id": message["request_id"], "error": "Unsupported control request"}})

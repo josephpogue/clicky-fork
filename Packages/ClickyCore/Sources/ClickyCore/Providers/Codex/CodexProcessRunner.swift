@@ -27,7 +27,8 @@ final class CodexProcessRunner: @unchecked Sendable {
         environment: [String: String],
         workingDirectory: URL,
         timeoutSeconds: Double,
-        shouldStopAfterLine: (@Sendable (String) -> Bool)? = nil
+        shouldStopAfterLine: (@Sendable (String) -> Bool)? = nil,
+        shouldStillStart: (@Sendable () -> Bool)? = nil
     ) async -> CodexProcessResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -37,7 +38,8 @@ final class CodexProcessRunner: @unchecked Sendable {
                     environment: environment,
                     workingDirectory: workingDirectory,
                     timeoutSeconds: timeoutSeconds,
-                    shouldStopAfterLine: shouldStopAfterLine
+                    shouldStopAfterLine: shouldStopAfterLine,
+                    shouldStillStart: shouldStillStart
                 )
                 continuation.resume(returning: result)
             }
@@ -65,7 +67,8 @@ final class CodexProcessRunner: @unchecked Sendable {
         environment: [String: String],
         workingDirectory: URL,
         timeoutSeconds: Double,
-        shouldStopAfterLine: (@Sendable (String) -> Bool)?
+        shouldStopAfterLine: (@Sendable (String) -> Bool)?,
+        shouldStillStart: (@Sendable () -> Bool)?
     ) -> CodexProcessResult {
         let process = Process()
         process.executableURL = executableURL
@@ -81,16 +84,26 @@ final class CodexProcessRunner: @unchecked Sendable {
         let exitSemaphore = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exitSemaphore.signal() }
 
+        // The start check and the registration share one lock hold. `terminateEverything` takes the same lock, so a
+        // Stop either lands before this check (the process never starts) or after the registration (it is killed).
+        lock.lock()
+        if let shouldStillStart, !shouldStillStart() {
+            lock.unlock()
+            return CodexProcessResult(
+                outputLines: [], standardErrorText: "", exitStatus: -1,
+                didTimeOut: false, wasStoppedEarly: false, wasCancelled: true, couldNotStart: false
+            )
+        }
         do {
             try process.run()
         } catch {
+            lock.unlock()
             return CodexProcessResult(
                 outputLines: [], standardErrorText: "\(error.localizedDescription)", exitStatus: -1,
                 didTimeOut: false, wasStoppedEarly: false, wasCancelled: false, couldNotStart: true
             )
         }
         let processID = process.processIdentifier
-        lock.lock()
         runningProcessesByID[processID] = process
         lock.unlock()
 

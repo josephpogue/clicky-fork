@@ -18,6 +18,8 @@ enum CodexLoginState: Equatable {
     /// Logged in some other way; `detail` is the part before any key text, e.g. "Logged in using an API key".
     case otherLogin(detail: String)
     case unknown
+    /// Stop ended the status check before it answered.
+    case cancelled
 }
 
 /// Pure helpers for the text the `codex` tool prints and the text the app sends it.
@@ -38,7 +40,7 @@ enum CodexOutputParsing {
                 guard let item = object["item"] as? [String: Any], let itemType = item["type"] as? String else { continue }
                 if itemType == "agent_message", let text = item["text"] as? String {
                     output.answerText = text
-                } else if itemType == "error", let message = item["message"] as? String {
+                } else if itemType == "error", let message = item["message"] as? String, !isHarmlessNotice(message) {
                     output.errorMessages.append(message)
                 }
             case "error":
@@ -57,9 +59,34 @@ enum CodexOutputParsing {
         return output
     }
 
-    /// True for a line that proves the stored login does not work, so waiting for the retries is pointless.
+    /// Notices the CLI prints as error items on every turn that change nothing: with the tools off, code mode says it
+    /// fails closed, and a model name the CLI has no metadata for gets a fallback. They must not become the message
+    /// the chat shows when a turn fails for a real reason.
+    private static func isHarmlessNotice(_ message: String) -> Bool {
+        message.hasPrefix("Code Mode is unavailable") || message.hasPrefix("Model metadata for")
+    }
+
+    /// True for an error line that proves the stored login does not work, so waiting for the retries is pointless.
+    /// Only the CLI's own error and failed-turn lines count. The model's answer (`agent_message`) can quote
+    /// "401 Unauthorized" off the user's screen and must never be read as a rejected login.
     static func lineShowsRejectedLogin(_ line: String) -> Bool {
-        line.contains("401 Unauthorized")
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else { return false }
+
+        var errorText: String?
+        switch type {
+        case "error":
+            errorText = object["message"] as? String
+        case "turn.failed":
+            errorText = (object["error"] as? [String: Any])?["message"] as? String
+        case "item.completed":
+            guard let item = object["item"] as? [String: Any], item["type"] as? String == "error" else { return false }
+            errorText = item["message"] as? String
+        default:
+            return false
+        }
+        return errorText?.contains("401 Unauthorized") ?? false
     }
 
     /// Turns the messages a failed run printed into the failure the chat should show.
@@ -123,10 +150,14 @@ enum CodexOutputParsing {
 
     // MARK: Text sent to the CLI
 
-    /// The prompt for a question: each image label in order, the context note, then the question.
+    /// The prompt for a question: the recap of earlier turns when the conversation has one that no thread holds yet
+    /// (as Claude does, ahead of everything else), each image label in order, the context note, then the question.
     /// The images themselves travel in `-i` arguments in the same order.
-    static func promptText(for turn: QuestionTurn) -> String {
+    static func promptText(for turn: QuestionTurn, recap: String? = nil) -> String {
         var sections: [String] = []
+        if let recap {
+            sections.append(recap)
+        }
         if !turn.images.isEmpty {
             let labelLines = turn.images.enumerated().map { index, image in
                 "Image \(index + 1): \(image.label)"

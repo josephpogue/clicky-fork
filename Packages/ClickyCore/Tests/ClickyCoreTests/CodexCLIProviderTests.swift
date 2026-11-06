@@ -203,6 +203,79 @@ struct CodexCLIProviderTests {
         #expect(second.model == "b")
     }
 
+    // MARK: Tools off, stdin closed, sandbox
+
+    /// Features from `codex features list` (codex-cli 0.155.1) that give the model a tool and are on by default.
+    private let toolFeaturesThatMustBeOff = [
+        "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+        "computer_use", "code_mode_host", "image_generation", "view_image", "plugins", "multi_agent", "in_app_browser",
+    ]
+
+    private func expectEveryToolIsOff(in arguments: [String]) {
+        for feature in toolFeaturesThatMustBeOff {
+            let hasPair = arguments.indices.contains { index in
+                arguments[index] == "--disable" && arguments[safe: index + 1] == feature
+            }
+            #expect(hasPair, "\(feature) is not disabled")
+        }
+        let configPairs = arguments.indices.compactMap { index -> String? in
+            arguments[index] == "-c" ? arguments[safe: index + 1] : nil
+        }
+        #expect(configPairs.contains("web_search=\"disabled\""))
+        #expect(configPairs.contains("tools.web_search=false"))
+    }
+
+    @Test func firstTurnTurnsEveryModelToolOff() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+
+        _ = try await provider.ask(textOnlyTurn(), model: "a")
+
+        expectEveryToolIsOff(in: try #require(standIn.recordedExecCalls().first))
+    }
+
+    @Test func resumedTurnTurnsEveryModelToolOffAndKeepsTheReadOnlySandbox() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        _ = try await provider.ask(textOnlyTurn("one"), model: "a")
+
+        _ = try await provider.ask(textOnlyTurn("two"), model: "a")
+
+        let resumeArguments = try #require(standIn.recordedExecCalls().last)
+        #expect(resumeArguments.starts(with: ["exec", "resume"]))
+        expectEveryToolIsOff(in: resumeArguments)
+        let configPairs = resumeArguments.indices.compactMap { index -> String? in
+            resumeArguments[index] == "-c" ? resumeArguments[safe: index + 1] : nil
+        }
+        #expect(configPairs.contains("sandbox_mode=\"read-only\""))
+        #expect(!resumeArguments.contains("-s"))
+    }
+
+    @Test func summaryRunAlsoTurnsEveryModelToolOff() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+
+        _ = try await provider.summarize("text", instructions: "", model: "a")
+
+        expectEveryToolIsOff(in: try #require(standIn.recordedExecCalls().first))
+    }
+
+    @Test func everyExecRunsWithStandardInputOnDevNull() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        _ = try await provider.ask(textOnlyTurn("one"), model: "a")
+        _ = try await provider.ask(textOnlyTurn("two"), model: "a")
+
+        let calls = standIn.recordedCalls()
+        #expect(calls.count == 3)
+        for callNumber in 1...calls.count {
+            #expect(standIn.recordedStandardInputWasDevNull(callNumber: callNumber) == true, "call \(callNumber)")
+        }
+    }
+
     // MARK: Start and end of a conversation
 
     @Test func startingAgainForgetsTheThread() async throws {
@@ -219,7 +292,7 @@ struct CodexCLIProviderTests {
         #expect(!execCalls[1].contains("resume"))
     }
 
-    @Test func recapIsSentAsTheFirstTurnOfTheNewThreadAndTheNextAskResumesIt() async throws {
+    @Test func startingWithARecapMakesNoCallAtAll() async throws {
         let standIn = try CodexStandIn()
         let provider = standIn.makeProvider()
 
@@ -228,16 +301,78 @@ struct CodexCLIProviderTests {
             model: "a",
             recap: "Q: how do I save? A: Press Command S."
         )
+
+        // Nothing goes to ChatGPT between questions: not even the login check runs before the first ask.
+        #expect(standIn.recordedCalls().isEmpty)
+    }
+
+    @Test func recapThenStopBeforeAnyAskMakesNoCallAndHasNoThreadToDelete() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: "Q: a A: b")
+
+        await provider.endConversation()
+
+        #expect(standIn.recordedCalls().isEmpty)
+    }
+
+    @Test func firstAskCarriesTheRecapAheadOfTheQuestionAndTheNextAskResumesWithoutIt() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(
+            instructions: "Be brief.",
+            model: "a",
+            recap: "Earlier in this session: Q: how do I save? A: Press Command S."
+        )
+
         _ = try await provider.ask(textOnlyTurn("and print?"), model: "a")
+        _ = try await provider.ask(textOnlyTurn("and quit?"), model: "a")
+
+        // Call 1 is the login check, call 2 the first exec (recap and question in one turn), call 3 the resume.
+        let execCalls = standIn.recordedExecCalls()
+        #expect(execCalls.count == 2)
+        #expect(!execCalls[0].contains("resume"))
+        let firstPrompt = try #require(execCalls[0].first { $0.contains("Question: and print?") })
+        #expect(firstPrompt == "Earlier in this session: Q: how do I save? A: Press Command S.\n\nQuestion: and print?")
+        #expect(execCalls[1].contains("resume"))
+        #expect(execCalls[1].contains("thread-standin-2"))
+        #expect(!execCalls[1].contains { $0.contains("Press Command S.") })
+    }
+
+    @Test func recapRidesOnTheFirstQuestionOfAFreshConversationAfterTheFifteenTurnRestart() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        _ = try await provider.ask(textOnlyTurn("one"), model: "a")
+
+        // The session restarts the conversation the way it does after 15 turns: end, then start with a recap.
+        await provider.endConversation()
+        try await provider.startConversation(instructions: "", model: "a", recap: "Earlier in this session: one.")
+        let callsBeforeAsk = standIn.recordedCalls().count
+        _ = try await provider.ask(textOnlyTurn("two"), model: "a")
+
+        let newCalls = Array(standIn.recordedCalls().dropFirst(callsBeforeAsk))
+        // Only the login check and one exec; no extra call for the recap, and a new thread (no resume).
+        #expect(newCalls.map { $0.first } == ["login", "exec"])
+        let exec = try #require(newCalls.last)
+        #expect(!exec.contains("resume"))
+        #expect(exec.contains { $0.hasPrefix("Earlier in this session: one.") && $0.hasSuffix("Question: two") })
+    }
+
+    @Test func aFailedFirstQuestionKeepsTheRecapForTheNextTry() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: "Earlier in this session: one.")
+        standIn.setMode("limit")
+        _ = try? await provider.ask(textOnlyTurn("two"), model: "a")
+
+        standIn.setMode("normal")
+        _ = try await provider.ask(textOnlyTurn("two again"), model: "a")
 
         let execCalls = standIn.recordedExecCalls()
         #expect(execCalls.count == 2)
-        let recapPrompt = try #require(execCalls[0].first { $0.contains("Earlier in this session") })
-        #expect(recapPrompt.contains("Q: how do I save? A: Press Command S."))
-        #expect(!execCalls[0].contains("resume"))
-        // The recap turn was call 2 (call 1 was the login check), so its thread is thread-standin-2.
-        #expect(execCalls[1].contains("resume"))
-        #expect(execCalls[1].contains("thread-standin-2"))
+        #expect(execCalls[1].contains { $0.hasPrefix("Earlier in this session: one.") })
+        #expect(!execCalls[1].contains("resume"))
     }
 
     @Test func summarizeIsAOneOffTextRunThatKeepsNoThread() async throws {
@@ -438,6 +573,98 @@ struct CodexCLIProviderTests {
             let environment = standIn.recordedEnvironment(callNumber: index + 1)
             #expect(environment["OPENAI_API_KEY"] == nil)
             #expect(environment["CODEX_API_KEY"] == nil)
+        }
+    }
+
+    // MARK: Stop, and answers that quote errors
+
+    @Test func askBeforeStartingOrAfterStopIsRefusedWithNoCall() async throws {
+        let standIn = try CodexStandIn()
+        let provider = standIn.makeProvider()
+
+        await #expect(throws: ProviderFailure.self) {
+            _ = try await provider.ask(textOnlyTurn(), model: "a")
+        }
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        await provider.endConversation()
+        await #expect(throws: ProviderFailure.self) {
+            _ = try await provider.ask(textOnlyTurn(), model: "a")
+        }
+
+        #expect(standIn.recordedCalls().isEmpty)
+    }
+
+    @Test func stopDuringTheLoginCheckStopsTheQuestionAndRunsNoExec() async throws {
+        let standIn = try CodexStandIn()
+        standIn.setMode("hangstatus")
+        let provider = standIn.makeProvider(answerTimeoutSeconds: 60)
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+
+        let pendingAsk = Task { () -> ProviderFailure? in
+            do {
+                _ = try await provider.ask(textOnlyTurn(), model: "a")
+                return nil
+            } catch {
+                return error as? ProviderFailure
+            }
+        }
+        #expect(await standIn.waitForCall(callNumber: 1, seconds: 5))
+        await provider.endConversation()
+
+        let failure = await pendingAsk.value
+        guard case .failed = failure else {
+            Issue.record("expected the question to be stopped, got \(String(describing: failure))")
+            return
+        }
+        // The killed status check was not read as signed in, so nothing was sent to ChatGPT.
+        #expect(standIn.recordedExecCalls().isEmpty)
+        // No thread exists, so Stop deleted nothing either.
+        #expect(standIn.recordedCalls().filter { $0.first == "delete" }.isEmpty)
+    }
+
+    @Test func anAnswerThatQuotesA401IsShownAndNotTakenForARejectedLogin() async throws {
+        let standIn = try CodexStandIn()
+        standIn.setMode("quote401")
+        let provider = standIn.makeProvider()
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+
+        let answer = try await provider.ask(textOnlyTurn("what does this page say"), model: "a")
+
+        #expect(answer.text == "The page says 401 Unauthorized, so sign in first. [POINT:40,12:sign in]")
+    }
+
+    // MARK: Child environment
+
+    @Test func everyCallGetsOnlyAllowedVariablesAndTheAppsCodexHome() async throws {
+        let standIn = try CodexStandIn()
+        var parentEnvironment = ProcessInfo.processInfo.environment
+        for (name, value) in ClaudeStandIn.variablesThatMustNotReachTheChild {
+            parentEnvironment[name] = value
+        }
+        let provider = standIn.makeProvider(environment: parentEnvironment)
+        let account = standIn.makeAccount(environment: parentEnvironment)
+        try await provider.startConversation(instructions: "", model: "a", recap: nil)
+        _ = try await provider.ask(textOnlyTurn("one"), model: "a")
+        _ = try await provider.ask(textOnlyTurn("two"), model: "a")
+        _ = try await provider.summarize("text", instructions: "", model: "a")
+        await provider.endConversation()
+        _ = await account.status()
+        try await account.signIn()
+        try await account.signOut()
+        _ = await account.availableModels()
+
+        let calls = standIn.recordedCalls()
+        // login status, exec, resume, summary exec, delete, status, login, logout, debug models
+        #expect(calls.count == 9)
+        let allowedNames: Set<String> = [
+            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM", "__CF_USER_TEXT_ENCODING",
+            "CODEX_HOME", "PWD", "SHLVL", "_", "OLDPWD",  // the last four are set by bash itself
+        ]
+        for callNumber in 1...calls.count {
+            let environment = standIn.recordedEnvironment(callNumber: callNumber)
+            let unexpected = environment.keys.filter { !allowedNames.contains($0) && !$0.hasPrefix("LC_") }
+            #expect(unexpected.isEmpty, "call \(callNumber) got \(unexpected.sorted())")
+            #expect(environment["CODEX_HOME"] == standIn.locations.codexHomeDirectory.path, "call \(callNumber)")
         }
     }
 }

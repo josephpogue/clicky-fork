@@ -32,23 +32,21 @@ public enum ProviderProcessSupport {
         return nil
     }
 
-    /// The environment a CLI child process gets: no API keys or tokens (the app is subscription only),
-    /// and no inherited login folders, plus the app's own variables on top.
+    /// The only variables a CLI child inherits from the app. Everything else is left out, so no key, token, base URL,
+    /// keychain-folder switch (such as `CLAUDE_SECURESTORAGE_CONFIG_DIR`) or login folder can reach a child and make
+    /// the sign-in act on the user's own Claude Code or Codex login.
+    static let inheritedVariableNames: Set<String> = [
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM", "__CF_USER_TEXT_ENCODING",
+    ]
+
+    /// The environment a CLI child process gets: only the variables in `inheritedVariableNames` and the `LC_*`
+    /// locale ones from `base`, plus the app's own variables (its `CLAUDE_CONFIG_DIR` or `CODEX_HOME`) on top.
     public static func scrubbedEnvironment(
         base: [String: String],
         adding extraVariables: [String: String]
     ) -> [String: String] {
-        let namesToRemove: Set<String> = [
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "OPENAI_API_KEY",
-            "CODEX_API_KEY",
-            "CLAUDE_CONFIG_DIR",
-            "CODEX_HOME",
-        ]
         var result = base.filter { name, _ in
-            !namesToRemove.contains(name) && !name.hasSuffix("_API_KEY")
+            inheritedVariableNames.contains(name) || name.hasPrefix("LC_")
         }
         for (name, value) in extraVariables {
             result[name] = value

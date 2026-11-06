@@ -43,14 +43,21 @@ struct CodexCLISetup: Sendable {
         }
     }
 
-    func readLoginState(runner: CodexProcessRunner, executableURL: URL) async -> CodexLoginState {
+    func readLoginState(
+        runner: CodexProcessRunner,
+        executableURL: URL,
+        shouldStillStart: (@Sendable () -> Bool)? = nil
+    ) async -> CodexLoginState {
         let result = await runner.run(
             executableURL: executableURL,
             arguments: ["login", "status"],
             environment: childEnvironment,
             workingDirectory: locations.providerWorkingDirectory,
-            timeoutSeconds: 15
+            timeoutSeconds: 15,
+            shouldStillStart: shouldStillStart
         )
+        // Stop ended the check. That says nothing about the login, so it must not read as signed in.
+        if result.wasCancelled { return .cancelled }
         if result.couldNotStart || result.didTimeOut { return .unknown }
         let combinedText = result.outputLines.joined(separator: "\n") + "\n" + result.standardErrorText
         return CodexOutputParsing.parseLoginState(from: combinedText)

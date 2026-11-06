@@ -5,7 +5,8 @@ import Foundation
 /// (arguments, environment, stdin) and answers in the JSON line shapes the real CLI printed on 2026-11-05
 /// (codex-cli 0.155.1). The test picks its behaviour by writing a word into the `mode` file.
 ///
-/// Modes: normal, limit, unauthorized, hang, apikey, notloggedin.
+/// Modes: normal, limit, unauthorized, hang, apikey, notloggedin, hangstatus (login status never answers),
+/// quote401 (the answer quotes "401 Unauthorized" and stderr prints it too).
 final class CodexStandIn {
     let folder: URL
     let executableURL: URL
@@ -98,6 +99,13 @@ final class CodexStandIn {
         return try? String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// True when the stand-in saw its standard input as /dev/null in call number `callNumber`.
+    func recordedStandardInputWasDevNull(callNumber: Int) -> Bool? {
+        let file = folder.appendingPathComponent("calls/\(callNumber).stdinisnull")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines) == "yes"
+    }
+
     func recordedProcessID(callNumber: Int) -> Int32? {
         let file = folder.appendingPathComponent("calls/\(callNumber).pid")
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
@@ -145,9 +153,11 @@ final class CodexStandIn {
     env > "$dir/calls/$number.env"
     pwd > "$dir/calls/$number.cwd"
     echo $$ > "$dir/calls/$number.pid"
+    if [ /dev/stdin -ef /dev/null ]; then echo yes > "$dir/calls/$number.stdinisnull"; else echo no > "$dir/calls/$number.stdinisnull"; fi
 
     if [ "$1" = "login" ] && [ "$2" = "status" ]; then
       case "$mode" in
+        hangstatus) exec sleep 1000 ;;
         notloggedin) echo "Not logged in" >&2; exit 1 ;;
         apikey) echo "Logged in using an API key - sk-proj-***abcd" >&2; exit 0 ;;
         *) echo "Logged in using ChatGPT" >&2; exit 0 ;;
@@ -190,6 +200,13 @@ final class CodexStandIn {
           echo '{"type":"turn.started"}'
           echo '{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: wss://api.openai.com/v1/responses)"}'
           exec sleep 1000 ;;
+        quote401)
+          echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
+          echo '{"type":"turn.started"}'
+          echo "401 Unauthorized: the page you showed me said this" >&2
+          echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The page says 401 Unauthorized, so sign in first. [POINT:40,12:sign in]"}}'
+          echo '{"type":"turn.completed","usage":{"input_tokens":22663,"cached_input_tokens":12160,"output_tokens":25}}'
+          exit 0 ;;
         *)
           echo "{\"type\":\"thread.started\",\"thread_id\":\"$thread\"}"
           echo '{"type":"turn.started"}'

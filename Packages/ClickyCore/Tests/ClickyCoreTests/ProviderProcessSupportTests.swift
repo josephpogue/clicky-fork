@@ -3,13 +3,24 @@ import Testing
 @testable import ClickyCore
 
 struct ProviderProcessSupportTests {
-    @Test func scrubbedEnvironmentDropsKeysAndLoginFoldersThenAddsTheGivenOnes() {
+    @Test func scrubbedEnvironmentKeepsOnlyTheAllowlistAndLocaleThenAddsTheGivenOnes() {
         let base = [
             "PATH": "/usr/bin",
+            "HOME": "/h",
+            "USER": "u",
+            "LOGNAME": "u",
+            "SHELL": "/bin/zsh",
+            "TMPDIR": "/tmp/",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "LC_CTYPE": "UTF-8",
+            "TERM": "xterm",
+            "__CF_USER_TEXT_ENCODING": "0x1F5:0:0",
             "ANTHROPIC_API_KEY": "x",
             "MY_API_KEY": "y",
             "CODEX_HOME": "/elsewhere",
-            "HOME": "/h",
+            "STANDIN_LOG_DIR": "/log",
+            "HTTPS_PROXY": "http://proxy",
         ]
 
         let result = ProviderProcessSupport.scrubbedEnvironment(
@@ -17,22 +28,28 @@ struct ProviderProcessSupportTests {
             adding: ["CODEX_HOME": "/app/codex"]
         )
 
-        #expect(result == ["PATH": "/usr/bin", "HOME": "/h", "CODEX_HOME": "/app/codex"])
+        #expect(result == [
+            "PATH": "/usr/bin", "HOME": "/h", "USER": "u", "LOGNAME": "u", "SHELL": "/bin/zsh", "TMPDIR": "/tmp/",
+            "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "LC_CTYPE": "UTF-8", "TERM": "xterm",
+            "__CF_USER_TEXT_ENCODING": "0x1F5:0:0", "CODEX_HOME": "/app/codex",
+        ])
     }
 
-    @Test func scrubbedEnvironmentDropsEveryNamedTokenAndClaudeConfig() {
+    @Test func scrubbedEnvironmentDropsEveryKeyTokenKeychainSwitchAndLoginFolder() {
         let base = [
             "ANTHROPIC_AUTH_TOKEN": "a",
             "CLAUDE_CODE_OAUTH_TOKEN": "b",
             "OPENAI_API_KEY": "c",
             "CODEX_API_KEY": "d",
             "CLAUDE_CONFIG_DIR": "/e",
-            "KEEP": "1",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/f",
+            "CODEX_HOME": "/g",
+            "KEEP_NOTHING": "1",
         ]
 
         let result = ProviderProcessSupport.scrubbedEnvironment(base: base, adding: [:])
 
-        #expect(result == ["KEEP": "1"])
+        #expect(result == [:])
     }
 
     @Test func overridePointingAtAnExecutableWins() throws {

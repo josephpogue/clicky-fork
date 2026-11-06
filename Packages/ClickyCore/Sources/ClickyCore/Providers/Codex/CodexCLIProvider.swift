@@ -16,7 +16,13 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     private var instructions = ""
     private var threadID: String?
     private var hasCheckedLoginThisConversation = false
-    /// Raised by `endConversation` and cleared by `startConversation`, so an answer that arrives after Stop is dropped.
+    /// True between `startConversation` and `endConversation`. A question outside that span is refused.
+    private var isConversationRunning = false
+    /// The recap `startConversation` was given. It rides on the first question, before any thread exists, so nothing
+    /// is sent between questions. Cleared once a turn that carried it has been answered.
+    private var recapWaitingForFirstQuestion: String?
+    /// Raised by `startConversation` and `endConversation`, so a question that was started under an older number
+    /// (and an answer that arrives after Stop) is dropped.
     private var conversationGeneration = 0
 
     public init(
@@ -33,43 +39,34 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
 
     public func startConversation(instructions: String, model: String, recap: String?) async throws {
         runner.terminateEverything()
-        let generation = withState { () -> Int in
+        withState {
             self.instructions = instructions
             threadID = nil
             hasCheckedLoginThisConversation = false
+            isConversationRunning = true
+            recapWaitingForFirstQuestion = recap
             conversationGeneration += 1
-            return conversationGeneration
         }
-        guard let recap else { return }
-
-        // The new thread starts with the recap as its first turn, so later questions can refer to what came before.
-        let executableURL = try setup.resolveExecutable()
-        try setup.prepareDirectories()
-        try await checkSubscriptionLoginOnce(executableURL: executableURL)
-        let recapPrompt = "Earlier in this session: \(recap)\n\nThis is background only. Reply with just: OK"
-        let output = try await runTurn(
-            executableURL: executableURL,
-            prompt: recapPrompt,
-            imagePaths: [],
-            model: model,
-            instructions: instructions,
-            threadIDToResume: nil,
-            keepsThread: true,
-            generation: generation
-        )
-        recordThreadID(output.threadID, generation: generation)
+        // No CLI call here: the recap goes out ahead of the first question, in the same turn.
     }
 
     public func ask(_ turn: QuestionTurn, model: String) async throws -> ProviderAnswer {
+        // Taken before anything is awaited, so a Stop during the login check below still cancels this question.
+        let (generation, isRunning) = withState { (conversationGeneration, isConversationRunning) }
+        guard isRunning else {
+            throw ProviderFailure.failed(message: "ChatGPT is not started yet.")
+        }
         let executableURL = try setup.resolveExecutable()
         try setup.prepareDirectories()
-        try await checkSubscriptionLoginOnce(executableURL: executableURL)
+        try await checkSubscriptionLoginOnce(executableURL: executableURL, generation: generation)
 
         let startedAt = Date()
-        let (currentInstructions, threadToResume, generation) = withState { (instructions, threadID, conversationGeneration) }
+        let (currentInstructions, threadToResume, recapToSend) = withState { (instructions, threadID, recapWaitingForFirstQuestion) }
+        // A recap is only needed while no thread holds the earlier turns.
+        let recapForThisTurn = threadToResume == nil ? recapToSend : nil
         let output = try await runTurn(
             executableURL: executableURL,
-            prompt: CodexOutputParsing.promptText(for: turn),
+            prompt: CodexOutputParsing.promptText(for: turn, recap: recapForThisTurn),
             imagePaths: turn.images.map { $0.fileURL.path },
             model: model,
             instructions: currentInstructions,
@@ -78,6 +75,11 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             generation: generation
         )
         recordThreadID(output.threadID, generation: generation)
+        if recapForThisTurn != nil {
+            withState {
+                if generation == conversationGeneration { recapWaitingForFirstQuestion = nil }
+            }
+        }
 
         let answerText = output.answerText ?? ""
         return ProviderAnswer(
@@ -90,9 +92,9 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
     public func summarize(_ text: String, instructions: String, model: String) async throws -> String {
         let executableURL = try setup.resolveExecutable()
         try setup.prepareDirectories()
-        try await checkSubscriptionLoginOnce(executableURL: executableURL)
-
         let generation = withState { conversationGeneration }
+        try await checkSubscriptionLoginOnce(executableURL: executableURL, generation: generation)
+
         // A one-off run: `--ephemeral` keeps no session on disk, and the thread id is not stored.
         let output = try await runTurn(
             executableURL: executableURL,
@@ -112,6 +114,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             let finishedThreadID = threadID
             threadID = nil
             hasCheckedLoginThisConversation = false
+            isConversationRunning = false
+            recapWaitingForFirstQuestion = nil
             conversationGeneration += 1
             return finishedThreadID
         }
@@ -139,6 +143,10 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
         keepsThread: Bool,
         generation: Int
     ) async throws -> CodexTurnOutput {
+        // Stop may have landed while the login check or the previous step was awaited.
+        if withState({ conversationGeneration }) != generation {
+            throw ProviderFailure.failed(message: "The question was stopped.")
+        }
         let arguments = buildArguments(
             prompt: prompt,
             imagePaths: imagePaths,
@@ -153,7 +161,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             environment: setup.childEnvironment,
             workingDirectory: setup.locations.providerWorkingDirectory,
             timeoutSeconds: answerTimeoutSeconds,
-            shouldStopAfterLine: { CodexOutputParsing.lineShowsRejectedLogin($0) }
+            shouldStopAfterLine: { CodexOutputParsing.lineShowsRejectedLogin($0) },
+            shouldStillStart: { [self] in withState({ conversationGeneration }) == generation }
         )
 
         if result.couldNotStart { throw ProviderFailure.cliNotFound }
@@ -195,6 +204,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             arguments.append("resume")
         }
         arguments += ["--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules"]
+        // Every tool the model could use is off, on the first turn and on every resume.
+        arguments += CodexToolRestrictions.arguments
         if threadIDToResume == nil {
             // `exec resume` has neither -s nor -C; it takes the sandbox from -c and the folder from the process.
             arguments += ["-s", "read-only", "-C", setup.locations.providerWorkingDirectory.path]
@@ -227,10 +238,18 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
 
     /// Reads `codex login status` once per conversation, so an API key login is refused before any question is sent
     /// and a missing login is reported at once instead of after the CLI's long retry loop.
-    private func checkSubscriptionLoginOnce(executableURL: URL) async throws {
+    private func checkSubscriptionLoginOnce(executableURL: URL, generation: Int) async throws {
         let alreadyChecked = withState { hasCheckedLoginThisConversation }
         if alreadyChecked { return }
-        let state = await setup.readLoginState(runner: runner, executableURL: executableURL)
+        let state = await setup.readLoginState(
+            runner: runner,
+            executableURL: executableURL,
+            shouldStillStart: { [self] in withState({ conversationGeneration }) == generation }
+        )
+        // Stop killed the check (or landed during it): the question is over, whatever the check said.
+        if state == .cancelled || withState({ conversationGeneration }) != generation {
+            throw ProviderFailure.failed(message: "The question was stopped.")
+        }
         switch state {
         case .chatGPT, .unknown:
             withState { hasCheckedLoginThisConversation = true }
@@ -238,6 +257,8 @@ public final class CodexCLIProvider: AnswerProvider, @unchecked Sendable {
             throw ProviderFailure.notSignedIn
         case .otherLogin(let detail):
             throw ProviderFailure.notSubscriptionLogin(detail: detail)
+        case .cancelled:
+            throw ProviderFailure.failed(message: "The question was stopped.")
         }
     }
 

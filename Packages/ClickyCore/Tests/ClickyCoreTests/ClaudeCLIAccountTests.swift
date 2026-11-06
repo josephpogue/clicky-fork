@@ -46,6 +46,24 @@ struct ClaudeCLIAccountTests {
         #expect(logoutRun["config"] as? String == standIn.locations().claudeConfigDirectory.path)
     }
 
+    @Test func everyAccountCallGetsOnlyAllowedVariablesAndTheAppsLoginFolder() async throws {
+        let standIn = try ClaudeStandIn()
+        let account = makeAccount(standIn)
+
+        try await account.signIn()
+        _ = await account.status()
+        try await account.signOut()
+
+        for command in ["status", "login", "logout"] {
+            let childEnvironment = try #require(standIn.environment(ofAuthCommand: command), "no \(command) run")
+            #expect(ClaudeStandIn.unexpectedVariableNames(in: childEnvironment) == [], "\(command)")
+            for name in ClaudeStandIn.variablesThatMustNotReachTheChild.keys where name != "CLAUDE_CONFIG_DIR" {
+                #expect(childEnvironment[name] == nil, "\(command) leaked \(name)")
+            }
+            #expect(childEnvironment["CLAUDE_CONFIG_DIR"] == standIn.locations().claudeConfigDirectory.path)
+        }
+    }
+
     @Test func availableModelsAreTheAliasesTheCliAccepts() async throws {
         let standIn = try ClaudeStandIn()
         #expect(await makeAccount(standIn).availableModels() == ["sonnet", "opus", "haiku"])

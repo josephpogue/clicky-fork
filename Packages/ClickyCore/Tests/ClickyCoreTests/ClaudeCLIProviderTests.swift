@@ -42,6 +42,8 @@ struct ClaudeCLIProviderTests {
         let provider = makeProvider(standIn)
 
         try await provider.startConversation(instructions: "Answer briefly.", model: "sonnet", recap: "Earlier in this session: nothing yet.")
+        // Starting sends no line, so nothing makes start wait for the child; wait for Python to record it.
+        await standIn.waitForStarts(count: 1)
         await provider.endConversation()
 
         #expect(standIn.starts.count == 1)
@@ -70,6 +72,7 @@ struct ClaudeCLIProviderTests {
         let provider = makeProvider(standIn)
 
         try await provider.startConversation(instructions: "x", model: "sonnet", recap: "Earlier in this session: nothing.")
+        await standIn.waitForStarts(count: 1)
         await provider.endConversation()
 
         let childEnvironment = standIn.environment(ofStart: 0)
@@ -79,18 +82,69 @@ struct ClaudeCLIProviderTests {
         #expect(childEnvironment["PATH"] != nil)
     }
 
-    @Test func recapIsTheFirstUserLineAndStartWaitsForItsAnswer() async throws {
+    @Test func conversationChildGetsOnlyAllowedVariablesAndTheAppsLoginFolder() async throws {
+        let standIn = try ClaudeStandIn()
+        let provider = makeProvider(standIn)
+
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+        await standIn.waitForStarts(count: 1)
+        await provider.endConversation()
+
+        let childEnvironment = standIn.environment(ofStart: 0)
+        #expect(ClaudeStandIn.unexpectedVariableNames(in: childEnvironment) == [])
+        for name in ClaudeStandIn.variablesThatMustNotReachTheChild.keys where name != "CLAUDE_CONFIG_DIR" {
+            #expect(childEnvironment[name] == nil, "leaked \(name)")
+        }
+        #expect(childEnvironment["CLAUDE_CONFIG_DIR"] == standIn.locations().claudeConfigDirectory.path)
+    }
+
+    @Test func summaryChildGetsOnlyAllowedVariablesAndTheAppsLoginFolder() async throws {
+        let standIn = try ClaudeStandIn()
+        let provider = makeProvider(standIn)
+
+        _ = try await provider.summarize("text", instructions: "Summarize.", model: "haiku")
+
+        let childEnvironment = standIn.environment(ofStart: 0)
+        #expect(ClaudeStandIn.unexpectedVariableNames(in: childEnvironment) == [])
+        for name in ClaudeStandIn.variablesThatMustNotReachTheChild.keys where name != "CLAUDE_CONFIG_DIR" {
+            #expect(childEnvironment[name] == nil, "leaked \(name)")
+        }
+        #expect(childEnvironment["CLAUDE_CONFIG_DIR"] == standIn.locations().claudeConfigDirectory.path)
+    }
+
+    @Test func startingWithARecapSendsNothingUntilTheFirstQuestionCarriesIt() async throws {
         let standIn = try ClaudeStandIn()
         let provider = makeProvider(standIn)
 
         try await provider.startConversation(instructions: "x", model: "sonnet", recap: "Earlier in this session: the user asked about Safari.")
 
-        // The stand-in has already seen the line and answered it by the time start returns.
+        // Nothing goes to Claude between questions: the process is up and has been sent no line at all.
+        await standIn.waitForStarts(count: 1)
+        #expect(standIn.starts.count == 1)
+        #expect(standIn.stdinLines.isEmpty)
+
+        _ = try await provider.ask(textQuestion("where is the tab bar"), model: "sonnet")
+        await provider.endConversation()
+
         let lines = standIn.userMessages
         #expect(lines.count == 1)
         let blocks = standIn.contentBlocks(ofUserLine: lines[0])
         #expect(textOf(blocks[0]) == "Earlier in this session: the user asked about Safari.")
+        #expect(textOf(blocks[1]) == "Question: where is the tab bar")
+    }
+
+    @Test func recapIsNotRepeatedOnTheSecondQuestion() async throws {
+        let standIn = try ClaudeStandIn()
+        let provider = makeProvider(standIn)
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: "Earlier in this session: a recap.")
+
+        _ = try await provider.ask(textQuestion("first"), model: "sonnet")
+        _ = try await provider.ask(textQuestion("second"), model: "sonnet")
         await provider.endConversation()
+
+        let lines = standIn.userMessages
+        #expect(lines.count == 2)
+        #expect(standIn.contentBlocks(ofUserLine: lines[1]).map(textOf) == ["Question: second"])
     }
 
     @Test func askSendsLabelledImagesThenNoteThenQuestionAndReturnsTheAnswerUnchanged() async throws {
@@ -238,9 +292,13 @@ struct ClaudeCLIProviderTests {
         let changeRequests = standIn.stdinLines.compactMap { ($0["message"] as? [String: Any]) }
             .filter { $0["type"] as? String == "control_request" }
         #expect(changeRequests.count == 1)
-        let request = changeRequests[0]["request"] as? [String: Any]
-        #expect(request?["subtype"] as? String == "set_model")
-        #expect(request?["model"] as? String == "opus")
+        // The exact line the Claude Agent SDK sends: the request id is the provider's first, "clicky-model-1".
+        let expectedLine: NSDictionary = [
+            "type": "control_request",
+            "request_id": "clicky-model-1",
+            "request": ["subtype": "set_model", "model": "opus"],
+        ]
+        #expect(NSDictionary(dictionary: changeRequests[0]) == expectedLine)
     }
 
     @Test func refusedModelChangeRestartsWithTheEarlierTurnsAsText() async throws {
@@ -293,6 +351,87 @@ struct ClaudeCLIProviderTests {
 
         await provider.endConversation()
 
+        #expect(await standIn.waitForProcessToBeGone(pid: standIn.pid(ofStart: 0)))
+    }
+
+    /// Waits (up to ten seconds) until the stand-in has been sent a model change request it is slow to answer.
+    private func waitForModelChangeRequest(_ standIn: ClaudeStandIn) async {
+        for _ in 0..<200 {
+            let hasRequest = standIn.stdinLines.contains {
+                ($0["message"] as? [String: Any])?["type"] as? String == "control_request"
+            }
+            if hasRequest { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    @Test func stopDuringAModelChangeWaitStopsTheQuestionAndStartsNoNewProcess() async throws {
+        let standIn = try ClaudeStandIn(mode: .slowModelChange)
+        let provider = makeProvider(standIn)
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+
+        let question = Task { try await provider.ask(textQuestion("anything"), model: "opus") }
+        await waitForModelChangeRequest(standIn)
+        await provider.endConversation()
+
+        do {
+            _ = try await question.value
+            Issue.record("expected the question to be stopped")
+        } catch let failure as ProviderFailure {
+            guard case .failed = failure else {
+                Issue.record("wrong failure \(failure)")
+                return
+            }
+        }
+        // No second process was started, nothing was sent after Stop, and the first process is gone.
+        #expect(standIn.starts.count == 1)
+        #expect(standIn.userMessages.isEmpty)
+        #expect(await standIn.waitForProcessToBeGone(pid: standIn.pid(ofStart: 0)))
+    }
+
+    @Test func aNewConversationDuringAModelChangeWaitDoesNotLetTheOldQuestionIn() async throws {
+        let standIn = try ClaudeStandIn(mode: .slowModelChange)
+        let provider = makeProvider(standIn)
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+
+        let question = Task { try await provider.ask(textQuestion("old question"), model: "opus") }
+        await waitForModelChangeRequest(standIn)
+        await provider.endConversation()
+        try await provider.startConversation(instructions: "x", model: "sonnet", recap: nil)
+
+        do {
+            _ = try await question.value
+            Issue.record("expected the old question to be stopped")
+        } catch is ProviderFailure {
+        }
+        // Only the old and the new conversation's processes exist; the old question sent nothing to either.
+        await standIn.waitForStarts(count: 2)
+        #expect(standIn.starts.count == 2)
+        #expect(standIn.userMessages.isEmpty)
+        await provider.endConversation()
+        #expect(await standIn.waitForProcessToBeGone(pid: standIn.pid(ofStart: 1)))
+    }
+
+    @Test func summaryThatIgnoresTheStopRequestIsKilledAndTheCallReturns() async throws {
+        let standIn = try ClaudeStandIn(mode: .ignoreTerminate)
+        let provider = makeProvider(standIn, answerTimeoutSeconds: 3)
+        let finished = FinishedFlag()
+        let call = Task {
+            _ = try? await provider.summarize("text", instructions: "Summarize.", model: "haiku")
+            finished.markFinished()
+        }
+        // 3 s timeout (so Python has installed its handler) + 1.5 s before the kill, with room for a loaded Mac.
+        for _ in 0..<240 where !finished.isFinished {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let didFinish = finished.isFinished
+        if !didFinish {
+            // Without the kill the call hangs for good; do not leave the stand-in behind.
+            let standInPid = standIn.pid(ofStart: 0)
+            if standInPid > 0 { kill(pid_t(standInPid), SIGKILL) }
+            _ = await call.value
+        }
+        #expect(didFinish, "summarize never returned after the timeout")
         #expect(await standIn.waitForProcessToBeGone(pid: standIn.pid(ofStart: 0)))
     }
 
@@ -359,4 +498,11 @@ struct ClaudeCLIProviderTests {
             }
         }
     }
+}
+
+private final class FinishedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+    func markFinished() { lock.lock(); finished = true; lock.unlock() }
 }

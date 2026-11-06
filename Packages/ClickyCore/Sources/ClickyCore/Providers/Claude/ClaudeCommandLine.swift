@@ -22,22 +22,14 @@ enum ClaudeCommandLine {
         return located
     }
 
-    /// The environment the child gets: the app's own Claude login folder, and nothing that could switch the tool
-    /// to an API key, another server or a parent Claude Code session. (The shared scrub covers keys and tokens;
-    /// a base URL or cloud-provider switch would send the subscription login somewhere else, so those go too.)
+    /// The environment the child gets: the shared allowlist from `ProviderProcessSupport` plus the app's own Claude
+    /// login folder. Nothing that could switch the tool to an API key, another server, another keychain entry or a
+    /// parent Claude Code session is on the list, so nothing needs removing by name.
     static func childEnvironment(base: [String: String], locations: AppDataLocations) -> [String: String] {
-        var environment = ProviderProcessSupport.scrubbedEnvironment(
+        ProviderProcessSupport.scrubbedEnvironment(
             base: base,
             adding: ["CLAUDE_CONFIG_DIR": locations.claudeConfigDirectory.path]
         )
-        for name in Array(environment.keys) {
-            let isOtherAnthropicSetting = name.hasPrefix("ANTHROPIC_")
-            let isParentSessionSetting = name.hasPrefix("CLAUDE_CODE_") || name == "CLAUDECODE"
-            if isOtherAnthropicSetting || isParentSessionSetting {
-                environment[name] = nil
-            }
-        }
-        return environment
     }
 
     /// Flags that keep the tool to a plain answer on the subscription: no tools, no settings files, no MCP servers,
