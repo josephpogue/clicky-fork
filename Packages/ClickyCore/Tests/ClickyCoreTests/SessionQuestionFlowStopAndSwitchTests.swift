@@ -119,7 +119,7 @@ struct SessionQuestionFlowStopAndSwitchTests {
         #expect(!harness.output.phases.contains(.waitingForAnswer(provider: .claude)))
     }
 
-    @Test func anAnswerThatLandsAfterStopIsNeitherShownNorLogged() async throws {
+    @Test func anAnswerEndedByStopIsLoggedBeforeTheStopLineAndNeverShown() async throws {
         let harness = try await startedHarness(questions: ["where is it"])
         harness.claude.holdNextAnswer()
 
@@ -129,8 +129,10 @@ struct SessionQuestionFlowStopAndSwitchTests {
         harness.claude.releaseHeldAnswer()
         _ = await question.value
 
+        #expect(harness.claude.stopRequestCount == 1)
         #expect(harness.output.answers.isEmpty)
-        #expect(answerLogCount(harness) == 0)
+        #expect(harness.output.cutShorts.isEmpty)
+        #expect(answerLogCount(harness) == 1)
         #expect(await harness.flow.answeredQuestionCount == 0)
         #expect(logEndsWithStop(harness))
     }

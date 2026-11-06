@@ -120,6 +120,27 @@ public actor SessionQuestionFlow {
     private var isFinished = false
     /// True while a provider switch is starting its conversation; keys and second taps on Switch wait it out.
     private var isSwitching = false
+    /// True from the moment Stop begins until the session is finished, while it waits for a running answer to end.
+    private var isStopping = false
+    /// Counts the questions that began listening while an answer was still coming. Work for a question whose
+    /// number is no longer the current one was ended by a newer question or by Stop, and shows nothing.
+    private var questionSerial = 0
+    /// Questions whose provider call is still running, so Stop can wait for a cut answer to reach the log.
+    private var answersInFlight: Set<Int> = []
+    /// The words of the question asked before the current one; "dig deeper" searches with them.
+    private var previousQuestionText: String?
+    /// What the current answer has shown so far; nil between answers.
+    private var streamingAnswer: StreamingAnswerState?
+
+    /// The per-answer facts the progress reports build up.
+    private struct StreamingAnswerState {
+        var group: ShotGroup
+        var provider: ProviderID
+        var model: String
+        var visibleText = ""
+        var checkingNotesRule = CheckingNotesRule()
+        var hasFlownPointer = false
+    }
 
     public init(
         initialProvider: ProviderID,
@@ -140,7 +161,19 @@ public actor SessionQuestionFlow {
     /// Starts the first conversation. Throws the provider's failure, for example when it is not signed in.
     public func begin() async throws {
         let model = await dependencies.model(activeProviderID)
-        try await provider.startConversation(instructions: dependencies.instructions, model: model, recap: nil)
+        try await provider.startConversation(
+            instructions: await conversationInstructions(for: provider), model: model, recap: nil
+        )
+    }
+
+    /// Today's instructions with the brain off. With it on, the notes rules for what this provider can do:
+    /// passages and the two tools, or passages only.
+    private func conversationInstructions(for candidate: AnswerProvider) async -> String {
+        guard dependencies.isBrainOn else { return dependencies.instructions }
+        let brainAccess: AnswerInstructions.BrainAccess = candidate.supportsBrainTools
+            ? .passagesAndTools(mapPaths: await dependencies.brainMapPaths())
+            : .passagesOnly
+        return AnswerInstructions.questionInstructions(brainAccess: brainAccess)
     }
 
     // MARK: Events from the rest of the session
@@ -162,22 +195,40 @@ public actor SessionQuestionFlow {
 
     @discardableResult
     public func handle(_ signal: QuestionKeySignal) async -> SessionSignalOutcome {
-        guard !isFinished, !isSwitching else { return .ignoredBecauseBusy }
+        guard !isFinished, !isStopping, !isSwitching else { return .ignoredBecauseBusy }
         switch signal {
         case .questionStarted(let date):
-            guard phase == .idle else { return .ignoredBecauseBusy }
-            await setPhase(.listening)
+            switch phase {
+            case .idle:
+                await setPhase(.listening)
+            case .waitingForAnswer:
+                // A new question ends the answer still coming. The number moves on first, so everything the old
+                // answer reports from here on is dropped; the phase moves on before the first await, so a second
+                // tap sees a busy flow.
+                questionSerial += 1
+                phase = .listening
+                await provider.stopCurrentAnswer()
+                guard !isFinished else { return .ignoredBecauseBusy }
+                await output.phaseChanged(.listening)
+            case .listening, .transcribing:
+                return .ignoredBecauseBusy
+            }
             await dependencies.markQuestionStarted(date)
             await noteEvent(SessionEvent(time: date, kind: .questionStarted))
             return .accepted
         case .sendQuestion(let speechFrom, let speechTo):
             guard phase == .listening else { return .ignoredBecauseBusy }
-            await runQuestion(speechFrom: speechFrom, speechTo: speechTo)
+            await runQuestion(speechFrom: speechFrom, speechTo: speechTo, serial: questionSerial)
             return .accepted
         }
     }
 
-    private func runQuestion(speechFrom: Date, speechTo: Date) async {
+    /// False once Stop landed or a newer question took over from the question with this number.
+    private func isCurrent(_ serial: Int) -> Bool {
+        !isFinished && serial == questionSerial
+    }
+
+    private func runQuestion(speechFrom: Date, speechTo: Date, serial: Int) async {
         await setPhase(.transcribing)
 
         let questionText: String
@@ -185,17 +236,20 @@ public actor SessionQuestionFlow {
             questionText = try await dependencies.transcribeQuestion(speechFrom, speechTo)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            guard !isFinished else { return }
+            guard isCurrent(serial) else { return }
             await output.noticeShown("Could not hear that. Try again.")
             await setPhase(.idle)
             return
         }
-        guard !isFinished else { return }
+        guard isCurrent(serial) else { return }
         guard !questionText.isEmpty else {
             await output.noticeShown("Didn't catch that")
             await setPhase(.idle)
             return
         }
+
+        // Only spoken words ask for a deeper look, and only when a stronger setup is configured.
+        let digDeeperMatch = dependencies.digDeeperRequest == nil ? nil : DigDeeperMatcher.match(questionText)
 
         // Questions after the budget is spent begin a fresh conversation that carries a text recap.
         if budget.shouldStartFresh {
@@ -203,19 +257,19 @@ public actor SessionQuestionFlow {
             do {
                 try await startFreshConversation(provider: restartedProvider, providerID: activeProviderID)
             } catch let failure as ProviderFailure {
-                guard !isFinished else { return }
+                guard isCurrent(serial) else { return }
                 await output.noticeShown(ProviderFailureNotice.text(for: failure, provider: activeProviderID))
                 await setPhase(.idle)
                 return
             } catch {
-                guard !isFinished else { return }
+                guard isCurrent(serial) else { return }
                 await output.noticeShown("The conversation could not be restarted.")
                 await setPhase(.idle)
                 return
             }
             // Stop landed while the restart was starting: Stop already ended the old conversation, so the
             // one the restart just opened is ended here and the question goes nowhere.
-            guard !isFinished else {
+            guard isCurrent(serial) else {
                 await restartedProvider.endConversation()
                 return
             }
@@ -225,12 +279,29 @@ public actor SessionQuestionFlow {
         do {
             currentGroup = try await dependencies.captureCurrentGroup()
         } catch {
-            guard !isFinished else { return }
+            guard isCurrent(serial) else { return }
             await output.noticeShown("The screen could not be captured.")
             await setPhase(.idle)
             return
         }
-        guard !isFinished else { return }
+        guard isCurrent(serial) else { return }
+
+        // The passages come from the Mac after the capture, so the front app and window can steer the search.
+        // "Dig deeper" searches with the question before it plus the words that followed the phrase.
+        var passages: [BrainPassage] = []
+        if dependencies.isBrainOn {
+            let passageQuery: String
+            if let digDeeperMatch {
+                passageQuery = [previousQuestionText, digDeeperMatch.remainingWords]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+            } else {
+                passageQuery = questionText
+            }
+            if !passageQuery.isEmpty {
+                passages = await dependencies.findPassages(passageQuery, currentGroup.appName, currentGroup.windowTitle)
+            }
+            guard isCurrent(serial) else { return }
+        }
 
         let now = dependencies.now()
         let earlierGroup = EarlierMomentPicker.pick(
@@ -243,7 +314,7 @@ public actor SessionQuestionFlow {
         // The note stays in the pending list until an answer comes back, so a retry after a failure carries it.
         let eventsInContextNote = eventsSincePreviousQuestion.count
         let contextNote = ContextNoteBuilder.note(events: eventsSincePreviousQuestion, timeZone: dependencies.timeZone)
-        let turn = QuestionTurnBuilder.turn(
+        var turn = QuestionTurnBuilder.turn(
             questionText: questionText,
             currentGroup: currentGroup,
             earlierGroup: earlierGroup,
@@ -251,42 +322,151 @@ public actor SessionQuestionFlow {
             contextNote: contextNote,
             timeZone: dependencies.timeZone
         )
+        turn.brainNote = BrainPassageNote.text(for: passages)
 
+        let askedProvider = provider
+        let askedProviderID = activeProviderID
+        let request: AnswerRequest
+        if digDeeperMatch != nil, let digDeeperRequest = dependencies.digDeeperRequest {
+            request = await digDeeperRequest(askedProviderID)
+        } else {
+            request = AnswerRequest(model: await dependencies.model(askedProviderID), effort: nil)
+        }
+        guard isCurrent(serial) else { return }
+
+        if digDeeperMatch != nil {
+            await noteEvent(SessionEvent(time: now, kind: .digDeeperAsked(
+                model: request.model, effort: request.effort?.rawValue
+            )))
+        }
         await noteEvent(SessionEvent(time: now, kind: .question(
             text: questionText,
             shotGroupID: currentGroup.id,
             earlierShotGroupIDs: earlierGroup.map { [$0.id] } ?? []
         )))
+        var passagePaths: [String] = []
+        for passage in passages where !passagePaths.contains(passage.path) { passagePaths.append(passage.path) }
+        if !passagePaths.isEmpty {
+            await noteEvent(SessionEvent(time: now, kind: .passagesAttached(paths: passagePaths)))
+        }
+        previousQuestionText = questionText
         await output.questionAsked(questionText)
 
-        let askedProvider = provider
-        let askedProviderID = activeProviderID
-        let model = await dependencies.model(askedProviderID)
         // Stop may have landed while the question was being logged and shown; nothing goes to the AI after it.
-        guard !isFinished else { return }
+        guard isCurrent(serial) else { return }
         await setPhase(.waitingForAnswer(provider: askedProviderID))
+        guard isCurrent(serial) else { return }
+
+        streamingAnswer = StreamingAnswerState(group: currentGroup, provider: askedProviderID, model: request.model)
+        answersInFlight.insert(serial)
+        defer { answersInFlight.remove(serial) }
 
         do {
-            let answer = try await askedProvider.ask(turn, model: model)
+            let answer = try await askedProvider.answer(turn, request: request) { [self] progress in
+                await receiveProgress(progress, serial: serial)
+            }
+            let notesRead = Self.withoutRepeats(passagePaths + answer.notesRead)
+            guard serial == questionSerial else {
+                // A newer question or Stop ended this answer. What had arrived goes to the log (and, for a newer
+                // question, to the chat); nothing else is touched.
+                guard !isFinished else { return }
+                await logCutShortAnswer(answer, provider: askedProviderID, notesRead: notesRead)
+                return
+            }
             guard !isFinished else { return }
+            let hasStreamedPointer = streamingAnswer?.hasFlownPointer ?? false
+            streamingAnswer = nil
             await showAnswer(
                 answer, for: turn, group: currentGroup, provider: askedProviderID,
-                eventsInContextNote: eventsInContextNote
+                eventsInContextNote: eventsInContextNote, notesRead: notesRead,
+                hasStreamedPointer: hasStreamedPointer
             )
         } catch let failure as ProviderFailure {
             guard !isFinished else { return }
-            await showFailure(failure, provider: askedProviderID, model: model)
+            await showFailure(
+                failure, provider: askedProviderID, model: request.model, showsNotice: serial == questionSerial
+            )
         } catch {
             guard !isFinished else { return }
-            await showFailure(.failed(message: "The answer could not be fetched."), provider: askedProviderID, model: model)
+            await showFailure(
+                .failed(message: "The answer could not be fetched."), provider: askedProviderID, model: request.model,
+                showsNotice: serial == questionSerial
+            )
         }
-        guard !isFinished else { return }
+        // A superseded question leaves the phase to the newer one.
+        guard isCurrent(serial) else { return }
+        streamingAnswer = nil
         await setPhase(.idle)
+    }
+
+    private static func withoutRepeats(_ paths: [String]) -> [String] {
+        var seen: Set<String> = []
+        return paths.filter { seen.insert($0).inserted }
+    }
+
+    // MARK: Streaming
+
+    /// A report from the provider while the answer is coming. Reports of an answer that a newer question or
+    /// Stop ended are dropped.
+    private func receiveProgress(_ progress: AnswerProgress, serial: Int) async {
+        guard isCurrent(serial), var state = streamingAnswer else { return }
+        switch progress {
+        case .textSoFar(let rawTextSoFar):
+            let view = StreamingAnswerText.visible(rawTextSoFar: rawTextSoFar)
+            let visibleTextChanged = view.visibleText != state.visibleText
+            if visibleTextChanged {
+                state.visibleText = view.visibleText
+                state.checkingNotesRule.textChanged(visibleTextSoFar: view.visibleText)
+            }
+            // The pointer flies once, at the first complete tag that lands on a screen, current screens only.
+            var pointerToFly: (point: CGPoint, frame: CGRect, label: String?)?
+            if !state.hasFlownPointer, let tag = view.firstCompletePoint,
+               let mapped = PointMapper.globalPoint(for: tag, shots: state.group.shots) {
+                state.hasFlownPointer = true
+                pointerToFly = (mapped.point, mapped.shot.displayFrameInPoints, tag.label.flatMap { $0 == "none" ? nil : $0 })
+            }
+            streamingAnswer = state
+            if visibleTextChanged {
+                await output.answerTextChanged(visibleText: view.visibleText, provider: state.provider, model: state.model)
+            }
+            if let pointerToFly, isCurrent(serial) {
+                await output.pointerRequested(
+                    globalPoint: pointerToFly.point, displayFrameInPoints: pointerToFly.frame, label: pointerToFly.label
+                )
+            }
+        case .toolCallStarted:
+            let shouldShowLine = state.checkingNotesRule.toolCallStarted(visibleTextSoFar: state.visibleText)
+            streamingAnswer = state
+            if shouldShowLine { await output.checkingNotesShown() }
+        case .toolCallMade(let call):
+            await noteEvent(SessionEvent(time: dependencies.now(), kind: .brainToolCalled(
+                tool: call.tool.rawValue, argument: call.argument
+            )))
+        case .toolCallFinished:
+            break
+        }
+    }
+
+    /// Logs an answer a newer question or Stop ended early. The chat hears about it only for a newer question;
+    /// after Stop the cut answer is in the log and nowhere else.
+    private func logCutShortAnswer(_ answer: ProviderAnswer, provider providerID: ProviderID, notesRead: [String]) async {
+        await noteEvent(SessionEvent(time: dependencies.now(), kind: .answerTiming(
+            secondsToFirstText: answer.secondsToFirstText, toolCallCount: answer.toolCalls.count, wasCutShort: true
+        )))
+        await noteEvent(SessionEvent(time: dependencies.now(), kind: .answer(
+            text: answer.text, provider: providerID, model: answer.model,
+            secondsToAnswer: answer.secondsToAnswer, pointLabel: nil
+        )))
+        guard !isStopping, !isFinished else { return }
+        await output.answerCutShort(
+            visibleText: StreamingAnswerText.visible(rawTextSoFar: answer.text).visibleText,
+            provider: providerID, model: answer.model, notesRead: notesRead
+        )
     }
 
     private func showAnswer(
         _ answer: ProviderAnswer, for turn: QuestionTurn, group: ShotGroup, provider providerID: ProviderID,
-        eventsInContextNote: Int
+        eventsInContextNote: Int, notesRead: [String], hasStreamedPointer: Bool
     ) async {
         let parsed = PointTagParser.parse(answer.text)
         // An answer with nothing to say once the tag is gone (an unparsed reply, or only [POINT:none]) is a
@@ -294,37 +474,48 @@ public actor SessionQuestionFlow {
         guard !parsed.spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             await showFailure(
                 .failed(message: "No answer came back. Try again."), provider: providerID,
-                model: answer.model
+                model: answer.model, showsNotice: true
             )
             return
         }
         let pointLabel = parsed.label.flatMap { $0 == "none" ? nil : $0 }
+        await noteEvent(SessionEvent(time: dependencies.now(), kind: .answerTiming(
+            secondsToFirstText: answer.secondsToFirstText, toolCallCount: answer.toolCalls.count,
+            wasCutShort: answer.wasCutShort
+        )))
         await noteEvent(SessionEvent(time: dependencies.now(), kind: .answer(
             text: answer.text, provider: providerID, model: answer.model,
             secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel
         )))
         await output.answerReceived(
             spokenText: parsed.spokenText, provider: providerID, model: answer.model,
-            secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel, notesRead: answer.notesRead
+            secondsToAnswer: answer.secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead
         )
-        if let mapped = PointMapper.globalPoint(for: parsed, shots: group.shots) {
+        if !hasStreamedPointer, let mapped = PointMapper.globalPoint(for: parsed, shots: group.shots) {
             await output.pointerRequested(
                 globalPoint: mapped.point, displayFrameInPoints: mapped.shot.displayFrameInPoints, label: pointLabel
             )
         }
         // The note went out with an answer that came back; drop only those events, not ones noted since.
         eventsSincePreviousQuestion.removeFirst(min(eventsInContextNote, eventsSincePreviousQuestion.count))
-        budget.recordTurn(imageCount: turn.images.count)
+        budget.recordTurn(
+            imageCount: turn.images.count,
+            attachedCharacterCount: turn.brainNote.count + answer.toolResultCharacterCount
+        )
         exchanges.append((question: turn.questionText, answer: answer.text))
     }
 
-    private func showFailure(_ failure: ProviderFailure, provider providerID: ProviderID, model: String) async {
+    /// Logs a failed answer. `showsNotice` is false for a question a newer question or Stop already replaced.
+    private func showFailure(
+        _ failure: ProviderFailure, provider providerID: ProviderID, model: String, showsNotice: Bool
+    ) async {
         let notice = ProviderFailureNotice.text(for: failure, provider: providerID)
         var isUsageLimit = false
         if case .usageLimitReached = failure { isUsageLimit = true }
         await noteEvent(SessionEvent(time: dependencies.now(), kind: .answerFailed(
             message: notice, provider: providerID, model: model, usageLimitReached: isUsageLimit
         )))
+        guard showsNotice else { return }
         if isUsageLimit, providerID == .claude {
             await output.usageLimitOffered(message: notice, switchTo: .chatgpt)
         } else {
@@ -347,7 +538,7 @@ public actor SessionQuestionFlow {
         let model = await dependencies.model(newProviderID)
         do {
             try await newProvider.startConversation(
-                instructions: dependencies.instructions, model: model,
+                instructions: await conversationInstructions(for: newProvider), model: model,
                 recap: RecapBuilder.recap(exchanges: exchanges)
             )
         } catch let failure as ProviderFailure {
@@ -379,7 +570,8 @@ public actor SessionQuestionFlow {
         let model = await dependencies.model(providerID)
         await current.endConversation()
         try await current.startConversation(
-            instructions: dependencies.instructions, model: model, recap: RecapBuilder.recap(exchanges: exchanges)
+            instructions: await conversationInstructions(for: current), model: model,
+            recap: RecapBuilder.recap(exchanges: exchanges)
         )
         budget.reset()
     }
@@ -390,7 +582,15 @@ public actor SessionQuestionFlow {
     /// question was answered. A failed summary comes back as nil. Hardware (microphone, screen, key) is already
     /// stopped by the caller. Anything that answers after this is dropped.
     public func finish(summaryEnabled: Bool) async -> String? {
-        guard !isFinished else { return nil }
+        guard !isFinished, !isStopping else { return nil }
+        isStopping = true
+        if case .waitingForAnswer = phase {
+            // End the answer still coming so the drain does not wait on a long search. What had arrived goes to
+            // the log before the stop line; it is never shown.
+            questionSerial += 1
+            await provider.stopCurrentAnswer()
+            await waitForEndedAnswersToBeLogged()
+        }
         isFinished = true
         phase = .idle
         let stoppedEvent = SessionEvent(time: dependencies.now(), kind: .sessionStopped)
@@ -408,6 +608,13 @@ public actor SessionQuestionFlow {
         }
         await provider.endConversation()
         return summary
+    }
+
+    /// Waits (at most two seconds) until the provider calls that Stop ended have returned and logged.
+    private func waitForEndedAnswersToBeLogged() async {
+        for _ in 0..<400 where !answersInFlight.isEmpty {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     // MARK: Phase

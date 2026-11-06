@@ -61,10 +61,52 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
     private var nextStartGate: TestGate?
     private var nextStartFailure: ProviderFailure?
     private var summaryResult: Result<String, ProviderFailure> = .success("You asked about the Save button.")
+    private var scriptedStreams: [ScriptedStream] = []
+    private var recordedRequests: [AnswerRequest] = []
+    private var stopCount = 0
+    private var pausedStreamContinuation: CheckedContinuation<Void, Never>?
+    private var toolsAreSupported = false
 
     init(providerID: ProviderID) {
         self.providerID = providerID
     }
+
+    /// One streamed answer for the fake to play: progress reports, an optional pause, then the whole answer.
+    struct ScriptedStream {
+        var progress: [AnswerProgress] = []
+        /// After the progress reports the answer waits until `stopCurrentAnswer` or `releasePausedStream`.
+        var pausesAfterProgress = false
+        /// Reported after a stop, before the cut answer returns: late reports from an answer that was ended.
+        var progressAfterStop: [AnswerProgress] = []
+        var finalText = ""
+        var secondsToFirstText: Double? = 0.4
+        var toolCalls: [BrainToolCall] = []
+        var notesRead: [String] = []
+        var toolResultCharacterCount = 0
+    }
+
+    /// Streamed answers given in order to `answer`; once they run out it falls back to the `ask` script.
+    func scriptStreams(_ streams: [ScriptedStream]) {
+        lock.lock(); defer { lock.unlock() }
+        scriptedStreams = streams
+    }
+
+    func releasePausedStream() {
+        lock.lock()
+        let continuation = pausedStreamContinuation
+        pausedStreamContinuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func setSupportsBrainTools(_ supported: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        toolsAreSupported = supported
+    }
+
+    var askedRequests: [AnswerRequest] { lock.lock(); defer { lock.unlock() }; return recordedRequests }
+    var stopRequestCount: Int { lock.lock(); defer { lock.unlock() }; return stopCount }
+    var supportsBrainTools: Bool { lock.lock(); defer { lock.unlock() }; return toolsAreSupported }
 
     // MARK: Script
 
@@ -151,6 +193,72 @@ final class FakeAnswerProvider: AnswerProvider, @unchecked Sendable {
         }
     }
 
+    func answer(
+        _ turn: QuestionTurn,
+        request: AnswerRequest,
+        progress: @escaping @Sendable (AnswerProgress) async -> Void
+    ) async throws -> ProviderAnswer {
+        lock.lock()
+        recordedRequests.append(request)
+        let stopsBefore = stopCount
+        let stream = scriptedStreams.isEmpty ? nil : scriptedStreams.removeFirst()
+        if stream != nil { recordedTurns.append((turn, request.model)) }
+        lock.unlock()
+
+        guard let stream else {
+            // The ask script, reported the way the protocol default does, plus the stop flag.
+            var whole = try await ask(turn, model: request.model)
+            await progress(.textSoFar(whole.text))
+            lock.lock(); whole.wasCutShort = stopCount > stopsBefore; lock.unlock()
+            return whole
+        }
+
+        var latestRawText = ""
+        for step in stream.progress {
+            if case .textSoFar(let raw) = step { latestRawText = raw }
+            await progress(step)
+        }
+        if stream.pausesAfterProgress {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if stopCount > stopsBefore {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    pausedStreamContinuation = continuation
+                    lock.unlock()
+                }
+            }
+        }
+        lock.lock(); let wasStopped = stopCount > stopsBefore; lock.unlock()
+        if wasStopped {
+            for step in stream.progressAfterStop { await progress(step) }
+            return ProviderAnswer(
+                text: latestRawText, model: request.model, secondsToAnswer: 1.0,
+                secondsToFirstText: stream.secondsToFirstText, toolCalls: stream.toolCalls,
+                notesRead: stream.notesRead, toolResultCharacterCount: stream.toolResultCharacterCount,
+                wasCutShort: true
+            )
+        }
+        return ProviderAnswer(
+            text: stream.finalText, model: request.model, secondsToAnswer: 2.5,
+            secondsToFirstText: stream.secondsToFirstText, toolCalls: stream.toolCalls,
+            notesRead: stream.notesRead, toolResultCharacterCount: stream.toolResultCharacterCount
+        )
+    }
+
+    func stopCurrentAnswer() async {
+        lock.lock()
+        stopCount += 1
+        let held = heldContinuation
+        heldContinuation = nil
+        let paused = pausedStreamContinuation
+        pausedStreamContinuation = nil
+        lock.unlock()
+        held?.resume()
+        paused?.resume()
+    }
+
     func summarize(_ text: String, instructions: String, model: String) async throws -> String {
         lock.lock()
         recordedSummaries.append((text, instructions, model))
@@ -189,6 +297,22 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     private(set) var offerClearCount = 0
     private(set) var providerChanges: [(provider: ProviderID, model: String)] = []
     private(set) var pointers: [Pointer] = []
+    private(set) var textChanges: [String] = []
+    private(set) var checkingNotesCount = 0
+    private(set) var answerNotesRead: [[String]] = []
+    private(set) var cutShorts: [(visibleText: String, notesRead: [String])] = []
+    /// Every streaming-related call in the order it happened: "text", "checking", "pointer", "answer", "cut".
+    private(set) var callOrder: [String] = []
+
+    func answerTextChanged(visibleText: String, provider: ProviderID, model: String) async {
+        lock.lock(); textChanges.append(visibleText); callOrder.append("text"); lock.unlock()
+    }
+    func checkingNotesShown() async {
+        lock.lock(); checkingNotesCount += 1; callOrder.append("checking"); lock.unlock()
+    }
+    func answerCutShort(visibleText: String, provider: ProviderID, model: String, notesRead: [String]) async {
+        lock.lock(); cutShorts.append((visibleText, notesRead)); callOrder.append("cut"); lock.unlock()
+    }
 
     func phaseChanged(_ phase: SessionFlowPhase) async { lock.lock(); phases.append(phase); lock.unlock() }
     func questionAsked(_ text: String) async {
@@ -208,6 +332,8 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
         lock.lock()
         answers.append(Answer(spokenText: spokenText, provider: provider, model: model,
                               secondsToAnswer: secondsToAnswer, pointLabel: pointLabel))
+        answerNotesRead.append(notesRead)
+        callOrder.append("answer")
         lock.unlock()
     }
     func noticeShown(_ text: String) async { lock.lock(); notices.append(text); lock.unlock() }
@@ -221,6 +347,7 @@ final class RecordingFlowOutput: SessionFlowOutput, @unchecked Sendable {
     func pointerRequested(globalPoint: CGPoint, displayFrameInPoints: CGRect, label: String?) async {
         lock.lock()
         pointers.append(Pointer(globalPoint: globalPoint, displayFrameInPoints: displayFrameInPoints, label: label))
+        callOrder.append("pointer")
         lock.unlock()
     }
 }
@@ -253,12 +380,16 @@ final class FlowHarness: @unchecked Sendable {
     private var markedStarts: [Date] = []
 
     /// Questions are transcribed from these texts in order.
-    init(questions: [String] = [], screenShots: [DisplayShot]? = nil) {
+    init(
+        questions: [String] = [], screenShots: [DisplayShot]? = nil, isBrainOn: Bool = false,
+        passages: [BrainPassage] = [], brainMapPaths: [String] = [],
+        digDeeperRequest: (@Sendable (ProviderID) async -> AnswerRequest)? = nil
+    ) {
         transcriptions = questions
         let claudeProvider = claude
         let chatgptProvider = chatgpt
         let captureHold = self.captureHold
-        let holder = HarnessState()
+        let holder = state
         flow = SessionQuestionFlow(
             initialProvider: .claude,
             dependencies: SessionQuestionFlowDependencies(
@@ -274,12 +405,24 @@ final class FlowHarness: @unchecked Sendable {
                 logEvent: { [log] event in log.append(event) },
                 shotsDirectory: URL(fileURLWithPath: "/tmp/clicky-flow-test-shots", isDirectory: true),
                 timeZone: QuestionsFixtures.utc,
-                now: { holder.tick() }
+                now: { holder.tick() },
+                findPassages: { query, appName, windowTitle in
+                    holder.recordPassageSearch(query: query, appName: appName, windowTitle: windowTitle)
+                    return passages
+                },
+                isBrainOn: isBrainOn,
+                brainMapPaths: { brainMapPaths },
+                digDeeperRequest: digDeeperRequest
             ),
             output: output
         )
         holder.transcriptions = questions
     }
+
+    private let state = HarnessState()
+
+    /// Every passage search the flow made, in order.
+    var passageSearches: [(query: String, appName: String?, windowTitle: String?)] { state.passageSearches }
 
     /// Tap, then tap again, the way the question key reports them.
     @discardableResult
@@ -305,7 +448,14 @@ final class HarnessState: @unchecked Sendable {
     private var seconds = 0.0
     private var groupCounter = 100
     private var starts: [Date] = []
+    private var searches: [(query: String, appName: String?, windowTitle: String?)] = []
 
+    func recordPassageSearch(query: String, appName: String?, windowTitle: String?) {
+        lock.lock(); searches.append((query, appName, windowTitle)); lock.unlock()
+    }
+    var passageSearches: [(query: String, appName: String?, windowTitle: String?)] {
+        lock.lock(); defer { lock.unlock() }; return searches
+    }
     func recordStart(_ date: Date) { lock.lock(); starts.append(date); lock.unlock() }
     func nextTranscription() -> String {
         lock.lock(); defer { lock.unlock() }
