@@ -269,6 +269,56 @@ struct BrainFileReaderTests {
         #expect(refusal(reader, NSHomeDirectory() + "/Library/anything.md") == .outsideSearchFolders)
     }
 
+    @Test func parentSymlinkInAHandBuiltPathIsRefusedAtOpen() throws {
+        let fixture = try makeFixture()
+        // F/linkdir points outside the folder; a path that still names it (not resolved) must not open.
+        try link(fixture.folder.appendingPathComponent("linkdir"), to: fixture.root.appendingPathComponent("outside-dir"))
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        let handBuiltPath = fixture.folder.path + "/linkdir/x.md"
+        #expect(throwsRefusal { close(try reader.openRegularFile(atPath: handBuiltPath)) } == .notFound)
+        // The same file through a real folder still opens.
+        let honestPath = fixture.folder.path + "/notes/a.md"
+        let descriptor = try reader.openRegularFile(atPath: honestPath)
+        close(descriptor)
+    }
+
+    @Test func descriptorWhosePathIsOutsideTheFoldersIsRefused() throws {
+        let fixture = try makeFixture()
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        let outsideDescriptor = open(fixture.outsideFile.path, O_RDONLY)
+        #expect(outsideDescriptor >= 0)
+        defer { close(outsideDescriptor) }
+        #expect(throwsRefusal { try reader.verifyDescriptorPath(outsideDescriptor, expectedPath: fixture.outsideFile.path) }
+            == .outsideSearchFolders)
+        // The checked path claims to be inside, but the descriptor is not that file: any difference is refused.
+        let insidePath = fixture.folder.path + "/notes/a.md"
+        #expect(throwsRefusal { try reader.verifyDescriptorPath(outsideDescriptor, expectedPath: insidePath) } != nil)
+    }
+
+    @Test func descriptorInsideAHiddenFolderOrOnTheNeverReadableListIsRefused() throws {
+        let fixture = try makeFixture()
+        try write("k\n", to: fixture.folder.appendingPathComponent(".hidden/h.md"))
+        try write("k\n", to: fixture.folder.appendingPathComponent("notes/.env"))
+        let reader = BrainFileReader(searchFolders: [fixture.folder])
+        for relativePath in [".hidden/h.md", "notes/.env"] {
+            let path = fixture.folder.path + "/" + relativePath
+            let descriptor = open(path, O_RDONLY)
+            defer { close(descriptor) }
+            #expect(throwsRefusal { try reader.verifyDescriptorPath(descriptor, expectedPath: path) } == .neverReadable)
+        }
+    }
+
+    @Test func homeFolderParentsAndLibraryAreNotSearchFolders() throws {
+        let homePath = NSHomeDirectory()
+        let reader = BrainFileReader(searchFolders: [
+            URL(fileURLWithPath: (homePath as NSString).deletingLastPathComponent),
+            URL(fileURLWithPath: "/System/Volumes/Data"),
+            URL(fileURLWithPath: homePath + "/Library"),
+            URL(fileURLWithPath: homePath + "/Library/Mail"),
+        ])
+        #expect(reader.searchFolders.isEmpty)
+    }
+
     private func throwsRefusal(_ work: () throws -> Void) -> BrainFileRefusal? {
         do { try work(); return nil } catch let error as BrainFileRefusal { return error } catch { return nil }
     }

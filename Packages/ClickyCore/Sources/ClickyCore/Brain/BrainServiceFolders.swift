@@ -19,15 +19,30 @@ public enum BrainServiceFolders {
         return folders
     }
 
-    /// Why a folder may not be a search folder, or nil when it may. The root folder and the home folder are refused
-    /// (after `~` expansion, `..` folding and symlink resolution): either one would put every key, login and mail
-    /// file the user owns inside the boundary the file reader protects.
+    /// Why a folder may not be a search folder, or nil when it may. Refused (after `~` expansion, `..` folding and
+    /// symlink resolution): the root folder, the home folder, any folder that contains the home folder (`/Users`,
+    /// `/System/Volumes/Data`), and `~/Library` with everything in it (mail, messages, keychains, browser data). Each
+    /// would put keys, logins or mail the user owns inside the boundary the file reader protects.
     public static func refusalReason(for folder: URL, homeDirectory: URL? = nil) -> String? {
-        let folderPath = resolvedPath(of: folder.path)
+        // A folder that does not exist yet is still judged, by its nearest existing parent plus the missing rest.
+        let folderPath = BrainFileReader.resolvedPathAllowingMissingTail(of: folder.path)
         let homePath = resolvedPath(of: (homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory())).path)
+            ?? ((homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory())).path as NSString).standardizingPath
         if folderPath == "/" { return "The whole disk cannot be a search folder. Pick a folder inside it." }
-        if let folderPath, let homePath, folderPath == homePath {
-            return "The home folder cannot be a search folder. Pick a folder inside it."
+        // The same home folder is also reachable through the data volume's own mount, which realpath leaves alone.
+        let homeNames = [homePath, "/System/Volumes/Data" + homePath]
+        for homeName in homeNames {
+            if folderPath == homeName {
+                return "The home folder cannot be a search folder. Pick a folder inside it."
+            }
+            // Component-wise: "/Users" contains "/Users/joe", "/Users2" does not.
+            if homeName.hasPrefix(folderPath.hasSuffix("/") ? folderPath : folderPath + "/") {
+                return "A folder that contains the home folder cannot be a search folder. Pick a folder inside it."
+            }
+            let libraryPath = homeName + "/Library"
+            if folderPath == libraryPath || folderPath.hasPrefix(libraryPath + "/") {
+                return "The Library folder holds mail, messages and logins, so it cannot be a search folder."
+            }
         }
         return nil
     }

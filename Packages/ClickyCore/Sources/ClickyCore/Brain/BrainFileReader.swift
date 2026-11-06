@@ -63,16 +63,23 @@ public struct BrainFileReader: Sendable {
         }
 
         let resolvedFilePath = Self.resolvedPathAllowingMissingTail(of: chosenCandidatePath)
-        if BrainFileRules.isNeverReadable(path: resolvedFilePath) { throw BrainFileRefusal.neverReadable }
-        guard isInsideSearchFolders(resolvedFilePath) else { throw BrainFileRefusal.outsideSearchFolders }
+        try refuseUnlessPermitted(resolvedPath: resolvedFilePath)
 
         // Everything under a hidden folder inside a search folder (`.claude/settings.local.json`, `.config/gh/hosts.yml`)
         // holds tool state and logins. The search folder itself may sit inside a hidden folder.
-        for pathToCheck in candidatePaths + [chosenCandidatePath, resolvedFilePath]
+        for pathToCheck in candidatePaths + [chosenCandidatePath]
         where isUnderHiddenFolderBelowEverySearchFolder(pathToCheck) {
             throw BrainFileRefusal.neverReadable
         }
         return resolvedFilePath
+    }
+
+    /// The rules every real path must pass, run on the path before the open and again on the opened descriptor's path:
+    /// not on the never-readable list, inside a search folder, and not under a hidden folder below it.
+    private func refuseUnlessPermitted(resolvedPath: String) throws {
+        if BrainFileRules.isNeverReadable(path: resolvedPath) { throw BrainFileRefusal.neverReadable }
+        guard isInsideSearchFolders(resolvedPath) else { throw BrainFileRefusal.outsideSearchFolders }
+        if isUnderHiddenFolderBelowEverySearchFolder(resolvedPath) { throw BrainFileRefusal.neverReadable }
     }
 
     /// Opens the file once and checks the descriptor, so what is read is what was checked (no swap between a path
@@ -88,9 +95,10 @@ public struct BrainFileReader: Sendable {
         return (URL(fileURLWithPath: resolvedFilePath), content)
     }
 
-    /// Opens without following a symlink or blocking, and accepts only a single-name regular file within the size cap.
-    private func openRegularFile(atPath path: String) throws -> Int32 {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    /// Opens without following a symlink in ANY component (`O_NOFOLLOW_ANY`; `O_NOFOLLOW` covers only the last one, so a
+    /// parent folder swapped for a symlink after the path check would read outside) or blocking, and accepts only a single-name regular file within the size cap.
+    func openRegularFile(atPath path: String) throws -> Int32 {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW_ANY | O_NONBLOCK)
         // A path that vanished, or a symlink swapped in since the check, is simply not there.
         guard descriptor >= 0 else { throw BrainFileRefusal.notFound }
         var fileStatus = stat()
@@ -101,11 +109,23 @@ public struct BrainFileReader: Sendable {
             // A second name for the same bytes (a hard link to a key file called notes.md) passes every path rule.
             guard fileStatus.st_nlink == 1 else { throw BrainFileRefusal.neverReadable }
             guard fileStatus.st_size <= Int64(Self.maximumFileBytes) else { throw BrainFileRefusal.notText }
+            try verifyDescriptorPath(descriptor, expectedPath: path)
         } catch {
             close(descriptor)
             throw error
         }
         return descriptor
+    }
+
+    /// Reads the path the kernel says the descriptor is open on (`F_GETPATH`) and runs the path rules on it again, so a
+    /// swap between the check and the open cannot read a file outside the folders. A path that differs from the one
+    /// checked is refused too.
+    func verifyDescriptorPath(_ descriptor: Int32, expectedPath: String) throws {
+        var pathBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        guard fcntl(descriptor, F_GETPATH, &pathBuffer) == 0 else { throw BrainFileRefusal.notFound }
+        let openedPath = String(cString: pathBuffer)
+        try refuseUnlessPermitted(resolvedPath: openedPath)
+        guard openedPath == expectedPath else { throw BrainFileRefusal.notFound }
     }
 
     private static func readBytes(from descriptor: Int32, upTo byteLimit: Int) throws -> Data {
