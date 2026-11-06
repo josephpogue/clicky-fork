@@ -38,3 +38,54 @@ enum SpeechTestSupport {
         return leading + clip + [Float](repeating: 0, count: trailingCount)
     }
 }
+
+/// A clock the test moves by hand, so a session can be played out at any pace.
+final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentDate: Date
+    init(_ start: Date) { currentDate = start }
+    var current: Date { lock.withLock { currentDate } }
+    func set(_ date: Date) { lock.withLock { currentDate = date } }
+}
+
+/// A stand-in microphone that delivers what the test pushes, stamped by the test's clock.
+final class ClockedSampleSource: AudioSampleSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var deliver: (@Sendable ([Float]) -> Void)?
+    private let clock: ManualClock
+    private(set) var stopCallCount = 0
+
+    init(clock: ManualClock) { self.clock = clock }
+
+    func start(
+        onSamples: @escaping @Sendable ([Float]) -> Void, onFinished: @escaping @Sendable () -> Void
+    ) async throws {
+        lock.withLock { deliver = onSamples }
+    }
+    func stop() async { lock.withLock { stopCallCount += 1 } }
+
+    /// Delivers `samples` as a microphone would: in 0.1 s chunks, each arriving the moment its
+    /// audio ends. The first sample was heard at `startDate`, so sample i was heard at startDate + i / 16000.
+    func play(_ samples: [Float], startingAt startDate: Date) {
+        let chunkSampleCount = 1_600
+        var chunkStart = 0
+        while chunkStart < samples.count {
+            let chunkEnd = min(chunkStart + chunkSampleCount, samples.count)
+            clock.set(startDate.addingTimeInterval(Double(chunkEnd) / SpeechTestSupport.sampleRate))
+            lock.withLock { deliver }?(Array(samples[chunkStart..<chunkEnd]))
+            chunkStart = chunkEnd
+        }
+    }
+}
+
+extension SpeechTestSupport {
+    static func silence(seconds: Double) -> [Float] {
+        [Float](repeating: 0, count: Int(seconds * sampleRate))
+    }
+
+    /// Lower-case words only, so a transcript compares with the sentence that was spoken.
+    static func words(of text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0 == " " }
+            .split(separator: " ").joined(separator: " ")
+    }
+}

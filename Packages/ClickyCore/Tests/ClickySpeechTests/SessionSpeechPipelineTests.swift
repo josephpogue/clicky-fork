@@ -3,7 +3,7 @@ import Testing
 @testable import ClickySpeech
 
 /// Collects what the pipeline reports, safely across threads.
-private final class PipelineRecorder: @unchecked Sendable {
+final class PipelineRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var utterances: [(text: String, start: Date, end: Date)] = []
     private var levelCount = 0
@@ -85,7 +85,7 @@ private final class HandFedSampleSource: AudioSampleSource, @unchecked Sendable 
         await pipeline.stop()
     }
 
-    @Test func nothingIsReportedAfterStop() async throws {
+    @Test func nothingIsDeliveredAfterStopReturns() async throws {
         let recorder = PipelineRecorder()
         let handFed = HandFedSampleSource()
         let pipeline = try await makePipeline(source: handFed, recorder: recorder)
@@ -97,13 +97,37 @@ private final class HandFedSampleSource: AudioSampleSource, @unchecked Sendable 
         handFed.push(Array(samples[0..<splitIndex]))
         try await Task.sleep(nanoseconds: 300_000_000)
         await pipeline.stop()
-        let levelsAtStop = recorder.recordedLevelCount
-        #expect(levelsAtStop > 0)
         #expect(handFed.stopCallCount >= 1)
+
+        // Stop closes the speech that was open, so the words heard so far are reported before it returns.
+        let utterancesAtStop = recorder.recordedUtterances.count
+        let levelsAtStop = recorder.recordedLevelCount
+        #expect(utterancesAtStop == 1)
+        #expect(levelsAtStop > 0)
+        #expect(await pipeline.sessionStartDate == nil)
 
         handFed.push(Array(samples[splitIndex...]))
         try await Task.sleep(nanoseconds: 1_500_000_000)
         #expect(recorder.recordedLevelCount == levelsAtStop)
-        #expect(recorder.recordedUtterances.isEmpty)
+        #expect(recorder.recordedUtterances.count == utterancesAtStop)
+        await #expect(throws: SpeechError.noSessionRunning) {
+            _ = try await pipeline.transcribeQuestion(
+                speechFrom: Self.sessionStart, speechTo: Self.sessionStart.addingTimeInterval(1))
+        }
+    }
+
+    @Test func questionTextIsExactlyWhatWasSpoken() async throws {
+        let recorder = PipelineRecorder()
+        let pipeline = try await makePipeline(
+            source: AudioFileSampleSource(samples: try sixSecondsWithClip()), recorder: recorder)
+        await pipeline.markQuestionStarted(at: Self.sessionStart.addingTimeInterval(1.8))
+        try await pipeline.start()
+        await pipeline.waitForSourceToFinish()
+
+        let questionText = try await pipeline.transcribeQuestion(
+            speechFrom: Self.sessionStart.addingTimeInterval(1.8),
+            speechTo: Self.sessionStart.addingTimeInterval(5.5))
+        #expect(SpeechTestSupport.words(of: questionText) == Self.clipText.lowercased())
+        await pipeline.stop()
     }
 }

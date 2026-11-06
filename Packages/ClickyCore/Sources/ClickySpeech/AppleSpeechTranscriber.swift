@@ -6,7 +6,9 @@ import Speech
 /// (`requiresOnDeviceRecognition`), but it needs the Speech Recognition permission and the app's
 /// `NSSpeechRecognitionUsageDescription`, so it must not be called from `swift test`.
 public final class AppleSpeechTranscriber: SpeechTranscriber {
-    public let engineName = "Apple Speech (on device)"
+    /// What `engineName` reads for this engine; the app compares against it to say which engine it got.
+    public static let engineDisplayName = "Apple Speech (on device)"
+    public let engineName = AppleSpeechTranscriber.engineDisplayName
 
     public init() {}
 
@@ -43,19 +45,27 @@ public final class AppleSpeechTranscriber: SpeechTranscriber {
         request.append(buffer)
         request.endAudio()
 
-        return try await withCheckedThrowingContinuation { continuation in
-            var hasResumed = false
-            // The recognizer calls this on its own queue, one result at a time.
-            _ = recognizer.recognitionTask(with: request) { result, error in
-                guard !hasResumed else { return }
-                if let result, result.isFinal {
-                    hasResumed = true
-                    continuation.resume(returning: result.bestTranscription.formattedString)
-                } else if let error {
-                    hasResumed = true
-                    continuation.resume(throwing: error)
-                }
+        // The recognizer answers with a final result or an error. If it does neither (no speech found,
+        // the on-device model missing), the deadline turns that silence into an error the app can show.
+        let outcome = FirstResult<String>()
+        let recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+            if let result, result.isFinal {
+                outcome.finish(.success(result.bestTranscription.formattedString))
+            } else if let error {
+                outcome.finish(.failure(error))
             }
         }
+        let audioSeconds = Double(samples.count) / sampleRate
+        let deadline = Task {
+            try? await Task.sleep(nanoseconds: UInt64((Self.recognitionBaseSeconds + audioSeconds) * 1_000_000_000))
+            if !Task.isCancelled, outcome.finish(.failure(SpeechError.speechRecognitionTimedOut)) {
+                recognitionTask.cancel()
+            }
+        }
+        defer { deadline.cancel() }
+        return try await outcome.value()
     }
+
+    /// Time allowed for the recognizer on top of the audio's own length.
+    private static let recognitionBaseSeconds = 20.0
 }

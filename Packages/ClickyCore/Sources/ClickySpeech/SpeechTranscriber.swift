@@ -18,6 +18,8 @@ public enum SpeechError: LocalizedError, Sendable, Equatable {
     case microphoneUnavailable(String)
     case audioFileUnreadable(String)
     case noSessionRunning
+    case speechModelDownloadTimedOut(seconds: Double)
+    case speechRecognitionTimedOut
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +33,10 @@ public enum SpeechError: LocalizedError, Sendable, Equatable {
             return "The microphone is not allowed for this app. Turn it on in System Settings, Privacy and Security."
         case .microphoneUnavailable(let reason):
             return "The microphone could not start: \(reason)"
+        case .speechModelDownloadTimedOut(let seconds):
+            return "The speech model did not finish downloading within \(Int(seconds)) seconds."
+        case .speechRecognitionTimedOut:
+            return "On-device speech recognition did not answer in time."
         case .noSessionRunning:
             return "No listening session is running."
         case .audioFileUnreadable(let reason):
