@@ -88,7 +88,7 @@ ChatGPT: keep every `CodexToolRestrictions` flag and add the same helper as Code
 
 Cost of a screen-only question (my call): a small fixed cost is accepted, namely the two tool definitions and a few more lines of instructions in each request. No passages are added. For ChatGPT the helper starts with every `codex exec`; if that adds more than about 300 ms to an answer, ChatGPT gets the tools only on questions whose passages fell below the floor. The measurement in Testing must show screen-only answers within about 200 ms of today's.
 
-Limits per question: at most about 6 tool calls and about 30 seconds of searching. The instructions state the limit; Clicky also ends the turn if the time runs out (Claude's stream-json interrupt) and keeps what was said so far. Numbers are the builder's to tune.
+No search limits (Joseph's call, 2026-11-06): the model searches as long as it needs to answer accurately, because each finding shows as it arrives and Joseph is never waiting on the end. A tight cap would cut answers short and push toward guessing. What ends a search: the model finishing, a new question, or Stop. Two guards stay, and neither limits accuracy: `read_brain_file` returns a capped number of lines per call (the model asks again for more), and Clicky ends a turn that repeats the same tool call with the same arguments three times in a row, keeping what was said so far.
 
 ### 5. Answering as findings arrive
 
@@ -105,7 +105,7 @@ Limits per question: at most about 6 tool calls and about 30 seconds of searchin
 
 When a question's transcript starts with "dig deeper" (allowing small speech-to-text variants), Clicky sends it as a normal new question on the stronger model and effort from Settings (default: the strongest model of the signed-in provider, high effort), then goes back to the normal model for the next question. It is one request, so it keeps the one-request rule.
 
-My calls on what dig deeper changes: the search limits rise (about 15 tool calls and 90 seconds), the answer may run longer, the way "explain more" does today, and the passage search uses the previous question's words plus any words spoken after "dig deeper".
+My calls on what dig deeper changes: the stronger model and effort, the answer may run longer, the way "explain more" does today, and the passage search uses the previous question's words plus any words spoken after "dig deeper".
 
 - Claude changes model in place with `set_model`, as today. The builder checks whether effort can change in place; if not, dig deeper changes the model only and says so in Settings.
 - Codex takes model and reasoning effort per `exec`, so both change for that one question.
@@ -126,11 +126,11 @@ My calls on what dig deeper changes: the search limits rise (about 15 tool calls
 
 - ClickyCore tests (swift-testing, `make test`): indexing and the skip rules; search ranking and the project boost; the passage floor and budget; path confinement in `read_brain_file` (symlink out, `..`, absolute paths, a search folder that is itself a symlink); dig-deeper detection; parsing streamed text and tool-call events for both CLIs; ending a running answer on a new question.
 - The test Mac (`testenv/`): the stand-in `claude` and `codex` learn to emit tool calls and streamed text so a user-mock walk can see a first part, "Checking your notes", and a later finding.
-- Measure on 30 to 50 of Joseph's real questions (the builder asks him for them, or takes them from past session logs): time to first text, how often the model searches, how often the right note is in the top 5 passages, and how often an answer has a correction. These numbers set the floor, the counts and the limits.
+- Measure on 30 to 50 of Joseph's real questions (the builder asks him for them, or takes them from past session logs): time to first text, how often the model searches, how often the right note is in the top 5 passages, and how often an answer has a correction. These numbers set the floor and the passage counts.
 
 ## Left to the builder
 
-- Chunk size, ranking weights, score floor, passage counts, tool call and time limits.
+- Chunk size, ranking weights, score floor, passage counts, the per-call line cap.
 - The helper's name and how it shares the index code with the app (a ClickyCore target is the natural place).
 - The exact skip rules and size cap for the index.
 - How "dig deeper" is matched in the transcript.
