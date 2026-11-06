@@ -50,23 +50,17 @@ final class SettingsWindowController {
                 title: "Clicky Fork Settings", contentSize: Self.contentSize, isResizable: true, identifier: "settings.nswindow")
             newWindow.contentMinSize = CGSize(width: 480, height: 420)
             newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state), contentSize: Self.contentSize)
-            fitInsideVisibleScreen(newWindow)
             window = newWindow
         }
         reloadFromSettings()
+        if let window, !window.isVisible {
+            // 760 high runs under the Dock on a 1024x768 display, and the chat panel can cover its right side;
+            // the placement shrinks the window to the free screen and moves it clear of the panel. The view scrolls.
+            AppWindowRouter.shared.placeOpenedWindow(window, desiredContentSize: Self.contentSize)
+        }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         Task { await refreshAccounts(clearMessages: true) }
-    }
-
-    /// The window is 760 high, which runs under the Dock on a 1024x768 display. Shrink it to the part of
-    /// the screen the menu bar and Dock leave free; the view scrolls, so nothing is lost.
-    private func fitInsideVisibleScreen(_ settingsWindow: NSWindow) {
-        guard let visibleFrame = (settingsWindow.screen ?? NSScreen.main)?.visibleFrame else { return }
-        let windowChromeHeight = settingsWindow.frame.height - settingsWindow.contentLayoutRect.height
-        let fittedFrame = WindowFit.frame(
-            desiredContentSize: Self.contentSize, windowChromeHeight: windowChromeHeight, visibleFrame: visibleFrame)
-        settingsWindow.setFrame(fittedFrame, display: false)
     }
 
     // MARK: - Closures the view calls

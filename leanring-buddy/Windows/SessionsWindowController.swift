@@ -36,6 +36,8 @@ final class SessionsWindowController {
     private let timeZone = TimeZone.current
     private var window: NSWindow?
     private var detailControllers: [String: SessionDetailWindowController] = [:]
+    /// Sessions whose detail window is still loading, so a second click on the same row does not open a second window.
+    private var detailOpensInFlight: Set<String> = []
     private var finishedSubscription: AnyCancellable?
 
     init() {
@@ -58,6 +60,9 @@ final class SessionsWindowController {
             window = newWindow
         }
         reload()
+        if let window, !window.isVisible {
+            AppWindowRouter.shared.placeOpenedWindow(window, desiredContentSize: Self.contentSize)
+        }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -87,8 +92,10 @@ final class SessionsWindowController {
             existing.show()
             return
         }
+        guard detailOpensInFlight.insert(sessionID).inserted else { return }
         let store = coordinator.sessionStore
         Task {
+            defer { detailOpensInFlight.remove(sessionID) }
             guard let session = try? await store.loadSession(id: sessionID) else { return }
             let detailController = SessionDetailWindowController(
                 session: session,

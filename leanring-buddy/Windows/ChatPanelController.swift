@@ -28,9 +28,41 @@ final class ChatPanelController {
 
     private var panel: NSPanel?
 
+    /// The panel's frame while it is on screen; nil when it is closed or was never opened.
+    var frameWhileVisible: CGRect? {
+        guard let panel, panel.isVisible else { return nil }
+        return panel.frame
+    }
+
+    private var windowCloseObserver: NSObjectProtocol?
+
+    /// Drops the panel below `window` so none of that window's controls sit under the panel. It still never
+    /// takes keyboard focus. The panel floats again when that window closes or the chat is shown again.
+    func sitBehind(_ window: NSWindow) {
+        guard let panel, panel.isVisible else { return }
+        panel.level = .normal
+        panel.order(.below, relativeTo: window.windowNumber)
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.floatAboveWindows() }
+        }
+    }
+
+    /// Puts the panel back above every window.
+    func floatAboveWindows() {
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
+        windowCloseObserver = nil
+        guard let panel, panel.level != .floating else { return }
+        panel.level = .floating
+        if panel.isVisible { panel.orderFrontRegardless() }
+    }
+
     func show() {
         let panel = panel ?? makePanel()
         self.panel = panel
+        floatAboveWindows()
         // orderFrontRegardless shows the panel without making the app or the
         // panel key, unlike makeKeyAndOrderFront.
         panel.orderFrontRegardless()

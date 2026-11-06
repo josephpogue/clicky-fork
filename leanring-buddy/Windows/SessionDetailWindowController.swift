@@ -81,6 +81,7 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
                     onRevealInFinder: { [weak self] in self?.revealInFinder() }),
                 contentSize: Self.contentSize)
             window = newWindow
+            AppWindowRouter.shared.placeOpenedWindow(newWindow, desiredContentSize: Self.contentSize)
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -217,7 +218,11 @@ final class SessionDetailWindowController: NSObject, NSWindowDelegate {
         let timeZone = timeZone
         Task {
             // Filed from the session as the store has it at this moment, not as it was when the window opened.
-            let session = await reloadFromStore() ?? loadedSession
+            // When it cannot be read, nothing is written: the copy from when the window opened may be the unfinished log.
+            guard let session = await reloadFromStore() else {
+                saveState.phase = .failed(message: "Could not read this session. Try again.")
+                return
+            }
             // The copy and the git commit can take a moment, so they run off the main thread.
             let result = await Task.detached {
                 Self.writeToVault(
