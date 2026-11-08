@@ -69,6 +69,11 @@ final class CursorAnswerPresenter {
         apply(growingBubbleState.lineReported(line))
     }
 
+    /// The final answer arrived: the checking line goes away even when the final line is the one already shown.
+    func answerFinished() {
+        apply(growingBubbleState.answerFinished())
+    }
+
     /// The footer for a line: "More in chat: <key>" under text, "Answer in chat: <key>" when it is the footer
     /// alone, and a pointer to the menu bar's Open chat outside a session. Nil when the line holds everything.
     private func footerText(for line: CursorLine) -> String? {

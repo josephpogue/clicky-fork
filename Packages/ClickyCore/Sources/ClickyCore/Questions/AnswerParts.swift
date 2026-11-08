@@ -30,12 +30,18 @@ public struct AnswerPart: Equatable, Sendable {
     /// True when nothing more can be added to `cursorText`: its marker came, a later part began, a tool call began
     /// after it, or the answer is final. While false, the last sentence of `cursorText` may still be half-written.
     public var isCursorTextComplete: Bool
+    /// True when the visible text ended with a sentence end and whitespace after it. That whitespace is what is left of
+    /// a hidden tag or half-written marker (`StreamingAnswerText`), so the last sentence is finished and shows now.
+    public var endsAtSentenceEnd: Bool
 
-    public init(cursorText: String, chatText: String, hasChatMarker: Bool, isCursorTextComplete: Bool) {
+    public init(
+        cursorText: String, chatText: String, hasChatMarker: Bool, isCursorTextComplete: Bool, endsAtSentenceEnd: Bool = false
+    ) {
         self.cursorText = cursorText
         self.chatText = chatText
         self.hasChatMarker = hasChatMarker
         self.isCursorTextComplete = isCursorTextComplete
+        self.endsAtSentenceEnd = endsAtSentenceEnd
     }
 }
 
@@ -45,7 +51,12 @@ public struct AnswerPartsTracker: Equatable, Sendable {
     public init() {}
 
     /// The visible answer so far (POINT tags removed, half-written tags and markers hidden), each time it grows.
+    /// A text that is not the earlier text plus more (a provider that replaces its text) keeps only the tool-call
+    /// boundaries whose text before them is unchanged.
     public mutating func textReported(_ visibleText: String) {
+        if !toolCallBoundaries.isEmpty {
+            toolCallBoundaries = Self.boundaries(toolCallBoundaries, keptFrom: latestVisibleText, into: visibleText)
+        }
         latestVisibleText = visibleText
     }
 
@@ -57,16 +68,8 @@ public struct AnswerPartsTracker: Equatable, Sendable {
 
     /// The final answer text (POINT tags removed; markers still in it). Every part is complete after it.
     public mutating func finalReported(_ text: String) {
-        // Only the tool calls that fall inside the text both versions share still mark a part's end.
-        let streamed = Array(latestVisibleText)
-        let final = Array(text)
-        var commonPrefixLength = 0
-        while commonPrefixLength < streamed.count, commonPrefixLength < final.count,
-              streamed[commonPrefixLength] == final[commonPrefixLength] {
-            commonPrefixLength += 1
-        }
-        toolCallBoundaries = toolCallBoundaries.filter { $0 <= commonPrefixLength }
-        latestVisibleText = text
+        // Only the tool calls whose text before them is unchanged in the final text still mark a part's end.
+        textReported(text)
         isFinal = true
     }
 
@@ -96,7 +99,8 @@ public struct AnswerPartsTracker: Equatable, Sendable {
             let isLast = endOffset == characters.count
             // A tool call at or after the part's end means nothing more is added to it.
             let toolCallFollows = toolCallBoundaries.contains { min($0, characters.count) >= endOffset }
-            if let part = Self.part(from: segment, isComplete: isFinal || !isLast || toolCallFollows) {
+            if var part = Self.part(from: segment, isComplete: isFinal || !isLast || toolCallFollows) {
+                part.endsAtSentenceEnd = isLast && Self.endsAtSentenceEnd(segment)
                 parts.append(part)
             }
             segmentStart = endOffset
@@ -127,6 +131,56 @@ public struct AnswerPartsTracker: Equatable, Sendable {
     /// Character counts of the visible text at each tool call, in order.
     private var toolCallBoundaries: [Int] = []
     private var isFinal = false
+
+    /// A segment that ends with a real sentence end (by `SentenceRule`, so not "Dr." or "U.S.") and then whitespace.
+    private static func endsAtSentenceEnd(_ segment: String) -> Bool {
+        guard let last = segment.last, last.isWhitespace else { return false }
+        let characters = Array(segment.trimmingCharacters(in: .whitespacesAndNewlines) + " ")
+        return characters.count > 1 && SentenceRule.endsSentence(at: characters.count - 2, in: characters)
+    }
+
+    /// The boundaries (character counts into `old`) that still stand in `new`: a boundary stays when the text before
+    /// it is unchanged, ignoring whitespace, and moves to where that text ends in `new`. Appended text keeps every
+    /// boundary as it is.
+    private static func boundaries(_ boundaries: [Int], keptFrom old: String, into new: String) -> [Int] {
+        let oldCharacters = Array(old)
+        let newCharacters = Array(new)
+        if newCharacters.count >= oldCharacters.count {
+            var index = 0
+            while index < oldCharacters.count, oldCharacters[index] == newCharacters[index] { index += 1 }
+            if index == oldCharacters.count { return boundaries }
+        }
+        // Non-whitespace characters before each offset of the old text, and the offset after each one in the new text.
+        var oldSignificant: [Character] = []
+        var oldSignificantBefore: [Int] = [0]
+        for character in oldCharacters {
+            if !character.isWhitespace { oldSignificant.append(character) }
+            oldSignificantBefore.append(oldSignificant.count)
+        }
+        var newSignificant: [Character] = []
+        var newOffsetAfterSignificant: [Int] = []
+        var newIndex = 0
+        while newIndex < newCharacters.count {
+            if !newCharacters[newIndex].isWhitespace {
+                newSignificant.append(newCharacters[newIndex])
+                newOffsetAfterSignificant.append(newIndex + 1)
+            }
+            newIndex += 1
+        }
+        var commonCount = 0
+        while commonCount < oldSignificant.count, commonCount < newSignificant.count,
+              oldSignificant[commonCount] == newSignificant[commonCount] {
+            commonCount += 1
+        }
+        var kept: [Int] = []
+        for boundary in boundaries {
+            let significantBefore = oldSignificantBefore[min(boundary, oldCharacters.count)]
+            if significantBefore > 0, significantBefore <= commonCount {
+                kept.append(newOffsetAfterSignificant[significantBefore - 1])
+            }
+        }
+        return kept
+    }
 
     /// One segment (no tool-call or Correction cut inside it) as a part, or nil when it holds nothing.
     private static func part(from segment: String, isComplete: Bool) -> AnswerPart? {
@@ -169,23 +223,11 @@ public struct AnswerPartsTracker: Equatable, Sendable {
                 if startsWord(at: index) { starts.append(index) }
                 atSentenceStart = false
             }
-            if ".!?".contains(character), index + 1 < characters.count, characters[index + 1].isWhitespace,
-               !endsAbbreviation(characters, periodIndex: index) {
+            if SentenceRule.endsSentence(at: index, in: characters) {
                 atSentenceStart = true
             }
             index += 1
         }
         return starts
-    }
-
-    /// "e.g." and "i.e." end in a period but not a sentence.
-    private static func endsAbbreviation(_ characters: [Character], periodIndex: Int) -> Bool {
-        guard characters[periodIndex] == "." else { return false }
-        for abbreviation in ["e.g.", "i.e."] {
-            let length = abbreviation.count
-            guard periodIndex + 1 >= length else { continue }
-            if String(characters[(periodIndex + 1 - length)...periodIndex]).lowercased() == abbreviation { return true }
-        }
-        return false
     }
 }

@@ -172,7 +172,7 @@ struct SessionQuestionFlowBrainTests {
 
         await harness.askQuestion()
 
-        #expect(harness.output.textChanges == ["The Save", "The Save button is up here."])
+        #expect(harness.output.textChanges == ["The Save", "The Save button is up here. "])
         #expect(harness.output.pointers.count == 1)
         #expect(harness.output.pointers[0].label == "save button")
         #expect(harness.output.pointers[0].globalPoint == CGPoint(x: 1327.5, y: 855))

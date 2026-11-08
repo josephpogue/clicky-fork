@@ -15,16 +15,26 @@ public enum StreamingAnswerText {
     public static func visible(rawTextSoFar: String) -> StreamingAnswerView {
         let withoutOpenTag = removingTrailingIncompleteTag(from: rawTextSoFar)
         let parsed = PointTagParser.parse(withoutOpenTag)
-        // A text that ends in a tag keeps no space before it; "x [" trims its leading space the same way.
-        var visibleText = parsed.spokenText
-        if withoutOpenTag.count != rawTextSoFar.count {
+        // The visible text only ever grows at its end: leading whitespace never shows, in any state of the stream.
+        var visibleText = String(parsed.spokenText.drop(while: { $0.isWhitespace }))
+        // Hidden text (a half-written tag or marker, or a tag) takes the space that followed a sentence. The sentence
+        // is finished all the same, so the space stays for it, and it shows without waiting for the final answer.
+        if withoutOpenTag.count != rawTextSoFar.count || endsInCompleteTag(withoutOpenTag) {
             visibleText = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let lastCharacter = visibleText.last, ".!?".contains(lastCharacter) { visibleText += " " }
         }
         return StreamingAnswerView(visibleText: visibleText, firstCompletePoint: firstPoint(in: withoutOpenTag))
     }
 
-    /// Cuts an unfinished `[POINT:...` (no closing bracket yet) or a trailing prefix of `[POINT:` or `[CHAT]` off the end.
-    private static func removingTrailingIncompleteTag(from text: String) -> String {
+    private static func endsInCompleteTag(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasSuffix("]"), let openRange = trimmed.range(of: tagOpening, options: .backwards) else { return false }
+        return !trimmed[openRange.lowerBound...].dropLast().contains("]")
+    }
+
+    /// Cuts an unfinished `[POINT:...` (no closing bracket yet) or a trailing prefix of `[POINT:` or `[CHAT]` off the
+    /// end. Every reader of a raw answer that may have been cut short uses it.
+    public static func removingTrailingIncompleteTag(from text: String) -> String {
         if let openRange = text.range(of: tagOpening, options: .backwards),
            !text[openRange.lowerBound...].contains("]") {
             return String(text[..<openRange.lowerBound])

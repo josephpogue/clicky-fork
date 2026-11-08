@@ -54,14 +54,15 @@ struct CursorLineStateTests {
         let longSentence = String(repeating: "a", count: 69) + "."
         let update = state.update(parts: [part(longSentence, complete: true)], fits: fits)
         #expect(update.line == CursorLine(text: "", hasMoreInChat: true))
-        #expect(update.newSentencesToSpeak == [])
+        // The voice mirrors the bubble: a footer-only bubble says the answer is in the chat.
+        #expect(update.newSentencesToSpeak == [CursorLineState.footerOnlySpokenSentence])
     }
 
     @Test func aPartWithOnlyAMarkerIsTheFooterAlone() {
         var state = CursorLineState()
         let update = state.update(parts: [part("", complete: true, marker: true, chat: "Details.")], fits: fits)
         #expect(update.line == CursorLine(text: "", hasMoreInChat: true))
-        #expect(update.newSentencesToSpeak == [])
+        #expect(update.newSentencesToSpeak == [CursorLineState.footerOnlySpokenSentence])
     }
 
     @Test func aNewPartWithNoSentenceYetKeepsTheEarlierLineAndSpeaksNothing() {

@@ -774,6 +774,8 @@ final class SessionCoordinator: ObservableObject {
             return
         }
         refreshCursorLine(answerNumber: answerNumber)
+        // "Checking your notes" never stays on a finished answer, also when the final line is the one already shown.
+        if settings.answerDeliveryMode.showsText { cursorAnswerPresenter.answerFinished() }
         answerPartsByNumber[answerNumber] = nil
     }
 
@@ -844,8 +846,10 @@ final class SessionCoordinator: ObservableObject {
         guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
         // The tool call ends the current part, so its last sentence is complete and may show and be spoken now.
         answerPartsByNumber[answerNumber]?.toolCallStarted()
-        if settings.answerDeliveryMode.showsText { cursorAnswerPresenter.noteToolCallStarted() }
+        // The line first, then the note: after a click, the ended part's last sentence completing is not a new finding,
+        // only the next part's line is.
         refreshCursorLine(answerNumber: answerNumber)
+        if settings.answerDeliveryMode.showsText { cursorAnswerPresenter.noteToolCallStarted() }
     }
 
     private struct ComingAnswerDetails {

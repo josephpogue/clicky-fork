@@ -69,7 +69,9 @@ public enum SessionBrowsing {
             case .answer(let text, let provider, let model, let secondsToAnswer, _):
                 let detail = "\(displayName(of: provider)), \(model), \(String(format: "%.1f", secondsToAnswer)) s"
                 entries.append(SessionTimelineEntry(
-                    time: event.time, kind: .answer, text: AnswerChatMarker.removing(from: PointTagParser.parse(text).spokenText, joinedBy: "\n\n"),
+                    time: event.time, kind: .answer, text: AnswerChatMarker.removing(
+                        from: PointTagParser.parse(StreamingAnswerText.removingTrailingIncompleteTag(from: text)).spokenText,
+                        joinedBy: "\n\n"),
                     detail: detail))
             case .answerFailed(let message, _, _, _):
                 entries.append(SessionTimelineEntry(time: event.time, kind: .notice, text: message))

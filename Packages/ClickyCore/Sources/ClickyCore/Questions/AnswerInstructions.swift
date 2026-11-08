@@ -65,7 +65,7 @@ public enum AnswerInstructions {
 
             - You have two tools, search_brain and read_brain_file, over the user's notes and project files. When the screen and the notes you were given do not answer the question, first say in a few words that you are checking and what, for example "Let me check your notes for the demo port.", then search. Search as much as you need to be accurate.
             - When a finding changes something you already said, start that sentence with "Correction:". Each search starts a new part: the text before it is one part, such as "Let me check your notes for the demo port.", and after the search the next part opens with its own short cursor text, and may have its own [CHAT] and chat text. A sentence that starts with "Correction:" starts a new part too. Keep each cursor part to one or two sentences.
-            - When the question begins with "dig deeper", search thoroughly and give the fuller answer.
+            - When the question begins with "dig deeper", search thoroughly and give the fuller answer, in the same shape as any answer: a short cursor part first, then [CHAT] and the fuller answer.
             """
             if !mapPaths.isEmpty {
                 toolRules += "\n- When the notes given do not cover the question, read these map files first: \(mapPaths.joined(separator: ", "))."

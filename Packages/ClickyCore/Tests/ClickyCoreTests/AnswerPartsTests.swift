@@ -142,14 +142,15 @@ struct AnswerPartsTests {
         #expect(tracker.parts.map(\.cursorText) == ["Let me look at it. Done."])
     }
 
-    @Test func textThatShrinksKeepsBoundariesClamped() {
+    @Test func textThatShrinksDropsTheBoundariesItNoLongerHolds() {
         var tracker = AnswerPartsTracker()
         tracker.textReported("Hello there friend. Hmm")
         tracker.toolCallStarted()
         tracker.textReported("Hello")
         #expect(tracker.parts.map(\.cursorText) == ["Hello"])
+        // The text was replaced, so the old tool call's boundary is gone with the text it belonged to.
         tracker.textReported("Hello there friend. Hmm done.")
-        #expect(tracker.parts.map(\.cursorText) == ["Hello there friend. Hmm", "done."])
+        #expect(tracker.parts.map(\.cursorText) == ["Hello there friend. Hmm done."])
     }
 
     @Test func aLaterToolCallCompletesTheEarlierCursorText() {
@@ -210,7 +211,7 @@ struct AnswerChatMarkerRemovingTests {
 struct StreamingChatMarkerTests {
     @Test(arguments: ["[", "[C", "[CH", "[CHA", "[CHAT"])
     func aHalfWrittenMarkerIsHidden(suffix: String) {
-        #expect(StreamingAnswerText.visible(rawTextSoFar: "Hi there. " + suffix).visibleText == "Hi there.")
+        #expect(StreamingAnswerText.visible(rawTextSoFar: "Hi there. " + suffix).visibleText == "Hi there. ")
     }
 
     @Test func aCompleteMarkerStaysVisible() {

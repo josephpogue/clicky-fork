@@ -55,6 +55,14 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         if isDismissed { hasNewFindingSinceDismissal = true }
     }
 
+    /// The final answer arrived: "Checking your notes" never stays on a finished answer, even when the final line is
+    /// the one already shown (so `lineReported` was not called again).
+    public mutating func answerFinished() -> Action {
+        guard isOnScreen, showsCheckingLine else { return .nothing }
+        guard !shownLine.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || shownLine.hasMoreInChat else { return .nothing }
+        return display(line: shownLine, showsCheckingLine: false)
+    }
+
     /// The user clicked or pressed a key: the bubble faded away.
     public mutating func userDismissed() {
         guard isOnScreen else { return }

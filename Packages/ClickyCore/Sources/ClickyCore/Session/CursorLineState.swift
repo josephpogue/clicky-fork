@@ -57,43 +57,93 @@ public struct CursorLineUpdate: Equatable, Sendable {
 /// Pure: `fits` is the app's measurement (true when the text fits under `CursorBubbleLayout.maximumBodyHeight`).
 /// The coordinator keeps one per answer, made fresh at each question, and calls `update` after every report.
 public struct CursorLineState: Equatable, Sendable {
-    /// How many sentences of each part (by part index) were handed out to be spoken already.
-    private var spokenSentenceCountByPartIndex: [Int: Int] = [:]
+    /// What the voice says for a part whose shown line is the footer alone, so the user knows the answer is in the
+    /// chat (the voice mirrors the bubble).
+    public static let footerOnlySpokenSentence = "The answer is in the chat."
+
+    /// The run measured for one part: reused while the part's complete sentences and marker are unchanged, so chat
+    /// text and half-written sentences never cause a measurement.
+    private struct MeasuredRun: Equatable, Sendable {
+        var sentences: [String]
+        var hasChatMarker: Bool
+        var line: CursorLine
+        var shownCount: Int
+    }
+
+    /// The sentences of each part (by part index) that were handed out to be spoken, in order.
+    private var spokenSentencesByPartIndex: [Int: [String]] = [:]
+    /// The parts whose footer-only line was handed out to be spoken.
+    private var footerSpokenPartIndexes: Set<Int> = []
+    private var measuredRunByPartIndex: [Int: MeasuredRun] = [:]
     /// The line last returned, so an update that changes nothing returns no line (the bubble is not asked to re-show).
     private var lastLine: CursorLine?
 
     public init() {}
 
     /// Returns `line` nil while no part has a whole sentence yet and whenever the line is the same as the last one
-    /// returned. `newSentencesToSpeak` holds each shown sentence once, ever.
+    /// returned. `newSentencesToSpeak` holds each shown sentence once; a part whose text was replaced (a provider
+    /// that rewrites its text) speaks the replacing text.
     public mutating func update(parts: [AnswerPart], fits: (String) -> Bool) -> CursorLineUpdate {
         var partIndex = parts.count - 1
         while partIndex >= 0 {
             let part = parts[partIndex]
-            let sentences = SpokenSentenceSplitter.sentences(in: part.cursorText, isTextComplete: part.isCursorTextComplete)
+            let sentences = SpokenSentenceSplitter.sentences(
+                in: part.cursorText, isTextComplete: part.isCursorTextComplete || part.endsAtSentenceEnd)
             let isFooterAloneCandidate = part.cursorText.isEmpty && part.hasChatMarker
             if !sentences.isEmpty || isFooterAloneCandidate {
-                let run = CursorLine.leadingRun(of: sentences, hasChatMarker: part.hasChatMarker, fits: fits)
-                return result(line: run.line, shownSentences: sentences, shownCount: run.shownCount, partIndex: partIndex)
+                let run = measuredRun(sentences: sentences, hasChatMarker: part.hasChatMarker, partIndex: partIndex, fits: fits)
+                return result(line: run.line, sentences: sentences, shownCount: run.shownCount, partIndex: partIndex)
             }
             partIndex -= 1
         }
         return CursorLineUpdate(line: nil, newSentencesToSpeak: [])
     }
 
+    private mutating func measuredRun(
+        sentences: [String], hasChatMarker: Bool, partIndex: Int, fits: (String) -> Bool
+    ) -> MeasuredRun {
+        if let cached = measuredRunByPartIndex[partIndex], cached.sentences == sentences, cached.hasChatMarker == hasChatMarker {
+            return cached
+        }
+        let run = CursorLine.leadingRun(of: sentences, hasChatMarker: hasChatMarker, fits: fits)
+        let measured = MeasuredRun(sentences: sentences, hasChatMarker: hasChatMarker, line: run.line, shownCount: run.shownCount)
+        measuredRunByPartIndex[partIndex] = measured
+        return measured
+    }
+
     private mutating func result(
-        line: CursorLine, shownSentences: [String], shownCount: Int, partIndex: Int
+        line: CursorLine, sentences: [String], shownCount: Int, partIndex: Int
     ) -> CursorLineUpdate {
-        let alreadySpokenCount = spokenSentenceCountByPartIndex[partIndex] ?? 0
+        var spoken = spokenSentencesByPartIndex[partIndex] ?? []
+        if !Self.sentences(sentences, startWith: spoken) {
+            // The part's text was replaced: what it says now has not been spoken.
+            spoken = []
+            footerSpokenPartIndexes.remove(partIndex)
+        }
         var newSentences: [String] = []
-        var sentenceIndex = alreadySpokenCount
+        var sentenceIndex = spoken.count
         while sentenceIndex < shownCount {
-            newSentences.append(shownSentences[sentenceIndex])
+            newSentences.append(sentences[sentenceIndex])
             sentenceIndex += 1
         }
-        spokenSentenceCountByPartIndex[partIndex] = max(alreadySpokenCount, shownCount)
+        if shownCount > spoken.count { spoken = Array(sentences[0..<shownCount]) }
+        spokenSentencesByPartIndex[partIndex] = spoken
+        if line.text.isEmpty, line.hasMoreInChat, !footerSpokenPartIndexes.contains(partIndex) {
+            footerSpokenPartIndexes.insert(partIndex)
+            newSentences.append(Self.footerOnlySpokenSentence)
+        }
         let isChange = line != lastLine
         lastLine = line
         return CursorLineUpdate(line: isChange ? line : nil, newSentencesToSpeak: newSentences)
+    }
+
+    private static func sentences(_ sentences: [String], startWith prefix: [String]) -> Bool {
+        guard sentences.count >= prefix.count else { return false }
+        var index = 0
+        while index < prefix.count {
+            if sentences[index] != prefix[index] { return false }
+            index += 1
+        }
+        return true
     }
 }
