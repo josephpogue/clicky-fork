@@ -78,12 +78,14 @@ final class QuestionKeySettingsState: ObservableObject {
     var isAtDefault: Bool { currentKey == kind.defaultKey }
 }
 
-/// Wires `QuestionKeySettingsState` to AppSettings and to the session's key monitor.
+/// Wires `QuestionKeySettingsState` to AppSettings and to the session's key monitor. What a recording and a
+/// refusal look like at each step is decided by `KeyRecordingSession` (ClickyCore); this class passes events in
+/// and shows what it holds.
 @MainActor
 final class QuestionKeySettingsController {
     let state: QuestionKeySettingsState
     private let kind: SettingsKeyKind
-    private var recorder: QuestionKeyRecorder
+    private var session: KeyRecordingSession
     private var eventMonitor: Any?
     private var windowCloseObserver: NSObjectProtocol?
     private var keySubscription: AnyCancellable?
@@ -97,7 +99,7 @@ final class QuestionKeySettingsController {
 
     init(kind: SettingsKeyKind = .question) {
         self.kind = kind
-        recorder = QuestionKeyRecorder(sided: kind == .chat)
+        session = KeyRecordingSession(kind: kind == .chat ? .chat : .question)
         state = QuestionKeySettingsState(kind: kind, currentKey: Self.savedKey(for: kind))
         state.onToggleRecording = { [weak self] in
             guard let self else { return }
@@ -105,25 +107,35 @@ final class QuestionKeySettingsController {
         }
         state.onReset = { [weak self] in
             guard let self else { return }
-            self.stopRecording()
-            self.saveUnlessOverlapping(kind.defaultKey)
+            self.endRecordingSession()
+            if let keyToSave = self.session.reset(to: kind.defaultKey, saved: Self.savedKeys) {
+                self.save(keyToSave)
+            }
+            self.showSessionState()
         }
         if kind == .chat {
             Self.chatSectionController = self
-            // The chat key yields to the question key, whichever of them changed or was loaded last.
-            keySubscription = Publishers.CombineLatest(AppSettings.shared.$questionKey, AppSettings.shared.$chatKey)
-                .sink { [weak self] questionKey, chatKey in
-                    self?.state.inactiveNotice = KeyOverlap.inactiveChatKeyNotice(chat: chatKey, question: questionKey) ?? ""
-                }
         } else {
             Self.questionSectionController = self
         }
-        // A recording left open when the window closes would keep swallowing keys.
+        // Whichever key changed or was loaded last, what Settings says about a clash follows the saved keys:
+        // the chat key's "off" notice, and any refusal still on screen.
+        keySubscription = Publishers.CombineLatest(AppSettings.shared.$questionKey, AppSettings.shared.$chatKey)
+            .sink { [weak self] questionKey, chatKey in
+                guard let self else { return }
+                self.session.savedKeysChanged(SavedKeys(question: questionKey, chat: chatKey))
+                self.state.message = self.session.refusal.text
+                if self.kind == .chat {
+                    self.state.inactiveNotice = KeyOverlap.inactiveChatKeyNotice(chat: chatKey, question: questionKey) ?? ""
+                }
+            }
+        // A recording left open when the window closes would keep swallowing keys, and a refusal must not wait
+        // on screen for the next time Settings opens.
         windowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { [weak self] notification in
             guard (notification.object as? NSWindow)?.identifier?.rawValue == "settings.nswindow" else { return }
-            Task { @MainActor in self?.stopRecording() }
+            Task { @MainActor in self?.settingsClosed() }
         }
     }
 
@@ -135,24 +147,20 @@ final class QuestionKeySettingsController {
         kind == .question ? AppSettings.shared.questionKey : AppSettings.shared.chatKey
     }
 
+    private static var savedKeys: SavedKeys {
+        SavedKeys(question: AppSettings.shared.questionKey, chat: AppSettings.shared.chatKey)
+    }
+
+    /// Settings is shown (again): the saved key, and nothing left over from the last time.
     func reloadFromSettings() {
         state.currentKey = Self.savedKey(for: kind)
+        settingsClosed()
     }
 
-    /// Why the other key refuses `spec`, or nil when a press of `spec` could never fire both.
-    private func overlapRefusal(for spec: QuestionKeySpec) -> String? {
-        switch kind {
-        case .question: return KeyOverlap.refusalForQuestionKey(spec, chat: AppSettings.shared.chatKey)
-        case .chat: return KeyOverlap.refusalForChatKey(spec, question: AppSettings.shared.questionKey)
-        }
-    }
-
-    private func saveUnlessOverlapping(_ spec: QuestionKeySpec) {
-        if let refusal = overlapRefusal(for: spec) {
-            state.message = refusal
-        } else {
-            save(spec)
-        }
+    private func settingsClosed() {
+        endRecordingSession()
+        session.settingsClosed()
+        showSessionState()
     }
 
     private func save(_ spec: QuestionKeySpec) {
@@ -161,14 +169,18 @@ final class QuestionKeySettingsController {
         case .chat: AppSettings.shared.chatKey = spec
         }
         state.currentKey = spec
-        state.message = ""
+    }
+
+    /// Copies what the recording session holds onto the view's state.
+    private func showSessionState() {
+        state.isRecording = session.isRecording
+        state.recordingHint = session.hint
+        state.message = session.refusal.text
     }
 
     private func startRecording() {
-        recorder = QuestionKeyRecorder(sided: kind == .chat)
-        state.message = ""
-        state.recordingHint = ""
-        state.isRecording = true
+        session.start()
+        showSessionState()
         // Only one section records: the other one stops, and the keys stay suspended through the hand-over.
         if let previousOwner = Self.recordingTracker.begin(kind.recordingOwnerName) {
             let previousController = previousOwner == SettingsKeyKind.question.recordingOwnerName
@@ -185,18 +197,22 @@ final class QuestionKeySettingsController {
         }
     }
 
+    /// Cancel, or the other section taking over: ends the recording and drops its refusal.
     private func stopRecording() {
+        endRecordingSession()
+        session.cancel()
+        showSessionState()
+    }
+
+    /// Takes the recording monitor down and hands the session's keys back (unless the other section records).
+    private func endRecordingSession() {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
-        if state.isRecording {
-            // A refusal from this recording goes with it (Cancel, Escape, or the other section taking over).
-            state.message = ""
+        if session.isRecording {
             Self.recordingTracker.end(kind.recordingOwnerName)
             // Still suspended when the other section took over recording.
             SessionCoordinator.shared.setQuestionKeyRecording(Self.recordingTracker.isRecording)
         }
-        state.isRecording = false
-        state.recordingHint = ""
     }
 
     private func handle(_ event: NSEvent) {
@@ -210,27 +226,24 @@ final class QuestionKeySettingsController {
         default:
             return
         }
-        let outcome = recorder.handle(input)
-        state.recordingHint = recorder.heldHint
-        switch outcome {
-        case nil:
-            return
+        switch session.handle(input, saved: Self.savedKeys) {
+        case .keepRecording:
+            showSessionState()
         case .cancelled:
-            stopRecording()
-        case .recorded(let spec):
-            if let refusal = overlapRefusal(for: spec) {
-                // Stay in recording so the user can press a different key.
-                recorder = QuestionKeyRecorder(sided: kind == .chat)
-                state.message = refusal
-            } else {
-                stopRecording()
-                save(spec)
-            }
-        case .rejected(let rejection):
-            // Stay in recording so the user can press a better key.
-            recorder = QuestionKeyRecorder(sided: kind == .chat)
-            state.message = rejection.message
+            endRecordingSessionAfterFinish()
+        case .save(let spec):
+            endRecordingSessionAfterFinish()
+            save(spec)
         }
+    }
+
+    /// The session already left recording (Escape or a saved key): release the monitor and the tracker.
+    private func endRecordingSessionAfterFinish() {
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        eventMonitor = nil
+        Self.recordingTracker.end(kind.recordingOwnerName)
+        SessionCoordinator.shared.setQuestionKeyRecording(Self.recordingTracker.isRecording)
+        showSessionState()
     }
 }
 

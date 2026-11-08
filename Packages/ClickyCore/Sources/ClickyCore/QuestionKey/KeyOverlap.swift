@@ -75,19 +75,38 @@ public enum KeyOverlap {
         chat.isChatKeyForm && !canFireBoth(question, chat)
     }
 
-    /// What Settings says under a chat key that is switched off, or nil when it works.
+    /// What Settings says under a chat key that is switched off, or nil when it works. It names the key that
+    /// takes the press and what to do.
     public static func inactiveChatKeyNotice(chat: QuestionKeySpec, question: QuestionKeySpec) -> String? {
-        isChatKeyActive(chat, question: question) ? nil : "Your question key uses this press. Record a different chat key."
+        if isChatKeyActive(chat, question: question) { return nil }
+        guard chat.isChatKeyForm else {
+            return "The chat key is off because it is not a key the chat key can use. Record a different chat key."
+        }
+        return "The chat key (\(chat.displayName)) is off: your question key (\(question.displayName)) uses the same press. Record a different chat key."
     }
 
-/// The refusal text for a chat key that overlaps the question key, or nil when it is fine.
+    /// The refusal text for a chat key that overlaps the question key, or nil when it is fine.
     public static func refusalForChatKey(_ chat: QuestionKeySpec, question: QuestionKeySpec) -> String? {
-        canFireBoth(question, chat) ? "That press would also fire the question key (\(question.displayName)). Pick a different key." : nil
+        canFireBoth(question, chat)
+            ? "That press would also fire your question key (\(question.displayName)). Press a different key for the chat key."
+            : nil
     }
 
     /// The refusal text for a question key that overlaps the chat key, or nil when it is fine.
     public static func refusalForQuestionKey(_ questionKey: QuestionKeySpec, chat: QuestionKeySpec) -> String? {
-        canFireBoth(questionKey, chat) ? "That press would also fire the chat key (\(chat.displayName)). Pick a different key." : nil
+        canFireBoth(questionKey, chat)
+            ? "That press would also fire your chat key (\(chat.displayName)). Press a different key for the question key, or record a different chat key first."
+            : nil
+    }
+
+    /// The refusal for a question key recorded now. A chat key that is already off (it clashes with the question
+    /// key in use, or is not a usable form) blocks nothing: it fires nothing today, the question key wins, and
+    /// Settings keeps saying the chat key is off.
+    public static func refusalForNewQuestionKey(
+        _ newKey: QuestionKeySpec, currentQuestion: QuestionKeySpec, chat: QuestionKeySpec
+    ) -> String? {
+        guard isChatKeyActive(chat, question: currentQuestion) else { return nil }
+        return refusalForQuestionKey(newKey, chat: chat)
     }
 }
 
@@ -107,6 +126,9 @@ public struct TwoKeyDetector {
     public private(set) var chatKey: QuestionKeySpec
     private var question: QuestionKeyDetector
     private var chat: QuestionKeyDetector?
+    /// Keys whose press this detector hid and whose release it has not yet seen. The release is hidden too, whatever
+    /// happened in between (recording started, a key changed, the detectors were rebuilt).
+    private var owedKeyUps: Set<UInt16> = []
 
     public init(questionKey: QuestionKeySpec, chatKey: QuestionKeySpec) {
         self.questionKey = questionKey
@@ -123,10 +145,40 @@ public struct TwoKeyDetector {
     public mutating func handle(_ input: QuestionKeyInput) -> TwoKeyDetection {
         let q = question.handle(input)
         let c = chat?.handle(input) ?? QuestionKeyDetection()
-        return TwoKeyDetection(questionTap: q.tap, chatPressed: c.tap != nil, swallowEvent: q.swallowEvent || c.swallowEvent)
+        var swallowEvent = q.swallowEvent || c.swallowEvent
+        switch input {
+        case let .keyDown(keyCode, _, isRepeat, _):
+            if swallowEvent {
+                owedKeyUps.insert(keyCode)
+            } else if owedKeyUps.contains(keyCode) {
+                // A repeat of a key we hid stays hidden; a fresh press means the old release never arrived.
+                if isRepeat { swallowEvent = true } else { owedKeyUps.remove(keyCode) }
+            }
+        case let .keyUp(keyCode, _):
+            if owedKeyUps.remove(keyCode) != nil { swallowEvent = true }
+        case .modifiersChanged, .mouseButtonDown:
+            break
+        }
+        return TwoKeyDetection(questionTap: q.tap, chatPressed: c.tap != nil, swallowEvent: swallowEvent)
     }
 
-    /// Forgets any half-seen press, keeping both keys.
+    /// While the keys are suspended the detectors see nothing, but a release or repeat this detector owes is still
+    /// hidden. True when the event must be removed.
+    public mutating func swallowsWhileSuspended(_ input: QuestionKeyInput) -> Bool {
+        switch input {
+        case let .keyDown(keyCode, _, isRepeat, _):
+            guard owedKeyUps.contains(keyCode) else { return false }
+            if isRepeat { return true }
+            owedKeyUps.remove(keyCode)
+            return false
+        case let .keyUp(keyCode, _):
+            return owedKeyUps.remove(keyCode) != nil
+        case .modifiersChanged, .mouseButtonDown:
+            return false
+        }
+    }
+
+    /// Forgets any half-seen press, keeping both keys and any release still owed.
     public mutating func reset() {
         question = QuestionKeyDetector(spec: questionKey)
         chat = chat == nil ? nil : QuestionKeyDetector(spec: chatKey)

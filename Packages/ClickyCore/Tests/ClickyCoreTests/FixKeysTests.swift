@@ -89,8 +89,9 @@ struct FixKeysTests {
     }
 
     @Test func settingsSaysWhyTheChatKeyIsOff() {
+        // Names the chat key, the question key that takes the press, and what to do.
         #expect(KeyOverlap.inactiveChatKeyNotice(chat: .defaultChatKey, question: commandComma)
-                == "Your question key uses this press. Record a different chat key.")
+                == "The chat key (Right \u{2318} ,) is off: your question key (\(commandComma.displayName)) uses the same press. Record a different chat key.")
         #expect(KeyOverlap.inactiveChatKeyNotice(chat: .defaultChatKey, question: .default) == nil)
     }
 

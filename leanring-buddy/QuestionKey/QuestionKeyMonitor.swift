@@ -27,6 +27,10 @@ final class QuestionKeyMonitor {
     var onSignal: ((QuestionKeySignal) -> Void)?
     /// Called on the main actor each time the chat key is pressed during a session.
     var onChatKeyPressed: (() -> Void)?
+    /// Called once on the main actor when the key tap is gone for good in a running session (Accessibility was
+    /// taken away and a second try failed too). Say it with `KeyTapNotice.lost`. Dropped after stop() like the
+    /// other callbacks; stop() then Start again works as usual.
+    var onTapLost: (@MainActor () -> Void)?
 
     /// The running tap thread; nil outside a session. Only its start and stop wait for it; every other change
     /// is handed to it without waiting.
@@ -86,6 +90,14 @@ final class QuestionKeyMonitor {
                         self.onChatKeyPressed?()
                     }
                 }
+            },
+            deliverTapLost: { [weak self] in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, self.currentWorkerToken == token else { return }
+                        self.onTapLost?()
+                    }
+                }
             })
         guard newWorker.startAndInstallTap() else { return false }
         currentWorkerToken = token
@@ -118,6 +130,7 @@ final class QuestionKeyMonitor {
 nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
     private let deliverSignal: @Sendable (QuestionKeySignal) -> Void
     private let deliverChatKeyPress: @Sendable () -> Void
+    private let deliverTapLost: @Sendable () -> Void
 
     // Tap thread only (after `startAndInstallTap` begins).
     private var detector: TwoKeyDetector
@@ -128,6 +141,10 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
     /// Whether the running tap can remove events (a key combination with a regular key) or only watch.
     private var tapIsRemovingEvents = false
     private var keepAliveSource: CFRunLoopSource?
+    private var healthCheckTimer: CFRunLoopTimer?
+    private var wasTrusted = true
+    /// Decides when a tap that cannot be put back is lost for good (and said once).
+    private var tapHealth = KeyTapHealth()
 
     private var tapRunLoop: CFRunLoop?
     private let threadReady = DispatchSemaphore(value: 0)
@@ -140,12 +157,14 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
         chatKey: QuestionKeySpec,
         isSuspended: Bool,
         deliverSignal: @escaping @Sendable (QuestionKeySignal) -> Void,
-        deliverChatKeyPress: @escaping @Sendable () -> Void
+        deliverChatKeyPress: @escaping @Sendable () -> Void,
+        deliverTapLost: @escaping @Sendable () -> Void
     ) {
         detector = TwoKeyDetector(questionKey: questionKey, chatKey: chatKey)
         self.isSuspended = isSuspended
         self.deliverSignal = deliverSignal
         self.deliverChatKeyPress = deliverChatKeyPress
+        self.deliverTapLost = deliverTapLost
     }
 
     // MARK: Called from the main actor
@@ -239,6 +258,14 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
             keepAliveSource = source
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
+        // Taking Accessibility away can stop a tap without a word, so look at it now and then.
+        let timer = CFRunLoopTimerCreateWithHandler(
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + Self.healthCheckInterval, Self.healthCheckInterval, 0, 0
+        ) { [self] _ in checkTapStillWorks() }
+        if let timer {
+            healthCheckTimer = timer
+            CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, .commonModes)
+        }
         threadReady.signal()
         CFRunLoopRun()
         threadExited.signal()
@@ -292,11 +319,56 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
     private func swapTapIfRemovalChanged() {
         if eventTap != nil, tapIsRemovingEvents != detector.swallowsAKey {
             removeTap()
-            _ = installTap()
+            settleTap(after: tapHealth.attemptFinished(succeeded: installTap()))
+        }
+    }
+
+    /// Acts on the result of a try to put the tap in place: tries again right away when asked to, and tells the
+    /// main actor once when the tap is gone for good, so the keys never stop with no word.
+    private func settleTap(after firstVerdict: KeyTapHealth.Verdict) {
+        var verdict = firstVerdict
+        while verdict == .tryAgain {
+            removeTap()
+            verdict = tapHealth.attemptFinished(succeeded: installTap())
+        }
+        if verdict == .lost { deliverTapLost() }
+    }
+
+    /// macOS switched the tap off (too slow, or by user input). Turn it back on and check that it really is on;
+    /// when it is not (Accessibility was taken away), build a new tap, once more, before calling it lost.
+    private func turnTapBackOn() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+            if CGEvent.tapIsEnabled(tap: eventTap) {
+                _ = tapHealth.attemptFinished(succeeded: true)
+                return
+            }
+        }
+        settleTap(after: tapHealth.attemptFinished(succeeded: false))
+    }
+
+    private static let healthCheckInterval: CFTimeInterval = 3
+
+    /// A tap that exists but is off is turned back on; Accessibility taken away while the tap still looks fine is
+    /// met with a new tap, which fails, and the loss is reported.
+    private func checkTapStillWorks() {
+        guard let eventTap, !tapHealth.isLost else { return }
+        let isTrusted = AXIsProcessTrusted()
+        let trustJustEnded = wasTrusted && !isTrusted
+        wasTrusted = isTrusted
+        if trustJustEnded {
+            removeTap()
+            settleTap(after: tapHealth.attemptFinished(succeeded: false))
+        } else if !CGEvent.tapIsEnabled(tap: eventTap) {
+            turnTapBackOn()
         }
     }
 
     private func tearDownOnTapThread() {
+        if let healthCheckTimer {
+            CFRunLoopTimerInvalidate(healthCheckTimer)
+            self.healthCheckTimer = nil
+        }
         removeTap()
         detector.reset()
         questionKeyStateMachine.reset()
@@ -313,12 +385,10 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
         if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
             // Events were missed while the tap was off, so a half-seen key press must not complete a tap.
             detector.reset()
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-            }
+            // Put back from the thread's own queue, not from inside the tap's own callback.
+            performOnTapThread { [self] in if !tapHealth.isLost { turnTapBackOn() } }
             return false
         }
-        guard !isSuspended else { return false }
 
         let now = Date()
         let held = HeldModifiers(eventFlagBits: event.flags.rawValue)
@@ -337,6 +407,9 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
         default:
             return false
         }
+
+        // Suspended: nothing starts, but a key release the tap promised to hide is still hidden.
+        guard !isSuspended else { return detector.swallowsWhileSuspended(input) }
 
         let detection = detector.handle(input)
         if let tap = detection.questionTap {
