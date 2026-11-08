@@ -71,6 +71,10 @@ final class SpeechOwner {
     }
 
     /// `handler` hears true when `speaker` starts speaking and false when it ends, is stopped or is replaced.
+    /// True from the moment an answer's reading is queued until its last sentence has ended or it is stopped (the
+    /// Settings sample does not count). Unlike the speaking report, it is true before the voice's first word.
+    var isReadingAnswer: Bool { tracker.currentSpeaker == .answer }
+
     func setSpeakingHandler(for speaker: SpeechSpeaker, _ handler: @escaping (Bool) -> Void) {
         speakingHandlers[speaker] = handler
     }
@@ -140,6 +144,9 @@ final class SpokenAnswerPlayer {
             SpeechOwner.shared.setSpeakingHandler(for: .answer) { isSpeaking in handler?(isSpeaking) }
         }
     }
+
+    /// True while an answer is queued or being read aloud.
+    var isReading: Bool { SpeechOwner.shared.isReadingAnswer }
 
     /// Reads `text` aloud, stopping anything still being read first (a Settings sample included).
     func speak(text: String) {

@@ -45,6 +45,9 @@ final class QuestionKeySettingsState: ObservableObject {
     @Published var message: String
     /// Why the key shown does not work right now; stays until the cause is gone. Empty when it works.
     @Published var inactiveNotice: String
+    /// Set while the key tap is lost (Accessibility was taken away in a running session), from the loss until the
+    /// next Start or Stop. Empty when the key tap works or no session runs.
+    @Published var tapLostNotice: String
 
     var onToggleRecording: () -> Void
     var onReset: () -> Void
@@ -56,6 +59,7 @@ final class QuestionKeySettingsState: ObservableObject {
         recordingHint: String = "",
         message: String = "",
         inactiveNotice: String = "",
+        tapLostNotice: String = "",
         onToggleRecording: @escaping () -> Void = {},
         onReset: @escaping () -> Void = {}
     ) {
@@ -65,6 +69,7 @@ final class QuestionKeySettingsState: ObservableObject {
         self.recordingHint = recordingHint
         self.message = message
         self.inactiveNotice = inactiveNotice
+        self.tapLostNotice = tapLostNotice
         self.onToggleRecording = onToggleRecording
         self.onReset = onReset
     }
@@ -89,6 +94,7 @@ final class QuestionKeySettingsController {
     private var eventMonitor: Any?
     private var windowCloseObserver: NSObjectProtocol?
     private var keySubscription: AnyCancellable?
+    private var tapLostSubscription: AnyCancellable?
 
     /// The one owner of "a key is being recorded". Both sections' Record buttons work at once (the recording
     /// monitor blocks keys, not clicks), so starting one cancels the other, and the session's keys stay
@@ -128,6 +134,14 @@ final class QuestionKeySettingsController {
                 if self.kind == .chat {
                     self.state.inactiveNotice = KeyOverlap.inactiveChatKeyNotice(chat: chatKey, question: questionKey) ?? ""
                 }
+            }
+        // While the key tap is lost, the section says its key does not work, until the next Start or Stop.
+        let keyName = kind == .chat ? "chat key" : "question key"
+        tapLostSubscription = SessionCoordinator.shared.$keyTapLost
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isLost in
+                self?.state.tapLostNotice = isLost ? KeyTapNotice.settingsLine(keyName: keyName) : ""
             }
         // A recording left open when the window closes would keep swallowing keys, and a refusal must not wait
         // on screen for the next time Settings opens.
@@ -302,6 +316,13 @@ struct QuestionKeySettingsSection: View {
                 .accessibilityIdentifier(state.kind.identifierPrefix + ".reset")
             }
 
+            if !state.tapLostNotice.isEmpty {
+                Text(state.tapLostNotice)
+                    .font(DS.WindowText.body)
+                    .foregroundColor(DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(state.kind.identifierPrefix + ".tapLost")
+            }
             if !state.inactiveNotice.isEmpty {
                 Text(state.inactiveNotice)
                     .font(DS.WindowText.body)

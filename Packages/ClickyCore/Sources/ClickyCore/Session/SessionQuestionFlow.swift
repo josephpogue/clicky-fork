@@ -272,9 +272,9 @@ public actor SessionQuestionFlow {
                 // Stop beginning at any point (`isStopping`) ends the unit: a stopping session starts no question.
                 let announcement = Task { [self] () -> Bool in
                     await output.phaseChanged(.listening)
-                    guard !isFinished, !isStopping else { return false }
+                    guard !isFinished, !isStopping, phase == .listening else { return false }
                     await dependencies.markQuestionStarted(date)
-                    guard !isFinished, !isStopping else { return false }
+                    guard !isFinished, !isStopping, phase == .listening else { return false }
                     await noteEvent(SessionEvent(time: date, kind: .questionStarted))
                     return true
                 }
@@ -292,6 +292,16 @@ public actor SessionQuestionFlow {
             await runQuestion(speechFrom: speechFrom, speechTo: speechTo, serial: questionSerial)
             return .accepted
         }
+    }
+
+    /// The question key is gone while a question is being listened for: nothing can send it. Listening ends the way
+    /// Stop ends it (the marker and the listening state go, nothing is sent). Returns whether a question was
+    /// dropped; the caller then drops the speech captured for it. A question already sent runs on.
+    @discardableResult
+    public func abandonListening() async -> Bool {
+        guard !isFinished, !isStopping, !isSwitching, phase == .listening else { return false }
+        await setPhase(.idle)
+        return true
     }
 
     /// Stops the answer a new question ended without holding the new question's listening back: the provider may take

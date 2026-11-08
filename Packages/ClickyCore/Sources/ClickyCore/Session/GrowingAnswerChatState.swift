@@ -57,6 +57,9 @@ public struct GrowingAnswerChatState: Equatable, Sendable {
 
     public init() {}
 
+    /// True from `beginAnswer` until the answer finishes, is cut or is retired.
+    public var isAnswerInFlight: Bool { currentToken != nil }
+
     /// Whether reports for `answerNumber` still belong to the answer on screen. The app drops the others entirely.
     public func isCurrent(answerNumber: Int) -> Bool {
         currentToken == answerNumber

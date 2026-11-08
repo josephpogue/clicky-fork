@@ -196,6 +196,14 @@ public actor SessionSpeechPipeline {
         openQuestionStart = date
     }
 
+    /// The question the user was speaking is dropped, never sent (the question key died): its speech stays claimed by
+    /// that question, so it is not reported as an utterance either, but speech after `date` is reported as usual.
+    public func abandonOpenQuestion(at date: Date) {
+        guard let start = openQuestionStart else { return }
+        finishedQuestionSpans.append((from: start, to: date))
+        openQuestionStart = nil
+    }
+
     /// Transcribes what was said from `speechFrom` to `speechTo` (padded 0.3 s before and 0.5 s
     /// after) and closes the question, so that speech is not also reported as an utterance.
     public func transcribeQuestion(speechFrom: Date, speechTo: Date) async throws -> String {

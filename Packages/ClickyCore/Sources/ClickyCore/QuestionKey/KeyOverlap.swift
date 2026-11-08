@@ -92,6 +92,21 @@ public enum KeyOverlap {
             : nil
     }
 
+    /// The refusal for a Reset of the chat key: the user pressed Reset, not a key, so it says what Reset would do.
+    public static func resetRefusalForChatKey(_ defaultChat: QuestionKeySpec, question: QuestionKeySpec) -> String? {
+        canFireBoth(question, defaultChat)
+            ? "Reset would make the chat key \(defaultChat.displayName), which also fires your question key (\(question.displayName)). Record a different question key first, or record a different chat key."
+            : nil
+    }
+
+    /// The refusal for a Reset of the question key, once the chat key in use is active (as `refusalForNewQuestionKey`).
+    public static func resetRefusalForQuestionKey(
+        _ defaultQuestion: QuestionKeySpec, currentQuestion: QuestionKeySpec, chat: QuestionKeySpec
+    ) -> String? {
+        guard isChatKeyActive(chat, question: currentQuestion), canFireBoth(defaultQuestion, chat) else { return nil }
+        return "Reset would make the question key \(defaultQuestion.displayName), which also fires your chat key (\(chat.displayName)). Record a different chat key first, or record a different question key."
+    }
+
     /// The refusal text for a question key that overlaps the chat key, or nil when it is fine.
     public static func refusalForQuestionKey(_ questionKey: QuestionKeySpec, chat: QuestionKeySpec) -> String? {
         canFireBoth(questionKey, chat)

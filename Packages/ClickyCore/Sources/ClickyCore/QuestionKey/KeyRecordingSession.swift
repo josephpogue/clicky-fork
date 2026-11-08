@@ -6,6 +6,8 @@ public struct KeyRefusalMessage: Equatable {
     public private(set) var text = ""
     /// The key that was refused for clashing with the other key; nil for a refusal that has no other key in it.
     private var clashingKey: QuestionKeySpec?
+    /// True when the refusal answers a Reset press, so its words say what Reset would do.
+    public private(set) var isFromReset = false
 
     public init() {}
 
@@ -14,16 +16,19 @@ public struct KeyRefusalMessage: Equatable {
     public mutating func showRejection(_ rejection: QuestionKeyRejection) {
         text = rejection.message
         clashingKey = nil
+        isFromReset = false
     }
 
-    public mutating func showClash(of key: QuestionKeySpec, text: String) {
+    public mutating func showClash(of key: QuestionKeySpec, text: String, fromReset: Bool = false) {
         self.text = text
         clashingKey = key
+        isFromReset = fromReset
     }
 
     public mutating func clear() {
         text = ""
         clashingKey = nil
+        isFromReset = false
     }
 
     /// The other key changed: the message goes when the clash is gone, and is reworded when another key clashes now.
@@ -115,8 +120,8 @@ public struct KeyRecordingSession {
     /// then says so).
     public mutating func reset(to defaultKey: QuestionKeySpec, saved: SavedKeys) -> QuestionKeySpec? {
         cancel()
-        if let text = refusalText(for: defaultKey, saved: saved) {
-            refusal.showClash(of: defaultKey, text: text)
+        if let text = Self.refusalText(kind: kind, for: defaultKey, saved: saved, fromReset: true) {
+            refusal.showClash(of: defaultKey, text: text, fromReset: true)
             return nil
         }
         return defaultKey
@@ -125,7 +130,8 @@ public struct KeyRecordingSession {
     /// The saved keys changed (either one): a clash message that no longer holds goes, one that changed is reworded.
     public mutating func savedKeysChanged(_ saved: SavedKeys) {
         let kind = kind
-        refusal.otherKeyChanged { Self.refusalText(kind: kind, for: $0, saved: saved) }
+        let fromReset = refusal.isFromReset
+        refusal.otherKeyChanged { Self.refusalText(kind: kind, for: $0, saved: saved, fromReset: fromReset) }
     }
 
     /// Settings closed or opens again: nothing from before stays on screen.
@@ -142,12 +148,18 @@ public struct KeyRecordingSession {
         Self.refusalText(kind: kind, for: spec, saved: saved)
     }
 
-    private static func refusalText(kind: Kind, for spec: QuestionKeySpec, saved: SavedKeys) -> String? {
-        switch kind {
-        case .question:
+    private static func refusalText(
+        kind: Kind, for spec: QuestionKeySpec, saved: SavedKeys, fromReset: Bool = false
+    ) -> String? {
+        switch (kind, fromReset) {
+        case (.question, false):
             return KeyOverlap.refusalForNewQuestionKey(spec, currentQuestion: saved.question, chat: saved.chat)
-        case .chat:
+        case (.question, true):
+            return KeyOverlap.resetRefusalForQuestionKey(spec, currentQuestion: saved.question, chat: saved.chat)
+        case (.chat, false):
             return KeyOverlap.refusalForChatKey(spec, question: saved.question)
+        case (.chat, true):
+            return KeyOverlap.resetRefusalForChatKey(spec, question: saved.question)
         }
     }
 }

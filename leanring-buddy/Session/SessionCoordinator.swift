@@ -46,6 +46,9 @@ final class SessionCoordinator: ObservableObject {
 
     /// A short line for the menu bar panel when a session could not start.
     @Published private(set) var panelNotice: String?
+    /// True from the moment the key tap died in a running session until the next Start or Stop. Settings shows the
+    /// lost line under both keys meanwhile.
+    @Published private(set) var keyTapLost = false
 
     /// Sends a session's id once Stop has finished writing its log and cleanup.
     let sessionFinished = PassthroughSubject<String, Never>()
@@ -91,6 +94,8 @@ final class SessionCoordinator: ObservableObject {
     private var didStartCapture = false
     /// True between a finished Start and Stop: the chat key's tap is on, so the footer may name the key.
     private var chatKeyWorks = false
+    /// What the user sees after the key tap died, and when the cursor notice shows (`KeyTapLossState`).
+    private var keyLoss = KeyTapLossState()
 
     private var sessionID: String?
     private var screenRecorder: SessionScreenRecorder?
@@ -118,12 +123,17 @@ final class SessionCoordinator: ObservableObject {
             // Spoken-only: the waiting marker stays until the voice actually starts. A late start event of an old
             // answer's voice (after the new question's listening marker showed) must not hide that marker.
             if isSpeaking, let self, case .waitingForAnswer = self.currentPhase { self.markerPanel.hide() }
+            // The reading ended: a cursor notice that waited for it shows now.
+            if !isSpeaking { self?.showDeferredKeyNoticeIfDue() }
         }
         // Switching to a mode that does not speak stops a reading in progress; switching to Spoken starts nothing.
         settings.$answerDeliveryMode
             .removeDuplicates()
             .sink { [weak self] mode in
-                if !mode.speaksAloud { self?.spokenAnswerPlayer.stopSpeaking() }
+                if !mode.speaksAloud {
+                    self?.spokenAnswerPlayer.stopSpeaking()
+                    self?.showDeferredKeyNoticeIfDue()
+                }
             }
             .store(in: &settingsSubscriptions)
 
@@ -202,6 +212,7 @@ final class SessionCoordinator: ObservableObject {
     func startSession() {
         guard lifecycle.beginStart() else { return }
         panelNotice = nil
+        clearKeyTapLoss()
         didStartCapture = false
         // A new session replaces the finished conversation in the chat window.
         chatWindowState.messages = []
@@ -614,6 +625,10 @@ final class SessionCoordinator: ObservableObject {
     /// Leaves running at once (so no key signal or phase update passes), then finishes the stop in the background.
     private func beginStop(askForSummary: Bool) {
         guard lifecycle.beginStop() else { return }
+        // The keys are gone with the session: the lost line leaves the panel and Settings, and a cursor notice that
+        // was waiting for an answer never shows.
+        if KeyTapNotice.isLossNotice(panelNotice) { panelNotice = nil }
+        clearKeyTapLoss()
         // The slow parts of Stop (the speech and screen shutdown) come next: close the answer now, so the card does
         // not say "still coming", the checking line does not animate and no queued sentence is read meanwhile.
         closeAnswerAsStopped()
@@ -726,6 +741,8 @@ final class SessionCoordinator: ObservableObject {
         // Once Stop has begun, a late phase (a tap queued just before Stop) must not light the marker again.
         guard lifecycle.acceptsFlowPhaseUpdates else { return }
         currentPhase = phase
+        // A question that ends (the phase goes idle) may be the last thing a deferred cursor notice waited for.
+        defer { showDeferredKeyNoticeIfDue() }
         let providerName: (ProviderID) -> String = { ProviderFailureNotice.displayName(for: $0) }
         switch phase {
         case .idle:
@@ -767,6 +784,8 @@ final class SessionCoordinator: ObservableObject {
         answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
         notesRead: [String]
     ) {
+        // Its sentences are queued for reading by the end of this call, so the reading check below is true.
+        defer { showDeferredKeyNoticeIfDue() }
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead)
@@ -846,6 +865,7 @@ final class SessionCoordinator: ObservableObject {
     ) {
         // After Stop began, only the Stop's own report may finish the card (Stop ended it as "(Stopped.)" already).
         guard lifecycle.acceptsPointerFlights || reason == .stopped else { return }
+        defer { showDeferredKeyNoticeIfDue() }
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: nil, pointLabel: nil, notesRead: notesRead)
@@ -925,12 +945,60 @@ final class SessionCoordinator: ObservableObject {
         change(&chatWindowState.messages[index])
     }
 
-    /// The question key and the chat key no longer work in this session: the menu-bar panel and the cursor say so
-    /// (and the chat window, as for every notice). The panel line stays until the next Start re-checks Accessibility.
+    /// The question key and the chat key no longer work in this session. Everything the user sees follows at once and
+    /// stays true until Stop or the next Start: the chat footer stops naming the dead chat key, a question being
+    /// listened for is dropped (nothing can send it), and the menu-bar panel, the chat and Settings say so. An answer
+    /// still coming or being read is never cut: the chat and the panel get the notice now, the cursor once the answer
+    /// has ended and its reading has finished (`KeyTapLossState`).
     private func showKeyTapLost() {
         guard lifecycle.acceptsPointerFlights else { return }
-        panelNotice = KeyTapNotice.lost
-        showNotice(KeyTapNotice.lost)
+        chatKeyWorks = false
+        refreshChatKeyName(question: settings.questionKey, chat: settings.chatKey)
+        let flow = questionFlow
+        let pipeline = speechPipeline
+        Task { @MainActor [weak self] in
+            // A question heard so far but not yet sent ends the way Stop ends it, and its captured words are dropped.
+            let questionDropped = await flow?.abandonListening() ?? false
+            if questionDropped { await pipeline?.abandonOpenQuestion(at: Date()) }
+            self?.reportKeyTapLost(questionDropped: questionDropped)
+        }
+    }
+
+    private func reportKeyTapLost(questionDropped: Bool) {
+        // Stop may have begun meanwhile: it already cleared everything about the keys.
+        guard lifecycle.acceptsPointerFlights else { return }
+        let text = KeyTapNotice.text(questionDropped: questionDropped)
+        let cursor = keyLoss.tapLost(
+            text: text, isAnswerInFlight: isAnswerInFlight, isReadingAloud: spokenAnswerPlayer.isReading)
+        if case .none = cursor { return }
+        keyTapLost = true
+        panelNotice = text
+        // The chat line goes in after the answer's card, which keeps growing above it.
+        chatWindowState.messages.append(ChatMessage(role: .notice, text: text))
+        if case .showNow(let cursorText) = cursor { cursorAnswerPresenter.showNotice(text: cursorText) }
+    }
+
+    /// An answer is coming when its card is open or its question was sent and has not finished.
+    private var isAnswerInFlight: Bool {
+        if growingAnswerChat.isAnswerInFlight { return true }
+        switch currentPhase {
+        case .transcribing, .waitingForAnswer: return true
+        case .idle, .listening: return false
+        }
+    }
+
+    /// Shows the cursor notice that waited for an answer and its reading to end, once both are over.
+    private func showDeferredKeyNoticeIfDue() {
+        guard lifecycle.acceptsPointerFlights,
+              let text = keyLoss.answerActivityChanged(
+                isAnswerInFlight: isAnswerInFlight, isReadingAloud: spokenAnswerPlayer.isReading)
+        else { return }
+        cursorAnswerPresenter.showNotice(text: text)
+    }
+
+    private func clearKeyTapLoss() {
+        keyLoss.sessionStopped()
+        keyTapLost = false
     }
 
     fileprivate func showNotice(_ text: String) {
@@ -942,6 +1010,9 @@ final class SessionCoordinator: ObservableObject {
         // Only an answer still coming (or its checking line) is cut off by the notice. A notice that arrives with
         // nothing in flight (the failed switch to ChatGPT) leaves a finished answer being read aloud.
         if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
+        // This notice has the cursor; a key-loss notice that was waiting would replace it. The panel, the chat and
+        // Settings still carry the loss.
+        keyLoss.cursorTakenByAnotherNotice()
         cursorAnswerPresenter.showNotice(text: text)
     }
 
@@ -954,6 +1025,7 @@ final class SessionCoordinator: ObservableObject {
         // The one-tap switch lives in the menu-bar panel; the cursor only says where to find it.
         guard lifecycle.acceptsPointerFlights else { return }
         if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
+        keyLoss.cursorTakenByAnotherNotice()
         cursorAnswerPresenter.showNotice(
             text: UsageLimitOfferRules.cursorNotice(message: message, switchToProviderName: switchToProviderName))
     }
