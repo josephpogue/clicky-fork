@@ -205,68 +205,44 @@ public enum CursorBubbleLayout {
     /// enough for the line, so it reads as a small status, not an empty answer.
     public static let checkingLineAloneWidth: CGFloat = 174
 
-    /// Which end of a body taller than the cap is cut off.
-    public enum CutEdge: Equatable, Sendable {
-        /// The body fits: nothing is cut.
-        case none
-        /// A finished answer: the first lines show and the bottom fades out (today's bubble).
-        case bottom
-        /// An answer still growing: the newest lines show and the top fades in, so it reads as continued.
-        case top
-    }
-
     public struct TextLayout: Equatable, Sendable {
         public let width: CGFloat
-        /// The height of the answer text as drawn, at most `maximumBodyHeight`. Zero when no text has come yet.
+        /// The height of the answer text as drawn. Zero when no text has come yet. Text that went through
+        /// `AnswerBubbleMetrics.fitsInBubble` is never taller than `maximumBodyHeight`, so nothing is cut.
         public let bodyHeight: CGFloat
-        public let cutEdge: CutEdge
-        /// How much of the text sits above the drawn body when it is cut at the top: the drawn body is the
-        /// last `bodyHeight` points of the text. Zero otherwise.
-        public let hiddenHeightAbove: CGFloat
         /// The height the checking line adds under the body (its gap included), or zero when it is off.
         public let checkingLineExtraHeight: CGFloat
 
-        /// True when the body is cut at the cap, at either end: the footer pointing to Open chat shows.
-        public var isBodyCut: Bool { cutEdge != .none }
         /// Body plus checking line: everything between the bubble's top and bottom padding except the footer.
         public var contentHeight: CGFloat { bodyHeight + checkingLineExtraHeight }
     }
 
-    /// Short (300 wide) when the text fits in five lines at that width; otherwise long (340 wide), with the body
-    /// capped at 197 pt and cut only when its natural height at 340 wide is taller than that.
-    ///
-    /// `showsNewestLines` is for an answer still growing: past the cap it keeps the last lines, not the first, and
-    /// marks the cut at the top. Text that fits is laid out exactly as today. `showsCheckingLine` adds the
-    /// "Checking your notes" line under the body; with no text at all (zero lines) the bubble is the checking line alone.
+    /// True when text with these measurements fits the bubble with nothing cut: at most `shortLineLimit` lines at
+    /// the short width, or a body at the long width no taller than `maximumBodyHeight`.
+    public static func fits(lineCountAtShortWidth: Int, naturalBodyHeightAtLongWidth: CGFloat) -> Bool {
+        lineCountAtShortWidth <= shortLineLimit || naturalBodyHeightAtLongWidth <= maximumBodyHeight
+    }
+
+    /// Short (300 wide) when the text fits in five lines at that width; otherwise long (340 wide) at its natural
+    /// height. `showsCheckingLine` adds the "Checking your notes" line under the body; with no text at all (zero
+    /// lines) the bubble is the checking line alone.
     public static func textLayout(
         lineCountAtShortWidth: Int,
         naturalBodyHeightAtShortWidth: CGFloat,
         naturalBodyHeightAtLongWidth: CGFloat,
-        showsNewestLines: Bool = false,
         showsCheckingLine: Bool = false
     ) -> TextLayout {
         if lineCountAtShortWidth == 0 && showsCheckingLine {
-            return TextLayout(
-                width: checkingLineAloneWidth, bodyHeight: 0, cutEdge: .none, hiddenHeightAbove: 0,
-                checkingLineExtraHeight: checkingLineHeight)
+            return TextLayout(width: checkingLineAloneWidth, bodyHeight: 0, checkingLineExtraHeight: checkingLineHeight)
         }
         let checkingLineExtraHeight = showsCheckingLine ? checkingLineGap + checkingLineHeight : 0
         if lineCountAtShortWidth <= shortLineLimit {
             return TextLayout(
-                width: shortWidth, bodyHeight: naturalBodyHeightAtShortWidth, cutEdge: .none, hiddenHeightAbove: 0,
-                checkingLineExtraHeight: checkingLineExtraHeight)
-        }
-        let isCut = naturalBodyHeightAtLongWidth > maximumBodyHeight
-        guard isCut else {
-            return TextLayout(
-                width: longWidth, bodyHeight: naturalBodyHeightAtLongWidth, cutEdge: .none, hiddenHeightAbove: 0,
+                width: shortWidth, bodyHeight: naturalBodyHeightAtShortWidth,
                 checkingLineExtraHeight: checkingLineExtraHeight)
         }
         return TextLayout(
-            width: longWidth,
-            bodyHeight: maximumBodyHeight,
-            cutEdge: showsNewestLines ? .top : .bottom,
-            hiddenHeightAbove: showsNewestLines ? naturalBodyHeightAtLongWidth - maximumBodyHeight : 0,
+            width: longWidth, bodyHeight: naturalBodyHeightAtLongWidth,
             checkingLineExtraHeight: checkingLineExtraHeight)
     }
 }

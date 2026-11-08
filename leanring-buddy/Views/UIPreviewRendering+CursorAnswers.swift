@@ -18,24 +18,21 @@ extension UIPreviewRendering {
         let topLeftCursor = CGPoint(x: 34, y: 304)
         let shortAnswer = "Click the Save button at the top right."
         let twoSentenceAnswer = "It's the open-source code behind HeyClicky, an AI helper that sits beside your cursor on a Mac. The app itself is in the leanring-buddy folder."
-        let longAnswer = """
-        This is the original Clicky, the open-source project the HeyClicky app grew out of. It's a Mac menu-bar app that hears a spoken question, looks at your screen and answers.
-        leanring-buddy holds the Swift app itself. The odd spelling is an old typo the project kept.
-        worker is a small Cloudflare Worker. It holds the API keys, so they never ship inside the app.
-        scripts has the build and release helpers, and the two test folders hold the unit and UI tests that run in Xcode.
-        """
-        let bubblePreviews: [(fileName: String, text: String, isNotice: Bool, cursor: CGPoint)] = [
-            ("cursor-answer-short.png", shortAnswer, false, topLeftCursor),
-            ("cursor-answer-two-sentences.png", twoSentenceAnswer, false, topLeftCursor),
-            ("cursor-answer-long-cut.png", longAnswer, false, topLeftCursor),
-            ("cursor-answer-flipped-left.png", twoSentenceAnswer, false, CGPoint(x: 440, y: 304)),
-            ("cursor-answer-flipped-up.png", twoSentenceAnswer, false, CGPoint(x: 34, y: 50)),
-            ("cursor-answer-flipped-both.png", twoSentenceAnswer, false, CGPoint(x: 440, y: 50)),
-            ("cursor-notice.png", "The usage limit for Claude is used up. Switch to ChatGPT to keep going.", true, topLeftCursor),
+        let longAnswerCursorLine = "This is the original Clicky, the open-source project the HeyClicky app grew out of. It's a Mac menu-bar app that hears a spoken question, looks at your screen and answers."
+        let bubblePreviews: [(fileName: String, text: String, footer: String?, isNotice: Bool, cursor: CGPoint)] = [
+            ("cursor-answer-short.png", shortAnswer, nil, false, topLeftCursor),
+            ("cursor-answer-two-sentences.png", twoSentenceAnswer, nil, false, topLeftCursor),
+            ("cursor-answer-long-more-in-chat.png", longAnswerCursorLine, "More in chat: Right ⌘ ,", false, topLeftCursor),
+            ("cursor-answer-footer-only.png", "", "Answer in chat: Right ⌘ ,", false, topLeftCursor),
+            ("cursor-answer-flipped-left.png", twoSentenceAnswer, nil, false, CGPoint(x: 440, y: 304)),
+            ("cursor-answer-flipped-up.png", twoSentenceAnswer, nil, false, CGPoint(x: 34, y: 50)),
+            ("cursor-answer-flipped-both.png", twoSentenceAnswer, nil, false, CGPoint(x: 440, y: 50)),
+            ("cursor-notice.png", "The usage limit for Claude is used up. Switch to ChatGPT to keep going.", nil, true, topLeftCursor),
+            ("cursor-notice-left-out.png", "Clicky could not start.", "More in Open chat, in the menu bar", true, topLeftCursor),
         ]
         for preview in bubblePreviews {
             try render(
-                CursorAnswerTile(tileSize: tileSize, cursor: preview.cursor, content: .bubble(AnswerBubbleContent(text: preview.text, isNotice: preview.isNotice))),
+                CursorAnswerTile(tileSize: tileSize, cursor: preview.cursor, content: .bubble(AnswerBubbleContent(text: preview.text, isNotice: preview.isNotice, footerText: preview.footer))),
                 size: tileSize, fileName: preview.fileName, into: directory)
         }
         try render(
@@ -45,27 +42,21 @@ extension UIPreviewRendering {
         try renderGrowingAnswerPreviews(into: directory, tileSize: tileSize, cursor: topLeftCursor)
     }
 
-    /// The bubble while an answer is still coming (brain-context designer slice): growing text, the
-    /// "Checking your notes" line alone and under text, and a text past the cap showing its newest lines.
+    /// The bubble while an answer is still coming: the first words, the "Checking your notes" line alone, under a line,
+    /// and under a line with the footer.
     @MainActor
     private static func renderGrowingAnswerPreviews(into directory: URL, tileSize: CGSize, cursor: CGPoint) throws {
         let firstWords = "The demo server runs on port 4100."
-        let pastTheCap = """
-        The demo server runs on port 4100. Your notes say it starts from the demo-server folder with npm run dev, and the setup page lists three things it needs first.
-        It reads its settings from a file named demo.env in that folder. The checklist says to copy demo.env.example to demo.env before the first start.
-        Your deploy note adds that the port is fixed on purpose, because the browser extension posts to it. If 4100 is busy, the server stops instead of picking another port.
-        The last step in the checklist is to open the status page and confirm the green line reads Ready, then run the smoke test from the same folder.
-        """
-        let growingPreviews: [(fileName: String, text: String, showsCheckingLine: Bool)] = [
-            ("cursor-growing-short.png", firstWords, false),
-            ("cursor-growing-checking-alone.png", "", true),
-            ("cursor-growing-with-checking.png", firstWords + " Checking where it reads its settings from.", true),
-            ("cursor-growing-past-cap.png", pastTheCap, false),
-            ("cursor-growing-past-cap-checking.png", pastTheCap, true),
+        let growingPreviews: [(fileName: String, text: String, footer: String?, showsCheckingLine: Bool)] = [
+            ("cursor-growing-short.png", firstWords, nil, false),
+            ("cursor-growing-checking-alone.png", "", nil, true),
+            ("cursor-growing-with-checking.png", firstWords, nil, true),
+            ("cursor-growing-with-checking-and-footer.png", firstWords, "More in chat: Right ⌘ ,", true),
+            ("cursor-growing-footer-only-with-checking.png", "", "Answer in chat: Right ⌘ ,", true),
         ]
         for preview in growingPreviews {
             let content = AnswerBubbleContent(
-                text: preview.text, isNotice: false, showsNewestLines: true, showsCheckingLine: preview.showsCheckingLine)
+                text: preview.text, isNotice: false, footerText: preview.footer, showsCheckingLine: preview.showsCheckingLine)
             try render(
                 CursorAnswerTile(tileSize: tileSize, cursor: cursor, content: .bubble(content)),
                 size: tileSize, fileName: preview.fileName, into: directory)

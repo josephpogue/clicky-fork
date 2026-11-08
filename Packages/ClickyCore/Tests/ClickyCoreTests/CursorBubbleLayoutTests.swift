@@ -97,7 +97,6 @@ struct CursorBubbleLayoutTests {
             lineCountAtShortWidth: 5, naturalBodyHeightAtShortWidth: 100, naturalBodyHeightAtLongWidth: 90)
         #expect(layout.width == 300)
         #expect(layout.bodyHeight == 100)
-        #expect(layout.isBodyCut == false)
     }
 
     @Test func sixLinesGoLongAtThreeHundredFortyAndStayWholeUnderTheCap() {
@@ -105,68 +104,23 @@ struct CursorBubbleLayoutTests {
             lineCountAtShortWidth: 6, naturalBodyHeightAtShortWidth: 120, naturalBodyHeightAtLongWidth: 110)
         #expect(layout.width == 340)
         #expect(layout.bodyHeight == 110)
-        #expect(layout.isBodyCut == false)
     }
 
-    @Test func aBodyTallerThanTheCapIsCutAtOneHundredNinetySeven() {
-        let layout = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 14, naturalBodyHeightAtShortWidth: 280, naturalBodyHeightAtLongWidth: 250)
-        #expect(layout.width == 340)
-        #expect(layout.bodyHeight == 197)
-        #expect(layout.isBodyCut == true)
+    @Test func aBodyExactlyAtTheCapFits() {
+        #expect(CursorBubbleLayout.fits(lineCountAtShortWidth: 9, naturalBodyHeightAtLongWidth: 197))
     }
 
-    @Test func aBodyExactlyAtTheCapIsNotCut() {
-        let layout = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 9, naturalBodyHeightAtShortWidth: 200, naturalBodyHeightAtLongWidth: 197)
-        #expect(layout.isBodyCut == false)
-        #expect(layout.bodyHeight == 197)
+    @Test func aBodyTallerThanTheCapDoesNotFit() {
+        #expect(!CursorBubbleLayout.fits(lineCountAtShortWidth: 9, naturalBodyHeightAtLongWidth: 197.5))
+    }
+
+    @Test func fiveShortLinesAlwaysFit() {
+        #expect(CursorBubbleLayout.fits(lineCountAtShortWidth: 5, naturalBodyHeightAtLongWidth: 500))
     }
 }
 
-/// The answer bubble while the answer is still coming: the newest lines past the cap, and the "Checking your notes" line.
+/// The answer bubble's checking line.
 struct CursorBubbleGrowingAnswerLayoutTests {
-    /// One bubble line: 13.5 pt type at 145% leading.
-    private let lineHeight: CGFloat = 13.5 * 1.45
-
-    @Test func thirtyShortLinesInNewestLinesModeKeepTheLastLinesThatFitAndAreCutAtTheTop() {
-        let naturalHeight = 30 * lineHeight
-        let layout = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 30,
-            naturalBodyHeightAtShortWidth: naturalHeight,
-            naturalBodyHeightAtLongWidth: naturalHeight,
-            showsNewestLines: true)
-        #expect(layout.width == 340)
-        #expect(layout.bodyHeight == 197)
-        #expect(layout.isBodyCut == true)
-        #expect(layout.cutEdge == .top)
-        // Everything above the last 197 pt is hidden: the body shows the newest lines.
-        #expect(abs(layout.hiddenHeightAbove - (naturalHeight - 197)) < 0.001)
-    }
-
-    @Test func theSameTextWithoutNewestLinesIsCutAtTheBottomAsToday() {
-        let naturalHeight = 30 * lineHeight
-        let layout = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 30,
-            naturalBodyHeightAtShortWidth: naturalHeight,
-            naturalBodyHeightAtLongWidth: naturalHeight)
-        #expect(layout.cutEdge == .bottom)
-        #expect(layout.hiddenHeightAbove == 0)
-        #expect(layout.checkingLineExtraHeight == 0)
-    }
-
-    @Test func shortTextInNewestLinesModeIsUnchangedFromToday() {
-        let growing = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 2, naturalBodyHeightAtShortWidth: 2 * lineHeight, naturalBodyHeightAtLongWidth: 2 * lineHeight,
-            showsNewestLines: true)
-        let today = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 2, naturalBodyHeightAtShortWidth: 2 * lineHeight, naturalBodyHeightAtLongWidth: 2 * lineHeight)
-        #expect(growing == today)
-        #expect(growing.width == 300)
-        #expect(growing.cutEdge == .none)
-        #expect(growing.isBodyCut == false)
-    }
-
     @Test func theCheckingLineUnderTextAddsAFixedHeightAndLeavesTheBodyAlone() {
         let withoutLine = CursorBubbleLayout.textLayout(
             lineCountAtShortWidth: 2, naturalBodyHeightAtShortWidth: 40, naturalBodyHeightAtLongWidth: 38)
@@ -179,22 +133,20 @@ struct CursorBubbleGrowingAnswerLayoutTests {
         #expect(withLine.contentHeight == CGFloat(40 + 8 + 18))
     }
 
-    @Test func theCheckingLineAddsTheSameHeightUnderACutBody() {
-        let naturalHeight = 30 * lineHeight
+    @Test func theCheckingLineAddsTheSameHeightUnderATallBody() {
         let layout = CursorBubbleLayout.textLayout(
-            lineCountAtShortWidth: 30, naturalBodyHeightAtShortWidth: naturalHeight, naturalBodyHeightAtLongWidth: naturalHeight,
-            showsNewestLines: true, showsCheckingLine: true)
-        #expect(layout.bodyHeight == 197)
-        #expect(layout.contentHeight == CGFloat(197 + 8 + 18))
+            lineCountAtShortWidth: 12, naturalBodyHeightAtShortWidth: 190, naturalBodyHeightAtLongWidth: 170,
+            showsCheckingLine: true)
+        #expect(layout.bodyHeight == 170)
+        #expect(layout.contentHeight == CGFloat(170 + 8 + 18))
     }
 
     @Test func theCheckingLineAloneIsACompactBubbleWithNoBody() {
         let layout = CursorBubbleLayout.textLayout(
             lineCountAtShortWidth: 0, naturalBodyHeightAtShortWidth: 0, naturalBodyHeightAtLongWidth: 0,
-            showsNewestLines: true, showsCheckingLine: true)
+            showsCheckingLine: true)
         #expect(layout.width == CursorBubbleLayout.checkingLineAloneWidth)
         #expect(layout.bodyHeight == 0)
-        #expect(layout.cutEdge == .none)
         // Alone, there is no text above it, so no gap.
         #expect(layout.checkingLineExtraHeight == 18)
         #expect(layout.contentHeight == 18)
