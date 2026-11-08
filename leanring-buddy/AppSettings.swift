@@ -104,7 +104,9 @@ final class AppSettings: ObservableObject {
         digDeeperChatgptModel = userDefaults.string(forKey: Keys.digDeeperChatgptModel) ?? ""
         digDeeperEffort = userDefaults.string(forKey: Keys.digDeeperEffort).flatMap(AnswerEffort.init(rawValue:)) ?? .high
         questionKey = userDefaults.string(forKey: Keys.questionKey).flatMap(QuestionKeySpec.init(encoded:)) ?? .default
-        chatKey = userDefaults.string(forKey: Keys.chatKey).flatMap(QuestionKeySpec.init(encoded:)) ?? .defaultChatKey
+        // Only the sided form the chat key's recorder makes is accepted; whether it overlaps the question key is
+        // decided where the keys meet (the monitor and the Chat key section), so the question key always wins.
+        chatKey = QuestionKeySpec.savedChatKey(encoded: userDefaults.string(forKey: Keys.chatKey))
         measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 

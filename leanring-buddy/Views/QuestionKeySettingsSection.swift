@@ -30,6 +30,8 @@ enum SettingsKeyKind {
     var defaultKey: QuestionKeySpec { self == .question ? .default : .defaultChatKey }
     var resetTitle: String { self == .question ? "Reset to right Command" : "Reset to right \u{2318} ," }
     var identifierPrefix: String { self == .question ? "settings.questionKey" : "settings.chatKey" }
+    /// The name this section goes by in `KeyRecordingTracker`.
+    var recordingOwnerName: String { self == .question ? "question" : "chat" }
 }
 
 @MainActor
@@ -41,6 +43,8 @@ final class QuestionKeySettingsState: ObservableObject {
     @Published var recordingHint: String
     /// Why the last recording was refused; empty when there is nothing to say.
     @Published var message: String
+    /// Why the key shown does not work right now; stays until the cause is gone. Empty when it works.
+    @Published var inactiveNotice: String
 
     var onToggleRecording: () -> Void
     var onReset: () -> Void
@@ -51,6 +55,7 @@ final class QuestionKeySettingsState: ObservableObject {
         isRecording: Bool = false,
         recordingHint: String = "",
         message: String = "",
+        inactiveNotice: String = "",
         onToggleRecording: @escaping () -> Void = {},
         onReset: @escaping () -> Void = {}
     ) {
@@ -59,6 +64,7 @@ final class QuestionKeySettingsState: ObservableObject {
         self.isRecording = isRecording
         self.recordingHint = recordingHint
         self.message = message
+        self.inactiveNotice = inactiveNotice
         self.onToggleRecording = onToggleRecording
         self.onReset = onReset
     }
@@ -80,6 +86,14 @@ final class QuestionKeySettingsController {
     private var recorder: QuestionKeyRecorder
     private var eventMonitor: Any?
     private var windowCloseObserver: NSObjectProtocol?
+    private var keySubscription: AnyCancellable?
+
+    /// The one owner of "a key is being recorded". Both sections' Record buttons work at once (the recording
+    /// monitor blocks keys, not clicks), so starting one cancels the other, and the session's keys stay
+    /// suspended until no section records.
+    private static var recordingTracker = KeyRecordingTracker()
+    private static weak var questionSectionController: QuestionKeySettingsController?
+    private static weak var chatSectionController: QuestionKeySettingsController?
 
     init(kind: SettingsKeyKind = .question) {
         self.kind = kind
@@ -93,6 +107,16 @@ final class QuestionKeySettingsController {
             guard let self else { return }
             self.stopRecording()
             self.saveUnlessOverlapping(kind.defaultKey)
+        }
+        if kind == .chat {
+            Self.chatSectionController = self
+            // The chat key yields to the question key, whichever of them changed or was loaded last.
+            keySubscription = Publishers.CombineLatest(AppSettings.shared.$questionKey, AppSettings.shared.$chatKey)
+                .sink { [weak self] questionKey, chatKey in
+                    self?.state.inactiveNotice = KeyOverlap.inactiveChatKeyNotice(chat: chatKey, question: questionKey) ?? ""
+                }
+        } else {
+            Self.questionSectionController = self
         }
         // A recording left open when the window closes would keep swallowing keys.
         windowCloseObserver = NotificationCenter.default.addObserver(
@@ -145,6 +169,12 @@ final class QuestionKeySettingsController {
         state.message = ""
         state.recordingHint = ""
         state.isRecording = true
+        // Only one section records: the other one stops, and the keys stay suspended through the hand-over.
+        if let previousOwner = Self.recordingTracker.begin(kind.recordingOwnerName) {
+            let previousController = previousOwner == SettingsKeyKind.question.recordingOwnerName
+                ? Self.questionSectionController : Self.chatSectionController
+            previousController?.stopRecording()
+        }
         // Neither key may fire while the user is choosing a new one.
         SessionCoordinator.shared.setQuestionKeyRecording(true)
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
@@ -158,7 +188,11 @@ final class QuestionKeySettingsController {
     private func stopRecording() {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
-        if state.isRecording { SessionCoordinator.shared.setQuestionKeyRecording(false) }
+        if state.isRecording {
+            Self.recordingTracker.end(kind.recordingOwnerName)
+            // Still suspended when the other section took over recording.
+            SessionCoordinator.shared.setQuestionKeyRecording(Self.recordingTracker.isRecording)
+        }
         state.isRecording = false
         state.recordingHint = ""
     }
@@ -253,6 +287,13 @@ struct QuestionKeySettingsSection: View {
                 .accessibilityIdentifier(state.kind.identifierPrefix + ".reset")
             }
 
+            if !state.inactiveNotice.isEmpty {
+                Text(state.inactiveNotice)
+                    .font(DS.WindowText.body)
+                    .foregroundColor(DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(state.kind.identifierPrefix + ".inactive")
+            }
             if state.isRecording && state.message.isEmpty {
                 Text("Press Escape to cancel.")
                     .font(DS.WindowText.body)

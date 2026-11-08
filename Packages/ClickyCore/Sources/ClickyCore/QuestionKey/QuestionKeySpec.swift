@@ -117,6 +117,19 @@ public enum QuestionKeySpec: Equatable, Sendable {
     /// The chat key unless the user chose another: right Command + comma.
     public static let defaultChatKey: QuestionKeySpec = .sidedCombination(modifiers: [.rightCommand], keyCode: 43)
 
+    /// True for the forms the chat key's recorder makes. A saved lone or family value is not a chat key.
+    public var isChatKeyForm: Bool {
+        if case .sidedCombination = self { return true }
+        return false
+    }
+
+    /// The chat key kept in settings, read at launch: nothing, a damaged value, or a form the chat key's recorder
+    /// never makes (a hand-edited or older `lone:` or `combo:` value) all give the default.
+    public static func savedChatKey(encoded: String?) -> QuestionKeySpec {
+        guard let encoded, let spec = QuestionKeySpec(encoded: encoded), spec.isChatKeyForm else { return .defaultChatKey }
+        return spec
+    }
+
     /// Builds a sided combination, or nil when it would fire while typing: it needs at least one modifier.
     public static func makeSidedCombination(modifiers: Set<ModifierKey>, keyCode: UInt16?) -> QuestionKeySpec? {
         guard !modifiers.isEmpty else { return nil }

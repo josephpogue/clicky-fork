@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import ClickyCore
 import SwiftUI
 
 /// A panel that refuses to become the key or main window, which is what keeps
@@ -36,12 +37,16 @@ final class ChatPanelController {
 
     private var windowCloseObserver: NSObjectProtocol?
 
+    /// True from `sitBehind` until the panel floats again or closes: a window covers its controls.
+    private var isSittingBehindAWindow = false
+
     /// Drops the panel below `window` so none of that window's controls sit under the panel. It still never
     /// takes keyboard focus. The panel floats again when that window closes or the chat is shown again.
     func sitBehind(_ window: NSWindow) {
         guard let panel, panel.isVisible else { return }
         panel.level = .normal
         panel.order(.below, relativeTo: window.windowNumber)
+        isSittingBehindAWindow = true
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
         windowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
@@ -54,6 +59,7 @@ final class ChatPanelController {
     func floatAboveWindows() {
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
         windowCloseObserver = nil
+        isSittingBehindAWindow = false
         guard let panel, panel.level != .floating else { return }
         panel.level = .floating
         if panel.isVisible { panel.orderFrontRegardless() }
@@ -68,13 +74,16 @@ final class ChatPanelController {
         panel.orderFrontRegardless()
     }
 
-    /// Closes the panel when it is on screen, else shows it as `show()` does. Neither takes keyboard focus or
-    /// activates the app, so the user keeps typing where they were.
+    /// Closes the panel when it is on screen, else shows it as `show()` does. A panel sitting behind Settings or
+    /// Sessions comes forward instead of closing, because closing it would change nothing the user can see. None
+    /// of these takes keyboard focus or activates the app, so the user keeps typing where they were.
     func toggle() {
-        if let panel, panel.isVisible {
-            hide()
-        } else {
-            show()
+        let action = ChatKeyPressAction.forPress(
+            isVisible: panel?.isVisible ?? false, isBehindAnotherWindow: isSittingBehindAWindow)
+        switch action {
+        case .show: show()
+        case .hide: hide()
+        case .bringToFront: floatAboveWindows()
         }
     }
 
@@ -82,6 +91,7 @@ final class ChatPanelController {
     func hide() {
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
         windowCloseObserver = nil
+        isSittingBehindAWindow = false
         panel?.orderOut(nil)
     }
 

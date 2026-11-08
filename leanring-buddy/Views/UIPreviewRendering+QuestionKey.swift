@@ -21,6 +21,12 @@ extension UIPreviewRendering {
              QuestionKeySettingsState(
                 kind: .chat, isRecording: true,
                 message: KeyOverlap.refusalForChatKey(.sidedCombination(modifiers: [.rightCommand], keyCode: nil), question: .default) ?? "")),
+            ("settings-chat-key-inactive.png",
+             QuestionKeySettingsState(currentKey: .combination(modifiers: [.command], keyCode: 43)),
+             QuestionKeySettingsState(
+                kind: .chat,
+                inactiveNotice: KeyOverlap.inactiveChatKeyNotice(
+                    chat: .defaultChatKey, question: .combination(modifiers: [.command], keyCode: 43)) ?? "")),
             ("settings-question-key-overlap.png",
              QuestionKeySettingsState(
                 isRecording: true,
