@@ -3,9 +3,12 @@
 //  leanring-buddy
 //
 //  Watches system-wide for the question key (right Command unless the user chose
-//  another) using a CGEvent tap, and turns pairs of presses into question signals.
-//  The tap only watches, except for a key combination that includes a regular key:
-//  that tap can also remove the key press so it does not type into the user's app.
+//  another) and the chat key (right Command + comma unless chosen) using one CGEvent
+//  tap, and turns pairs of question-key presses into question signals and each
+//  chat-key press into onChatKeyPressed. The tap only watches, except when a key
+//  includes a regular key (the chat key by default): that tap can also remove the
+//  key press so it does not type into the user's app. Both keys see every event
+//  before anything is removed.
 //  Installs nothing until start() is called, so nothing is observed outside a session.
 //
 
@@ -22,13 +25,12 @@ final class QuestionKeyMonitor {
     private var eventTapRunLoopSource: CFRunLoopSource?
     /// Whether the running tap can remove events (a key combination with a regular key) or only watch.
     private var tapIsRemovingEvents = false
-    private var questionKey: QuestionKeySpec = .default
-    private var detector = QuestionKeyDetector(spec: .default)
+    private var detector = TwoKeyDetector(questionKey: .default, chatKey: .defaultChatKey)
     private var questionKeyStateMachine = QuestionKeyStateMachine()
 
     /// While the Settings field records a new key, presses of the old key must not start a question.
     var isSuspended = false {
-        didSet { if isSuspended != oldValue { detector = QuestionKeyDetector(spec: questionKey) } }
+        didSet { if isSuspended != oldValue { detector.reset() } }
     }
 
     deinit {
@@ -44,15 +46,22 @@ final class QuestionKeyMonitor {
     var onChatKeyPressed: (() -> Void)?
 
     /// Switches to a new chat key, also in a running session.
-    func apply(chatKey newKey: QuestionKeySpec) {}
+    func apply(chatKey newKey: QuestionKeySpec) {
+        guard newKey != detector.chatKey else { return }
+        detector.apply(chatKey: newKey)
+        swapTapIfRemovalChanged()
+    }
 
     /// Switches to a new question key. A half-finished question carries over: the new key sends it.
     func apply(questionKey newKey: QuestionKeySpec) {
-        guard newKey != questionKey else { return }
-        questionKey = newKey
-        detector = QuestionKeyDetector(spec: newKey)
-        // A key combination needs a tap that can remove events; the others must stay watch-only.
-        if eventTap != nil, tapIsRemovingEvents != newKey.swallowsAKey {
+        guard newKey != detector.questionKey else { return }
+        detector.apply(questionKey: newKey)
+        swapTapIfRemovalChanged()
+    }
+
+    /// A key combination needs a tap that can remove events; otherwise the tap must stay watch-only.
+    private func swapTapIfRemovalChanged() {
+        if eventTap != nil, tapIsRemovingEvents != detector.swallowsAKey {
             removeTap()
             _ = installTap()
         }
@@ -83,7 +92,7 @@ final class QuestionKeyMonitor {
             return swallowEvent ? nil : Unmanaged.passUnretained(event)
         }
 
-        let removesEvents = questionKey.swallowsAKey
+        let removesEvents = detector.swallowsAKey
 
         guard let createdEventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -112,7 +121,7 @@ final class QuestionKeyMonitor {
     /// Removes the tap and forgets any half-finished question and key state.
     func stop() {
         removeTap()
-        detector = QuestionKeyDetector(spec: questionKey)
+        detector.reset()
         questionKeyStateMachine.reset()
     }
 
@@ -136,7 +145,7 @@ final class QuestionKeyMonitor {
     private func handleEventTap(eventType: CGEventType, event: CGEvent) -> Bool {
         if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
             // Events were missed while the tap was off, so a half-seen key press must not complete a tap.
-            detector = QuestionKeyDetector(spec: questionKey)
+            detector.reset()
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
@@ -163,8 +172,11 @@ final class QuestionKeyMonitor {
         }
 
         let detection = detector.handle(input)
-        if let tap = detection.tap {
+        if let tap = detection.questionTap {
             onSignal?(questionKeyStateMachine.handleLoneTap(tap))
+        }
+        if detection.chatPressed {
+            onChatKeyPressed?()
         }
         // Only a removing tap can swallow; a watch-only tap ignores the answer anyway.
         return detection.swallowEvent

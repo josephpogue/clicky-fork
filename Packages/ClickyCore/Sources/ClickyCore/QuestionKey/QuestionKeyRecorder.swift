@@ -30,11 +30,15 @@ public struct QuestionKeyRecorder {
     private var peakHeld: HeldModifiers = []
     private var currentHeld: HeldModifiers = []
 
-    public init() {}
+    /// The chat key records sided: every held modifier keeps its side, and the result is a sided combination.
+    private let sided: Bool
+
+    public init(sided: Bool = false) { self.sided = sided }
 
     /// The modifiers down right now, for a live "Control + Option" hint while recording.
     public var heldHint: String {
-        currentHeld.families.sorted().map(\.displayName).joined(separator: " + ")
+        if sided { return currentHeld.keys.sorted { $0.keyCode < $1.keyCode }.map(\.displayName).joined(separator: " + ") }
+        return currentHeld.families.sorted().map(\.displayName).joined(separator: " + ")
     }
 
     /// Nil while the user is still pressing; an outcome once the recording is decided.
@@ -44,6 +48,12 @@ public struct QuestionKeyRecorder {
             guard !isRepeat else { return nil }
             let families = held.withoutFunction.families
             if keyCode == Self.escapeKeyCode && families.isEmpty { return .cancelled }
+            if sided {
+                guard let spec = QuestionKeySpec.makeSidedCombination(modifiers: held.withoutFunction.keys, keyCode: keyCode) else {
+                    return .rejected(.needsModifier)
+                }
+                return .recorded(spec)
+            }
             guard let spec = QuestionKeySpec.makeCombination(modifiers: families, keyCode: keyCode) else {
                 return .rejected(.needsModifier)
             }
@@ -61,6 +71,7 @@ public struct QuestionKeyRecorder {
 
     private func outcome(forPeak peak: HeldModifiers) -> QuestionKeyRecordingOutcome {
         let keys = peak.keys
+        if sided, let spec = QuestionKeySpec.makeSidedCombination(modifiers: keys, keyCode: nil) { return .recorded(spec) }
         if keys.count == 1, let key = keys.first { return .recorded(.loneModifier(key)) }
         guard let spec = QuestionKeySpec.makeCombination(modifiers: peak.families, keyCode: nil) else {
             return .rejected(.ambiguousModifiers)

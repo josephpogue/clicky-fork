@@ -2,9 +2,11 @@
 //  QuestionKeySettingsSection.swift
 //  leanring-buddy
 //
-//  The "Question key" section of Settings: the current key, a Record button that
-//  listens for the next key press, and a Reset button back to right Command.
-//  Recording uses a monitor on this app's own events, so it needs no permission.
+//  The "Question key" and "Chat key" sections of Settings (one view, used twice): the
+//  current key, a Record button that listens for the next key press, and a Reset
+//  button back to the default. Recording uses a monitor on this app's own events,
+//  so it needs no permission. Each section refuses a key that a single press could
+//  share with the other one.
 //
 
 import AppKit
@@ -12,8 +14,27 @@ import Combine
 import ClickyCore
 import SwiftUI
 
+/// Which of the two keys a Settings section edits.
+enum SettingsKeyKind {
+    case question, chat
+
+    var title: String { self == .question ? "Question key" : "Chat key" }
+    var blurb: String {
+        switch self {
+        case .question:
+            return "Press it to start a spoken question, and again to send it.\nUse one modifier on its own, or hold several modifiers, with or without one more key."
+        case .chat:
+            return "Press it during a session to open the chat window, and again to close it.\nHold the modifiers you want with one more key. Left and right modifiers count separately."
+        }
+    }
+    var defaultKey: QuestionKeySpec { self == .question ? .default : .defaultChatKey }
+    var resetTitle: String { self == .question ? "Reset to right Command" : "Reset to right \u{2318} ," }
+    var identifierPrefix: String { self == .question ? "settings.questionKey" : "settings.chatKey" }
+}
+
 @MainActor
 final class QuestionKeySettingsState: ObservableObject {
+    let kind: SettingsKeyKind
     @Published var currentKey: QuestionKeySpec
     @Published var isRecording: Bool
     /// The modifiers held while recording, shown so the user sees the key being built.
@@ -25,14 +46,16 @@ final class QuestionKeySettingsState: ObservableObject {
     var onReset: () -> Void
 
     init(
-        currentKey: QuestionKeySpec = .default,
+        kind: SettingsKeyKind = .question,
+        currentKey: QuestionKeySpec? = nil,
         isRecording: Bool = false,
         recordingHint: String = "",
         message: String = "",
         onToggleRecording: @escaping () -> Void = {},
         onReset: @escaping () -> Void = {}
     ) {
-        self.currentKey = currentKey
+        self.kind = kind
+        self.currentKey = currentKey ?? kind.defaultKey
         self.isRecording = isRecording
         self.recordingHint = recordingHint
         self.message = message
@@ -46,26 +69,30 @@ final class QuestionKeySettingsState: ObservableObject {
         return recordingHint.isEmpty ? "Press the new key" : recordingHint + " + ..."
     }
 
-    var isAtDefault: Bool { currentKey == .default }
+    var isAtDefault: Bool { currentKey == kind.defaultKey }
 }
 
 /// Wires `QuestionKeySettingsState` to AppSettings and to the session's key monitor.
 @MainActor
 final class QuestionKeySettingsController {
     let state: QuestionKeySettingsState
-    private var recorder = QuestionKeyRecorder()
+    private let kind: SettingsKeyKind
+    private var recorder: QuestionKeyRecorder
     private var eventMonitor: Any?
     private var windowCloseObserver: NSObjectProtocol?
 
-    init() {
-        state = QuestionKeySettingsState(currentKey: AppSettings.shared.questionKey)
+    init(kind: SettingsKeyKind = .question) {
+        self.kind = kind
+        recorder = QuestionKeyRecorder(sided: kind == .chat)
+        state = QuestionKeySettingsState(kind: kind, currentKey: Self.savedKey(for: kind))
         state.onToggleRecording = { [weak self] in
             guard let self else { return }
             self.state.isRecording ? self.stopRecording() : self.startRecording()
         }
         state.onReset = { [weak self] in
-            self?.stopRecording()
-            self?.save(.default)
+            guard let self else { return }
+            self.stopRecording()
+            self.saveUnlessOverlapping(kind.defaultKey)
         }
         // A recording left open when the window closes would keep swallowing keys.
         windowCloseObserver = NotificationCenter.default.addObserver(
@@ -80,22 +107,45 @@ final class QuestionKeySettingsController {
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
     }
 
+    private static func savedKey(for kind: SettingsKeyKind) -> QuestionKeySpec {
+        kind == .question ? AppSettings.shared.questionKey : AppSettings.shared.chatKey
+    }
+
     func reloadFromSettings() {
-        state.currentKey = AppSettings.shared.questionKey
+        state.currentKey = Self.savedKey(for: kind)
+    }
+
+    /// Why the other key refuses `spec`, or nil when a press of `spec` could never fire both.
+    private func overlapRefusal(for spec: QuestionKeySpec) -> String? {
+        switch kind {
+        case .question: return KeyOverlap.refusalForQuestionKey(spec, chat: AppSettings.shared.chatKey)
+        case .chat: return KeyOverlap.refusalForChatKey(spec, question: AppSettings.shared.questionKey)
+        }
+    }
+
+    private func saveUnlessOverlapping(_ spec: QuestionKeySpec) {
+        if let refusal = overlapRefusal(for: spec) {
+            state.message = refusal
+        } else {
+            save(spec)
+        }
     }
 
     private func save(_ spec: QuestionKeySpec) {
-        AppSettings.shared.questionKey = spec
+        switch kind {
+        case .question: AppSettings.shared.questionKey = spec
+        case .chat: AppSettings.shared.chatKey = spec
+        }
         state.currentKey = spec
         state.message = ""
     }
 
     private func startRecording() {
-        recorder = QuestionKeyRecorder()
+        recorder = QuestionKeyRecorder(sided: kind == .chat)
         state.message = ""
         state.recordingHint = ""
         state.isRecording = true
-        // The old key must not start a question while the user is choosing a new one.
+        // Neither key may fire while the user is choosing a new one.
         SessionCoordinator.shared.setQuestionKeyRecording(true)
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             // Returning nil keeps the press away from the window, so Command+Q or Space do nothing while recording.
@@ -132,11 +182,17 @@ final class QuestionKeySettingsController {
         case .cancelled:
             stopRecording()
         case .recorded(let spec):
-            stopRecording()
-            save(spec)
+            if let refusal = overlapRefusal(for: spec) {
+                // Stay in recording so the user can press a different key.
+                recorder = QuestionKeyRecorder(sided: kind == .chat)
+                state.message = refusal
+            } else {
+                stopRecording()
+                save(spec)
+            }
         case .rejected(let rejection):
             // Stay in recording so the user can press a better key.
-            recorder = QuestionKeyRecorder()
+            recorder = QuestionKeyRecorder(sided: kind == .chat)
             state.message = rejection.message
         }
     }
@@ -148,10 +204,10 @@ struct QuestionKeySettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Question key")
+                Text(state.kind.title)
                     .font(DS.WindowText.windowTitle)
                     .foregroundColor(DS.Colors.textPrimary)
-                Text("Press it to start a spoken question, and again to send it.\nUse one modifier on its own, or hold several modifiers, with or without one more key.")
+                Text(state.kind.blurb)
                     .font(DS.WindowText.body)
                     .foregroundColor(DS.Colors.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -176,25 +232,25 @@ struct QuestionKeySettingsSection: View {
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Question key")
+                    .accessibilityLabel(state.kind.title)
                     .accessibilityValue(state.fieldText)
-                    .accessibilityIdentifier("settings.questionKey.field")
+                    .accessibilityIdentifier(state.kind.identifierPrefix + ".field")
 
                 Button(action: state.onToggleRecording) {
                     Text(state.isRecording ? "Cancel" : "Record")
                 }
                 .clickyWindowButton(.secondary, isCompact: true)
-                .accessibilityIdentifier("settings.questionKey.record")
+                .accessibilityIdentifier(state.kind.identifierPrefix + ".record")
             }
 
             HStack(spacing: 10) {
                 Color.clear.frame(width: 72, height: 1)
                 Button(action: state.onReset) {
-                    Text("Reset to right Command")
+                    Text(state.kind.resetTitle)
                 }
                 .clickyWindowButton(.quiet, isCompact: true)
                 .disabled(state.isAtDefault && !state.isRecording)
-                .accessibilityIdentifier("settings.questionKey.reset")
+                .accessibilityIdentifier(state.kind.identifierPrefix + ".reset")
             }
 
             if state.isRecording && state.message.isEmpty {
@@ -207,10 +263,10 @@ struct QuestionKeySettingsSection: View {
                     .font(DS.WindowText.body)
                     .foregroundColor(DS.Colors.warningText)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("settings.questionKey.message")
+                    .accessibilityIdentifier(state.kind.identifierPrefix + ".message")
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("settings.questionKey")
+        .accessibilityIdentifier(state.kind.identifierPrefix)
     }
 }

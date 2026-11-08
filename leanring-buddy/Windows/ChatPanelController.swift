@@ -68,6 +68,23 @@ final class ChatPanelController {
         panel.orderFrontRegardless()
     }
 
+    /// Closes the panel when it is on screen, else shows it as `show()` does. Neither takes keyboard focus or
+    /// activates the app, so the user keeps typing where they were.
+    func toggle() {
+        if let panel, panel.isVisible {
+            hide()
+        } else {
+            show()
+        }
+    }
+
+    /// orderOut hides the panel without activating anything, like the close button does.
+    func hide() {
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
+        windowCloseObserver = nil
+        panel?.orderOut(nil)
+    }
+
     private func makePanel() -> NSPanel {
         let panel = NonFocusStealingPanel(
             contentRect: NSRect(origin: .zero, size: Self.contentSize),

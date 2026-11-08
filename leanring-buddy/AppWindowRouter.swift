@@ -27,7 +27,7 @@ final class AppWindowRouter {
 
     /// The chat key: opens the chat panel, or closes it when it is open. Never takes keyboard focus.
     func toggleChat() {
-        chatPanelController.show()
+        chatPanelController.toggle()
     }
 
     func showSessions() {

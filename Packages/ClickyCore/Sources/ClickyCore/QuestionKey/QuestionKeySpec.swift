@@ -8,6 +8,16 @@ public enum ModifierFamily: String, CaseIterable, Comparable, Sendable {
     private var sortRank: Int { Self.allCases.firstIndex(of: self) ?? 0 }
     public static func < (a: ModifierFamily, b: ModifierFamily) -> Bool { a.sortRank < b.sortRank }
 
+    /// The symbol macOS prints for the key.
+    public var symbol: String {
+        switch self {
+        case .control: return "\u{2303}"
+        case .option: return "\u{2325}"
+        case .shift: return "\u{21E7}"
+        case .command: return "\u{2318}"
+        }
+    }
+
     public var displayName: String {
         switch self {
         case .control: return "Control"
@@ -58,9 +68,10 @@ public enum ModifierKey: String, CaseIterable, Sendable {
         }
     }
 
+    public var sideName: String { rawValue.hasPrefix("left") ? "Left" : "Right" }
+
     public var displayName: String {
-        let side = rawValue.hasPrefix("left") ? "Left" : "Right"
-        return "\(side) \(family.displayName)"
+        "\(sideName) \(family.displayName)"
     }
 
     public init?(keyCode: UInt16) {
@@ -96,8 +107,21 @@ public enum QuestionKeySpec: Equatable, Sendable {
     /// Modifiers held together, with one regular key (fires when the key goes down) or without (fires when the
     /// modifiers are let go after being held alone). Either side of a modifier counts.
     case combination(modifiers: Set<ModifierFamily>, keyCode: UInt16?)
+    /// Specific modifier keys, sides told apart, held together with one regular key (fires when the key goes down)
+    /// or without (fires like the question key's modifiers-only rule; a single modifier is a lone tap). Only the
+    /// chat key uses this case; the question key never takes it.
+    case sidedCombination(modifiers: Set<ModifierKey>, keyCode: UInt16?)
 
     public static let `default`: QuestionKeySpec = .loneModifier(.rightCommand)
+
+    /// The chat key unless the user chose another: right Command + comma.
+    public static let defaultChatKey: QuestionKeySpec = .sidedCombination(modifiers: [.rightCommand], keyCode: 43)
+
+    /// Builds a sided combination, or nil when it would fire while typing: it needs at least one modifier.
+    public static func makeSidedCombination(modifiers: Set<ModifierKey>, keyCode: UInt16?) -> QuestionKeySpec? {
+        guard !modifiers.isEmpty else { return nil }
+        return .sidedCombination(modifiers: modifiers, keyCode: keyCode)
+    }
 
     /// Builds a combination, or nil when it would fire while typing: a regular key needs at least one modifier,
     /// and modifiers alone need at least two.
@@ -109,8 +133,10 @@ public enum QuestionKeySpec: Equatable, Sendable {
     /// True when the key press has to be hidden from the app the user is in, which needs an event tap that can
     /// remove events, not only watch them.
     public var swallowsAKey: Bool {
-        if case .combination(_, let keyCode) = self { return keyCode != nil }
-        return false
+        switch self {
+        case .combination(_, let keyCode), .sidedCombination(_, let keyCode): return keyCode != nil
+        case .loneModifier: return false
+        }
     }
 
     /// "Right Command", "Control + Option + Space", "Control + Option".
@@ -122,6 +148,16 @@ public enum QuestionKeySpec: Equatable, Sendable {
             var parts = modifiers.sorted().map(\.displayName)
             if let keyCode { parts.append(KeyCodeNames.name(for: keyCode)) }
             return parts.joined(separator: " + ")
+        case .sidedCombination(let modifiers, let keyCode):
+            var parts = Self.sortedByMacOSOrder(modifiers).map { "\($0.sideName) \($0.family.symbol)" }
+            if let keyCode { parts.append(KeyCodeNames.name(for: keyCode)) }
+            return parts.joined(separator: " ")
+        }
+    }
+
+    private static func sortedByMacOSOrder(_ keys: Set<ModifierKey>) -> [ModifierKey] {
+        keys.sorted { a, b in
+            a.family == b.family ? a.keyCode < b.keyCode : a.family < b.family
         }
     }
 
@@ -135,6 +171,9 @@ public enum QuestionKeySpec: Equatable, Sendable {
         case .combination(let modifiers, let keyCode):
             let names = modifiers.sorted().map(\.rawValue).joined(separator: ",")
             return "combo:\(names):\(keyCode.map(String.init) ?? "-")"
+        case .sidedCombination(let modifiers, let keyCode):
+            let names = Self.sortedByMacOSOrder(modifiers).map(\.rawValue).joined(separator: ",")
+            return "sided:\(names):\(keyCode.map(String.init) ?? "")"
         }
     }
 
@@ -158,6 +197,21 @@ public enum QuestionKeySpec: Equatable, Sendable {
                 return nil
             }
             guard let spec = Self.makeCombination(modifiers: Set(families), keyCode: keyCode) else { return nil }
+            self = spec
+        case "sided":
+            guard parts.count == 3 else { return nil }
+            let names = parts[1].split(separator: ",").map(String.init)
+            let keys = names.compactMap { ModifierKey(rawValue: $0) }
+            guard keys.count == names.count else { return nil }
+            let keyCode: UInt16?
+            if parts[2].isEmpty {
+                keyCode = nil
+            } else if let code = UInt16(parts[2]) {
+                keyCode = code
+            } else {
+                return nil
+            }
+            guard let spec = Self.makeSidedCombination(modifiers: Set(keys), keyCode: keyCode) else { return nil }
             self = spec
         default:
             return nil
