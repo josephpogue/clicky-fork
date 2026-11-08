@@ -122,6 +122,12 @@ final class SessionCoordinator: ObservableObject {
             }
             .store(in: &settingsSubscriptions)
 
+        // A new question key applies at once, also in a running session.
+        settings.$questionKey
+            .removeDuplicates()
+            .sink { [weak self] key in self?.questionKeyMonitor.apply(questionKey: key) }
+            .store(in: &settingsSubscriptions)
+
         // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
         chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
         chatWindowState.onStopSession = { [weak self] in self?.stopSession() }
@@ -129,6 +135,11 @@ final class SessionCoordinator: ObservableObject {
         questionKeyMonitor.onSignal = { [weak self] signal in
             Task { @MainActor in await self?.handleQuestionKeySignal(signal) }
         }
+    }
+
+    /// Settings is recording a new question key: the old one must not start a question meanwhile.
+    func setQuestionKeyRecording(_ isRecording: Bool) {
+        questionKeyMonitor.isSuspended = isRecording
     }
 
     // MARK: - Work at launch

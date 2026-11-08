@@ -3,7 +3,7 @@
 //  leanring-buddy
 //
 //  Settings: which plan answers, each provider's sign-in, model and measured
-//  answer time, the dig-deeper model and effort, the folders Clicky can search,
+//  answer time, the question key, the dig-deeper model and effort, the folders Clicky can search,
 //  the notes folder, the summary switch, and a short note on the three macOS
 //  permissions. Choices are shown as visible pills, not drop-downs,
 //  because each set is small.
@@ -14,6 +14,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var state: SettingsState
     @ObservedObject var answerDeliveryState: AnswerDeliverySettingsState
+    @ObservedObject var questionKeyState: QuestionKeySettingsState
 
     /// `init(state:)` supplies a default answer-delivery state so previews that build `SettingsView(state:)` keep compiling;
     /// the default shows Text with no voice row and never reads this Mac's voices.
@@ -22,15 +23,22 @@ struct SettingsView: View {
         self.init(state: state, answerDeliveryState: AnswerDeliverySettingsState())
     }
 
+    @MainActor
     init(state: SettingsState, answerDeliveryState: AnswerDeliverySettingsState) {
+        self.init(state: state, answerDeliveryState: answerDeliveryState, questionKeyState: QuestionKeySettingsState())
+    }
+
+    init(state: SettingsState, answerDeliveryState: AnswerDeliverySettingsState, questionKeyState: QuestionKeySettingsState) {
         self.state = state
         self.answerDeliveryState = answerDeliveryState
+        self.questionKeyState = questionKeyState
     }
 
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 28) {
                 AnswerDeliverySettingsSection(state: answerDeliveryState)
+                QuestionKeySettingsSection(state: questionKeyState)
                 providerSection
                 DigDeeperSettingsSection(state: state)
                 SearchFoldersSettingsSection(state: state)

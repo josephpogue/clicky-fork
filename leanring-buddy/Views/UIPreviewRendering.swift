@@ -90,6 +90,7 @@ enum UIPreviewRendering {
         // Each answer-delivery slice renders its own previews from its own file.
         try renderCursorAnswerPreviews(into: directory)
         try renderAnswerDeliverySettingsPreviews(into: directory)
+        try renderQuestionKeyPreviews(into: directory)
         try renderMenuPanelPreviews(into: directory)
         try renderBrainSearchPreviews(into: directory)
     }
