@@ -189,6 +189,8 @@ final class QuestionKeySettingsController {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
         if state.isRecording {
+            // A refusal from this recording goes with it (Cancel, Escape, or the other section taking over).
+            state.message = ""
             Self.recordingTracker.end(kind.recordingOwnerName)
             // Still suspended when the other section took over recording.
             SessionCoordinator.shared.setQuestionKeyRecording(Self.recordingTracker.isRecording)

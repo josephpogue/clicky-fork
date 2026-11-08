@@ -89,6 +89,8 @@ final class SessionCoordinator: ObservableObject {
     private var startStatusMessageID: UUID?
     /// True once the screen, microphone or key tap was switched on for the session being started.
     private var didStartCapture = false
+    /// True between a finished Start and Stop: the chat key's tap is on, so the footer may name the key.
+    private var chatKeyWorks = false
 
     private var sessionID: String?
     private var screenRecorder: SessionScreenRecorder?
@@ -128,7 +130,11 @@ final class SessionCoordinator: ObservableObject {
         // A new question key applies at once, also in a running session.
         settings.$questionKey
             .removeDuplicates()
-            .sink { [weak self] key in self?.questionKeyMonitor.apply(questionKey: key) }
+            .sink { [weak self] key in
+                guard let self else { return }
+                self.questionKeyMonitor.apply(questionKey: key)
+                self.refreshChatKeyName(question: key, chat: self.settings.chatKey)
+            }
             .store(in: &settingsSubscriptions)
 
         // A new chat key applies at once, also in a running session, and the footer names it.
@@ -137,7 +143,7 @@ final class SessionCoordinator: ObservableObject {
             .sink { [weak self] key in
                 guard let self else { return }
                 self.questionKeyMonitor.apply(chatKey: key)
-                if self.cursorAnswerPresenter.chatKeyName != nil { self.cursorAnswerPresenter.chatKeyName = key.displayName }
+                self.refreshChatKeyName(question: self.settings.questionKey, chat: key)
             }
             .store(in: &settingsSubscriptions)
         questionKeyMonitor.onChatKeyPressed = { [weak self] in self?.handleChatKeyPressed() }
@@ -452,7 +458,16 @@ final class SessionCoordinator: ObservableObject {
         }
         _ = lifecycle.finishStart()
         // From now on the chat key works, so a bubble with more in the chat names it.
-        cursorAnswerPresenter.chatKeyName = settings.chatKey.displayName
+        chatKeyWorks = true
+        refreshChatKeyName(question: settings.questionKey, chat: settings.chatKey)
+    }
+
+    /// The footer names the chat key only while pressing it opens the chat: during a session, and while it does not
+    /// overlap the question key (an overlapping chat key is inactive). Otherwise it points at the menu bar's Open chat.
+    /// The sinks pass the new key themselves, since `@Published` sends before the property changes.
+    private func refreshChatKeyName(question: QuestionKeySpec, chat: QuestionKeySpec) {
+        let isActive = chatKeyWorks && KeyOverlap.isChatKeyActive(chat, question: question)
+        cursorAnswerPresenter.chatKeyName = isActive ? chat.displayName : nil
     }
 
     /// Ends a Start that failed or was cancelled: switches off whatever was on, ends the provider, and applies
@@ -463,6 +478,7 @@ final class SessionCoordinator: ObservableObject {
             isCancelled: Task.isCancelled, failureNotice: noticeText, captureBegan: didStartCapture
         )
         questionKeyMonitor.stop()
+        chatKeyWorks = false
         cursorAnswerPresenter.chatKeyName = nil
         // The window tracker goes first: its callback feeds the recorder and the input queue.
         frontmostWindowTracker.stop()
@@ -613,6 +629,7 @@ final class SessionCoordinator: ObservableObject {
 
         // Everything that watches or listens goes off first.
         questionKeyMonitor.stop()
+        chatKeyWorks = false
         cursorAnswerPresenter.chatKeyName = nil
         await speechPipeline?.stop()
         await screenRecorder?.stop()
