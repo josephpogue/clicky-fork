@@ -97,6 +97,17 @@ public struct KeyTapHealth: Equatable {
 
     public init() {}
 
+    /// Whether Accessibility was taken away from the running app. `AXIsProcessTrusted()` is read once per process
+    /// and keeps saying true after the switch is turned off (measured on the test Mac after `tccutil reset`), while
+    /// a tap that removes events can no longer be made at once. A tap that only watches keeps working without
+    /// Accessibility, so its keys are fine until a key change needs a removing tap; that swap reports the loss.
+    public static func accessibilityEnded(
+        wasTrusted: Bool, isTrusted: Bool, tapRemovesEvents: Bool, canMakeRemovingTap: Bool
+    ) -> Bool {
+        if wasTrusted && !isTrusted { return true }
+        return tapRemovesEvents && !canMakeRemovingTap
+    }
+
     /// True from the loss until a try works again.
     public var isLost: Bool { hasReportedLoss }
 

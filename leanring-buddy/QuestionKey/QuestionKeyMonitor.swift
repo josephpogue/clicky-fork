@@ -219,6 +219,9 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
             guard suspended != isSuspended else { return }
             isSuspended = suspended
             detector.reset()
+            // Recording a key starts here: find out now whether the keys still work, so a lost tap is reported
+            // and removed before it can swallow the key being recorded.
+            if suspended { checkTapStillWorks() }
         }
     }
 
@@ -349,14 +352,34 @@ nonisolated final class QuestionKeyTapWorker: @unchecked Sendable {
 
     private static let healthCheckInterval: CFTimeInterval = 3
 
-    /// A tap that exists but is off is turned back on; Accessibility taken away while the tap still looks fine is
-    /// met with a new tap, which fails, and the loss is reported.
+    /// Whether a tap that can remove events can be made right now. Macs keep answering "trusted" to
+    /// `AXIsProcessTrusted()` and keep an old tap running after Accessibility is taken away, but refuse a new
+    /// removing tap at once, so this is the live check. The probe tap is switched off and dropped on the spot.
+    private func canMakeRemovingTap() -> Bool {
+        guard let probeTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .tailAppendEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(1) << CGEventType.otherMouseDragged.rawValue,
+            callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
+            userInfo: nil
+        ) else { return false }
+        CGEvent.tapEnable(tap: probeTap, enable: false)
+        CFMachPortInvalidate(probeTap)
+        return true
+    }
+
+    /// A tap that exists but is off is turned back on. Accessibility taken away, seen by the system's answer or by
+    /// a removing tap that cannot be made any more, is met with a new tap, which fails, and the loss is reported.
+    /// Also runs when a Settings recording starts, so a recording never waits on a tap that is already stale.
     private func checkTapStillWorks() {
         guard let eventTap, !tapHealth.isLost else { return }
         let isTrusted = AXIsProcessTrusted()
-        let trustJustEnded = wasTrusted && !isTrusted
+        let trustEnded = KeyTapHealth.accessibilityEnded(
+            wasTrusted: wasTrusted, isTrusted: isTrusted,
+            tapRemovesEvents: tapIsRemovingEvents, canMakeRemovingTap: !tapIsRemovingEvents || canMakeRemovingTap())
         wasTrusted = isTrusted
-        if trustJustEnded {
+        if trustEnded {
             removeTap()
             settleTap(after: tapHealth.attemptFinished(succeeded: false))
         } else if !CGEvent.tapIsEnabled(tap: eventTap) {

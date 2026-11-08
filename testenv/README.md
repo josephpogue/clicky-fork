@@ -168,6 +168,10 @@ Needs a session running (`D click "Start session"`) and an answer on screen (any
 - `testenv exec <id> -- bash /Users/admin/reset-walk.sh` quits the app and restores everything: vault, brain fixture, app data (sessions and both stand-in sign-in flags) and the stand-in logs. Then run `launch-app.sh` again.
 - Only the vault: `testenv exec <id> -- bash /Users/admin/reset-vault.sh`. Only the brain fixture: `bash /Users/admin/reset-brain.sh`.
 
+## 8b. Taking Accessibility away mid-session
+
+`testenv exec <id> -- tccutil reset Accessibility com.clickyfork.app` in a running session removes the grant, and the guest then behaves like a real revoke with one catch: the running app's `AXIsProcessTrusted()` keeps returning true (also after writing `auth_value 0` and restarting `tccd`), the existing event tap stays enabled and keeps getting events, and no `com.apple.accessibility.api` notification arrives. Only creating a new tap that can remove events fails, at once. The app reports the loss within one 3 s check. Turning the System Settings switch off cannot be walked here: driving it needs `osascript` control of System Events, which raises a permission prompt that covers the screen and takes the keys, so never use `osascript` in the guest. Press the keys with the driver after the reset and read the panel with `D read`.
+
 ## 9. Finish
 
 `testenv down <id>`. Run output (screenshots, collected logs) stays in `~/.cache/testenv/runs/<id>/`.
