@@ -71,6 +71,11 @@ final class AppSettings: ObservableObject {
         didSet { userDefaults.set(digDeeperEffort.rawValue, forKey: Keys.digDeeperEffort) }
     }
 
+    /// The key that starts and sends a spoken question. Right Command by default.
+    @Published var questionKey: QuestionKeySpec {
+        didSet { userDefaults.set(questionKey.encoded, forKey: Keys.questionKey) }
+    }
+
     /// Seconds the last answer took, per provider raw value, shown in Settings.
     @Published private(set) var measuredAnswerSeconds: [String: Double] {
         didSet { userDefaults.set(measuredAnswerSeconds, forKey: Keys.measuredAnswerSeconds) }
@@ -93,6 +98,7 @@ final class AppSettings: ObservableObject {
         digDeeperClaudeModel = userDefaults.string(forKey: Keys.digDeeperClaudeModel) ?? "opus"
         digDeeperChatgptModel = userDefaults.string(forKey: Keys.digDeeperChatgptModel) ?? ""
         digDeeperEffort = userDefaults.string(forKey: Keys.digDeeperEffort).flatMap(AnswerEffort.init(rawValue:)) ?? .high
+        questionKey = userDefaults.string(forKey: Keys.questionKey).flatMap(QuestionKeySpec.init(encoded:)) ?? .default
         measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 
@@ -109,5 +115,6 @@ final class AppSettings: ObservableObject {
         static let digDeeperClaudeModel = "settings.digDeeperClaudeModel"
         static let digDeeperChatgptModel = "settings.digDeeperChatgptModel"
         static let digDeeperEffort = "settings.digDeeperEffort"
+        static let questionKey = "settings.questionKey"
     }
 }

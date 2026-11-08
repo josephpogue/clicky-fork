@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-11-05
+last_reviewed: 2026-11-08
 ---
 
 # Clicky Fork: goal
@@ -13,7 +13,7 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 - **Ask without stopping work:** As a user, I want to ask a question out loud while I keep working, so that I never take my hands off the mouse.
   - Acceptance: When the user presses the question key on its own during a session, the app shall show that it is listening for a question.
   - Acceptance: When the user presses the question key again, the app shall send what was said between the two presses as the question.
-  - Acceptance: When the question key is pressed together with another key, the app shall not start a question.
+  - Acceptance: When the question key is a single modifier and it is pressed together with another key, the app shall not start a question; when it is a combination, the app shall start a question only when exactly that combination is pressed.
 - **Answers about my screen:** As a user, I want answers that use what is on my screen, so that I get help with what I am doing right now.
   - Acceptance: When a question is sent, the app shall include the current view of every display.
   - Acceptance: When an answer arrives and text answers are on, the app shall show it as text beside the cursor.
@@ -22,6 +22,12 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 - **Show me where:** As a user, I want to be shown where on the screen to look or click, so that I can follow the guidance without searching for it.
   - Acceptance: When an answer refers to a spot on the screen, the app shall move a pointer to that spot.
   - Acceptance: When the spot is on another display, the app shall point on that display.
+- **Choose my own key:** As a user, I want to pick which key starts a question, including a combination, so that it fits the other shortcuts I use.
+  - Acceptance: When the user opens Settings, the app shall show the current question key and let the user record a new one by pressing it.
+  - Acceptance: When the user records one modifier, two or more modifiers, or modifiers with one regular key, the app shall use it as the question key from then on, also in a running session.
+  - Acceptance: When the user records a regular key with no modifier, the app shall refuse it.
+  - Acceptance: When a combination with a regular key is pressed, the app shall keep that key press from reaching the app the user is in.
+  - Acceptance: When the user resets the question key, the app shall go back to right Command.
 - **Hear it or read it:** As a user, I want to choose whether answers are spoken, shown as text, or both, so that I can take them in the way that suits what I am doing.
   - Acceptance: When the user opens Settings, the app shall offer spoken answers, text answers, or both.
   - Acceptance: When spoken answers are on, the app shall read each answer aloud.
@@ -56,7 +62,7 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 ## Requirements
 
 - Sessions start and stop only by the user's action; the app never launches at login.
-- The question key is right Command by default.
+- The question key is right Command by default, and the choice is kept between launches.
 - No window opens during a session unless the user opens it; the chat window holding the whole conversation opens only from the menu-bar panel.
 - Spoken answers use the voices built into macOS.
 - Screenshots, speech-to-text, change detection, cleanup and the notes index and passage search run on the Mac with no AI request.

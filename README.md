@@ -12,7 +12,7 @@ You need the `claude` CLI (Claude Code) for a Claude plan, the `codex` CLI for a
 2. Grant **Microphone**, **Screen Recording** and **Accessibility** when the panel asks. Accessibility is for the question key and window titles.
 3. Open **Settings** from the panel. Sign in to Claude or ChatGPT (each opens the CLI's own browser login; these sign-ins are the app's own, separate from any Claude Code or Codex you already use), pick a model, and choose your notes folder if you want Save.
 4. Press **Start session**. The menu bar icon shows a red dot.
-5. Tap right **Command** on its own and say your question; a marker beside the cursor shows it is listening. Tap right Command again to send it. The answer shows in the chat window, and a pointer flies to the spot it names.
+5. Tap right **Command** on its own (or the key you chose in Settings under Question key) and say your question; a marker beside the cursor shows it is listening. Press it again to send it. The answer shows in the chat window, and a pointer flies to the spot it names.
 6. Press **Stop** when done. Near-duplicate screenshots are cleaned up and the log is written. Open **Sessions** to look back, and **Save** to file a session under a project in your notes folder.
 
 Nothing is captured, heard or sent outside a session, and nothing goes to an AI between questions. Session data stays in `~/Library/Application Support/Clicky Fork/` until you press Save.
