@@ -72,6 +72,9 @@ final class AppSettings: ObservableObject {
     }
 
     /// The key that starts and sends a spoken question. Right Command by default.
+    /// The key that opens and closes the chat window during a session (default right Command + comma).
+    @Published var chatKey: QuestionKeySpec = .default
+
     @Published var questionKey: QuestionKeySpec {
         didSet { userDefaults.set(questionKey.encoded, forKey: Keys.questionKey) }
     }

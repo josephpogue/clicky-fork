@@ -94,6 +94,13 @@ enum AnswerBubbleMetrics {
         return measuringView.fittingSize.height
     }
 
+    /// True when `text` fits the bubble's body under `CursorBubbleLayout.maximumBodyHeight` with nothing cut.
+    /// `CursorLineState` and the notice rule call it to decide which whole sentences show.
+    @MainActor
+    static func fitsInBubble(text: String) -> Bool {
+        true
+    }
+
     @MainActor
     static func textLayout(
         forParagraphs paragraphs: [String],

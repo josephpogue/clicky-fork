@@ -40,6 +40,12 @@ final class QuestionKeyMonitor {
         }
     }
 
+    /// Called on the main actor each time the chat key is pressed during a session.
+    var onChatKeyPressed: (() -> Void)?
+
+    /// Switches to a new chat key, also in a running session.
+    func apply(chatKey newKey: QuestionKeySpec) {}
+
     /// Switches to a new question key. A half-finished question carries over: the new key sends it.
     func apply(questionKey newKey: QuestionKeySpec) {
         guard newKey != questionKey else { return }

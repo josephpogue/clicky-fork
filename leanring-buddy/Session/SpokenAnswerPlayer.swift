@@ -166,6 +166,12 @@ final class SpokenAnswerPlayer {
         queue(sentenceSplitter.newSentencesAtToolCall(visibleTextSoFar: visibleTextSoFar))
     }
 
+    /// Reads these sentences, in order, after whatever is still being said: the sentences the cursor line shows for
+    /// the first time (`CursorLineUpdate.newSentencesToSpeak`). Chat text never comes here.
+    func speak(sentences: [String]) {
+        queue(sentences)
+    }
+
     /// Says "Checking your notes." in the same queue.
     func speakCheckingLine() {
         queue(["\(CheckingNotesRule.lineText)."])

@@ -78,6 +78,17 @@ final class CursorAnswerPresenter {
         if finalContent != currentContent { updateBubbleInPlace(content: finalContent) }
     }
 
+    /// The chat key's name for the footer ("Right ⌘ ,") while a session runs; nil outside a session, when the
+    /// footer points to the menu-bar panel's Open chat instead. Set by SessionCoordinator.
+    var chatKeyName: String?
+
+    /// The answer's cursor line (whole sentences that fit, and whether more is in the chat) each time it changes,
+    /// streaming and final alike.
+    func showCursorLine(_ line: CursorLine) {
+        guard !line.text.isEmpty else { return }
+        showGrowingAnswer(text: line.text)
+    }
+
     /// The model began a tool call: after a click dismissed the bubble, the next text is a new finding.
     func noteToolCallStarted() {
         growingBubbleState.toolCallStartedReported()
