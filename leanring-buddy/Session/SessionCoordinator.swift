@@ -147,6 +147,8 @@ final class SessionCoordinator: ObservableObject {
             }
             .store(in: &settingsSubscriptions)
         questionKeyMonitor.onChatKeyPressed = { [weak self] in self?.handleChatKeyPressed() }
+        // The tap died mid-session (Accessibility was turned off): say so where session problems show, never fail silently.
+        questionKeyMonitor.onTapLost = { [weak self] in self?.showKeyTapLost() }
 
         // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
         chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
@@ -921,6 +923,14 @@ final class SessionCoordinator: ObservableObject {
         guard let messageID = answerMessageIDs[token],
               let index = chatWindowState.messages.firstIndex(where: { $0.id == messageID }) else { return }
         change(&chatWindowState.messages[index])
+    }
+
+    /// The question key and the chat key no longer work in this session: the menu-bar panel and the cursor say so
+    /// (and the chat window, as for every notice). The panel line stays until the next Start re-checks Accessibility.
+    private func showKeyTapLost() {
+        guard lifecycle.acceptsPointerFlights else { return }
+        panelNotice = KeyTapNotice.lost
+        showNotice(KeyTapNotice.lost)
     }
 
     fileprivate func showNotice(_ text: String) {
