@@ -33,6 +33,17 @@ public enum SentenceRule {
         "Check", "Make", "See", "Note", "Tap", "Scroll", "Drag", "Copy", "Paste", "Install", "Set", "Turn", "Start",
         "Stop", "Wait", "Let", "Let's", "Please", "Do", "Don't", "Yes", "No", "Keep", "Hold", "Look", "Add", "Remove",
         "Delete", "Create", "Pick", "Move", "Restart", "Sign", "Log", "Switch", "Find", "Read", "Ask",
+        "Can", "Should", "Would", "Could", "Is", "Are", "Does", "What", "Why", "How", "Which", "Who", "Where", "Just",
+        "Each", "Every", "All", "Some", "For", "In", "On", "At", "To", "With", "Instead", "Still", "Only", "Maybe",
+        "Sure", "Hit", "Take", "Give", "Enable", "Disable", "Update", "Launch", "Navigate", "Visit", "Download",
+    ]
+
+    /// Openers that do not settle an ellipsis: a pronoun, article or determiner right after "..." usually continues
+    /// the trailing-off thought ("Hmm... I think so."), so it is not a new sentence.
+    private static let continuesAfterEllipsis: Set<String> = [
+        "I", "I'm", "I'll", "I've", "I'd", "It", "It's", "He", "She", "We", "You", "They", "This", "That", "That's",
+        "These", "Those", "There", "Here", "The", "A", "An", "My", "Your", "Our", "Their", "Its",
+        "Each", "Every", "All", "Some",
     ]
 
     /// True when the character at `index` ends a sentence: ".", "!", "?" or "…" (then any closing quotes or
@@ -58,7 +69,8 @@ public enum SentenceRule {
 
         if mark == "\u{2026}" || (mark == "." && markIndex > 0 && characters[markIndex - 1] == ".") {
             // An ellipsis never ends a sentence by itself: only an opener word after it does.
-            return nextWordIsSentenceOpener(after: index, in: characters, isTextComplete: isTextComplete)
+            return nextWordIsSentenceOpener(
+                after: index, in: characters, isTextComplete: isTextComplete, afterEllipsis: true)
         }
         if mark != "." {
             return !hasClosers || nextWordStartsSentence(after: index, in: characters, isTextComplete: isTextComplete)
@@ -74,6 +86,8 @@ public enum SentenceRule {
         if abbreviations.contains(lowercasedToken) { return false }
         if isDottedLetters(token) { return false }
         if token.count == 2, token[0].isLetter, token[0].isUppercase {
+            // "A." as a list label ("A. Click Save. B. Click Close.") has no word before it in its clause.
+            if isLabelPosition(tokenStart: tokenStart, in: characters) { return false }
             return nextWordIsSentenceOpener(after: index, in: characters, isTextComplete: isTextComplete)
         }
         if lowercasedToken == "etc." {
@@ -81,6 +95,22 @@ public enum SentenceRule {
         }
         if isListNumeral(token, startingAt: tokenStart, in: characters) { return false }
         return !hasClosers || nextWordStartsSentence(after: index, in: characters, isTextComplete: isTextComplete)
+    }
+
+    /// True when nothing but a bullet precedes the token in its clause: the start of the text, a line break, a
+    /// sentence end, ":" or ",".
+    private static func isLabelPosition(tokenStart: Int, in characters: [Character]) -> Bool {
+        var before = tokenStart - 1
+        // An opening quote or bracket stuck to the label is not a word.
+        while before >= 0, sentenceOpeningCharacters.contains(characters[before]) { before -= 1 }
+        func skipSpaces() { while before >= 0, characters[before] == " " || characters[before] == "\t" { before -= 1 } }
+        skipSpaces()
+        if before >= 0, "-*\u{2022}".contains(characters[before]) {
+            before -= 1
+            skipSpaces()
+        }
+        if before < 0 { return true }
+        return characters[before].isNewline || ".!?\u{2026}:,".contains(characters[before])
     }
 
     /// "U.S.", "U.K.", "e.g.": two or more single letters each followed by a period.
@@ -129,13 +159,15 @@ public enum SentenceRule {
     /// True when the next word is one of the fixed sentence openers. A word still being written never counts (its
     /// first letters may be the start of a name), and neither does another initial ("J. A. Smith"). With no next
     /// word, the text being complete decides.
-    private static func nextWordIsSentenceOpener(after index: Int, in characters: [Character], isTextComplete: Bool) -> Bool {
+    private static func nextWordIsSentenceOpener(after index: Int, in characters: [Character], isTextComplete: Bool, afterEllipsis: Bool = false) -> Bool {
         guard let word = nextWord(after: index, in: characters) else { return isTextComplete }
         if !word.isClosed && !isTextComplete { return false }
         let bare = word.text.trimmingCharacters(in: CharacterSet(charactersIn: "\"'\u{2018}\u{2019}\u{201C}\u{201D}([\u{00AB}\u{00BB}"))
         let withoutEnd = bare.trimmingCharacters(in: CharacterSet(charactersIn: ",;:!?)]"))
         // Another single capital letter with its period is an initial, not an opener ("J. A. Smith").
         if withoutEnd.count == 2, withoutEnd.hasSuffix("."), let letter = withoutEnd.first, letter.isUppercase { return false }
-        return sentenceOpeners.contains(withoutEnd.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+        let opener = withoutEnd.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if afterEllipsis && continuesAfterEllipsis.contains(opener) { return false }
+        return sentenceOpeners.contains(opener)
     }
 }

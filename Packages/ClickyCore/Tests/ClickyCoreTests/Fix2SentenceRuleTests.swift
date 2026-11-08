@@ -126,6 +126,9 @@ struct Fix2SentenceRuleTests {
         replay.delta("Use the files, etc. [")
         #expect(replay.shownLine == nil)
         replay.delta("P")
+        // Wave 3: "[P" may still be ordinary text, so it holds too; "[PO" matches a real marker and settles.
+        #expect(replay.shownLine == nil)
+        replay.delta("O")
         #expect(replay.shownLine == CursorLine(text: "Use the files, etc.", hasMoreInChat: false))
         var plain = AnswerReplay()
         plain.delta("Click the Save button. [")
