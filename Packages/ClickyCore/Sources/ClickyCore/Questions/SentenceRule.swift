@@ -38,12 +38,16 @@ public enum SentenceRule {
         "Sure", "Hit", "Take", "Give", "Enable", "Disable", "Update", "Launch", "Navigate", "Visit", "Download",
     ]
 
-    /// Openers that do not settle an ellipsis: a pronoun, article or determiner right after "..." usually continues
-    /// the trailing-off thought ("Hmm... I think so."), so it is not a new sentence.
-    private static let continuesAfterEllipsis: Set<String> = [
-        "I", "I'm", "I'll", "I've", "I'd", "It", "It's", "He", "She", "We", "You", "They", "This", "That", "That's",
-        "These", "Those", "There", "Here", "The", "A", "An", "My", "Your", "Our", "Their", "Its",
-        "Each", "Every", "All", "Some",
+    /// The only words that settle an ellipsis: a sequence word or an imperative verb clearly starts a new sentence
+    /// ("Wait... Then click Save."). Any other word after "..." (a pronoun, "If", "So", "When", "Maybe", a question
+    /// word) usually continues the trailing-off thought ("Hmm... If you want."), so the sentence stays whole.
+    private static let settlesEllipsis: Set<String> = [
+        "Then", "Next", "Now", "Also", "But", "First", "Second", "Third", "Finally", "Otherwise", "However",
+        "Click", "Press", "Open", "Use", "Try", "Select", "Go", "Choose", "Type", "Enter", "Close", "Save", "Run",
+        "Check", "Make", "See", "Note", "Tap", "Scroll", "Drag", "Copy", "Paste", "Install", "Set", "Turn", "Start",
+        "Stop", "Wait", "Let's", "Please", "Keep", "Hold", "Look", "Add", "Remove", "Delete", "Create", "Pick",
+        "Move", "Restart", "Sign", "Log", "Switch", "Find", "Read", "Ask", "Hit", "Take", "Give", "Enable",
+        "Disable", "Update", "Launch", "Navigate", "Visit", "Download",
     ]
 
     /// True when the character at `index` ends a sentence: ".", "!", "?" or "…" (then any closing quotes or
@@ -167,7 +171,7 @@ public enum SentenceRule {
         // Another single capital letter with its period is an initial, not an opener ("J. A. Smith").
         if withoutEnd.count == 2, withoutEnd.hasSuffix("."), let letter = withoutEnd.first, letter.isUppercase { return false }
         let opener = withoutEnd.trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        if afterEllipsis && continuesAfterEllipsis.contains(opener) { return false }
+        if afterEllipsis { return settlesEllipsis.contains(opener) }
         return sentenceOpeners.contains(opener)
     }
 }
