@@ -10,8 +10,9 @@ import json, os, re, sys, time, uuid
 REPLY_TABLE = [
     ("limit", "LIMIT"),
     ("save", "Click the Save button at the top right. [POINT:1180,40:save button:screen1]"),
-    ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
-                "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
+    ("explain", "This menu bar holds the session controls. [CHAT] The first button starts the session. "
+                "The next ones open the chat, the session list and the settings. "
+                "Everything else on screen is not needed for now. [POINT:none]"),
     ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
     ("slow", "SLOW"),
 ]

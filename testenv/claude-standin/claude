@@ -8,12 +8,15 @@
 # the names of the environment variables it got, and each stdin line with images replaced by their byte counts.
 import base64, collections, json, os, queue, re, select, subprocess, sys, threading, time
 
+# The cursor sentence, then the chat marker, then the chat part. The Claude stand-in streams the marker split across two deltas.
+EXPLAIN_REPLY = ("This menu bar holds the session controls. [CHAT] The first button starts the session. "
+                 "The next ones open the chat, the session list and the settings. "
+                 "Everything else on screen is not needed for now. [POINT:none]")
 # ---- THE REPLY TABLE: the one place to edit canned answers. First matching keyword (lower case, in the question) wins. ----
 REPLY_TABLE = [
     ("limit", "LIMIT"),
     ("save", "Click the Save button at the top right. [POINT:1180,40:save button:screen1]"),
-    ("explain", "Sure. This part of the screen is a menu bar with a few controls. The first one starts the session. "
-                "The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now."),
+    ("explain", EXPLAIN_REPLY),
     ("error", "The error you saw before was a red banner that said the file could not be found. [POINT:none]"),
     # Brain rows (need the helper, so they only act when started with --mcp-config; otherwise DEFAULT_REPLY):
     ("port", "BRAIN:port"),
@@ -28,7 +31,7 @@ REPLY_TABLE = [
 ]
 # Checked before every row above: a question starting with these words.
 DIG_DEEPER_PREFIX = "dig deeper"
-LONG_REPLY = " ".join("This is sentence number %d of a long answer that the bubble has to cut to its newest lines." % number
+LONG_REPLY = " ".join("This is sentence number %d of a long answer with no chat marker." % number
                       for number in range(1, 21)) + " [POINT:none]"
 SLOW_WORD_SECONDS, SLOW_TOTAL_SECONDS = 0.5, 30.0
 # STANDIN_TIME_SCALE=0.1 makes every pause ten times shorter (host unit runs); the test Mac uses 1.
@@ -261,7 +264,8 @@ class Session:
     def emit_event(self, event):
         say({"type": "stream_event", "event": event, "session_id": self.session_id, "parent_tool_use_id": None})
 
-    def stream_text(self, text, message_id, index, words_per_delta=3, delay=0.05, interruptible=False, words_pause=None):
+    def stream_text(self, text, message_id, index, words_per_delta=3, delay=0.05, interruptible=False, words_pause=None,
+                    split_chat_marker=False):
         """One text block: start, a few words per delta, stop. Returns (text sent, interrupted)."""
         if self.partial:
             self.emit_event({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}})
@@ -277,7 +281,14 @@ class Session:
             sent.extend(chunk)
             position += len(chunk)
             if self.partial:
-                self.emit_event({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": delta}})
+                pieces = [delta]
+                if split_chat_marker and "[CHAT]" in delta:   # the marker arrives half written: "[CH" now, "AT]" in the next delta
+                    cut = delta.index("[CHAT]") + len("[CH")
+                    pieces = [delta[:cut], delta[cut:]]
+                for piece in pieces:
+                    self.emit_event({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": piece}})
+                    if len(pieces) > 1 and piece is pieces[0]:
+                        time.sleep(0.02 * TIME_SCALE)
             next_chunk_time += (words_pause or delay) * TIME_SCALE
             time.sleep(max(0.0, next_chunk_time - time.time()))
         if self.partial:
@@ -355,7 +366,7 @@ class Session:
             return self.answer_slow(started, message_id)
         if reply == "STREAM:long":
             reply = LONG_REPLY
-            self.stream_text(reply, message_id, 0, words_per_delta=4, delay=0.07)
+            self.stream_text(reply, message_id, 0, words_per_delta=4, delay=0.09)
             self.assistant_line(message_id, {"type": "text", "text": reply})
             return self.finish(started, reply)
         if reply.startswith("BRAIN:"):
@@ -364,7 +375,7 @@ class Session:
         if is_error:
             reply = LIMIT_MESSAGE
         elif self.partial:
-            self.stream_text(reply, message_id, 0)
+            self.stream_text(reply, message_id, 0, split_chat_marker=(reply == EXPLAIN_REPLY))
         self.assistant_line(message_id, {"type": "text", "text": reply})
         self.close_message()
         result = {"type": "result", "subtype": "success", "is_error": is_error, "result": reply, "session_id": self.session_id,
@@ -409,7 +420,8 @@ class Session:
         self.new_message(second_id)
         if kind == "port":
             found = re.search(r"port\s+(\d+)", tool_text)
-            final = ("Your notes say the demo server listens on port %s. [POINT:none]" % found.group(1) if found
+            final = (("Your notes say the demo server listens on port %s. [CHAT] The port is set in demo-server.md under Wiki/Projects. "
+                      "[POINT:none]") % found.group(1) if found
                      else "I could not find the demo port in your notes. [POINT:none]")
         elif kind == "deploy":
             final = "Deploys go through the release script in your notes. [POINT:none]"

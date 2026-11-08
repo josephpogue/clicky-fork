@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 @testable import ClickyCore
 
 /// A stand-in `codex` command line tool written into a temp folder. It records how it was called
@@ -230,4 +231,32 @@ final class CodexStandIn {
     fi
     exit 2
     """#
+}
+
+// MARK: - The test Mac's own stand-in (testenv/codex-standin/codex), run as a host child process
+
+@Suite("Test Mac codex stand-in rows", .serialized)
+struct TestEnvCodexStandInRowTests {
+    private func finalAnswer(for question: String) throws -> String? {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("testenv-codex-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let script = TestEnvClaudeStandInRun.repoRoot.appendingPathComponent("testenv/codex-standin/codex")
+        let output = try TestEnvClaudeStandInRun.run(script, arguments: ["exec", "--json", "--model", "gpt-6-astra", "Question: \(question)"],
+                                                     input: Data(), logDirectory: folder)
+        let lines = output.split(separator: UInt8(ascii: "\n")).compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
+        let texts: [String] = lines.compactMap { line in
+            guard line["type"] as? String == "item.completed", let item = line["item"] as? [String: Any] else { return nil }
+            return item["text"] as? String
+        }
+        return texts.last
+    }
+
+    @Test func theExplainRowIsTheSameTextAsTheClaudeRowInOneFinalAnswer() throws {
+        #expect(try finalAnswer(for: "please explain this") == TestEnvClaudeStandInRun.explainText)
+    }
+
+    @Test func theOtherRowsAreUnchanged() throws {
+        #expect(try finalAnswer(for: "where is the save button") == "Click the Save button at the top right. [POINT:1180,40:save button:screen1]")
+        #expect(try finalAnswer(for: "something else entirely") == "I can see your screen. [POINT:none]")
+    }
 }
