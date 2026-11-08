@@ -92,6 +92,8 @@ make test
 
 Build only through `scripts/build-app.sh`. It signs with `$CLICKY_DEVELOPMENT_TEAM`, else with the team of the first "Apple Development" identity in the keychain, so macOS permissions (screen recording, microphone, accessibility) stick across rebuilds. With no identity it signs ad hoc and prints a warning, and permissions need re-granting after each rebuild. No team id is stored in the project file. The script never launches the app.
 
+Merges to `main` install the app automatically: the deploy-on-merge job (My-Life `automations/deploy-on-merge`) builds origin/main and replaces `/Applications/Clicky Fork.app` within 5 minutes, waiting while a session is live.
+
 Known non-blocking warnings: Swift 6 concurrency warnings, deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
 
 ## Code Style & Conventions
