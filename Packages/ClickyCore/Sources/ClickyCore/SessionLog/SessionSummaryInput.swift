@@ -22,7 +22,8 @@ public enum SessionSummaryInput {
             case .question(let questionText, _, _):
                 lines.append("\(clock) Question: \"\(SessionLogText.singleLine(questionText))\"")
             case .answer(let answerText, _, _, _, _):
-                let plainAnswer = SessionLogText.singleLine(SessionLogText.removingPointTags(from: answerText))
+                let plainAnswer = SessionLogText.singleLine(
+                    AnswerChatMarker.removing(from: SessionLogText.removingPointTags(from: answerText), joinedBy: " "))
                 lines.append("\(clock) Answer: \(plainAnswer)")
             default:
                 break

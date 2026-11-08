@@ -141,7 +141,7 @@ struct QuestionsAnswerInstructionsTests {
         let text = AnswerInstructions.questionInstructions
         #expect(text.contains("[POINT:x,y:label:screenN]"))
         #expect(text.contains("[POINT:none]"))
-        #expect(text.contains("one or two"))
+        #expect(text.contains("one short sentence, two at most"))
         #expect(!text.contains("\u{2014}"))
         #expect(!text.contains("\u{2013}"))
         #expect(!text.lowercased().contains("spoken"))

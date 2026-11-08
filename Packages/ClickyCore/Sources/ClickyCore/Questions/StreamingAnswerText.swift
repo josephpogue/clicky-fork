@@ -10,6 +10,7 @@ public struct StreamingAnswerView: Equatable, Sendable {
 
 public enum StreamingAnswerText {
     private static let tagOpening = "[POINT:"
+    private static let markerOpening = AnswerChatMarker.text
 
     public static func visible(rawTextSoFar: String) -> StreamingAnswerView {
         let withoutOpenTag = removingTrailingIncompleteTag(from: rawTextSoFar)
@@ -22,17 +23,19 @@ public enum StreamingAnswerText {
         return StreamingAnswerView(visibleText: visibleText, firstCompletePoint: firstPoint(in: withoutOpenTag))
     }
 
-    /// Cuts an unfinished `[POINT:...` (no closing bracket yet) or a trailing prefix of `[POINT:` off the end.
+    /// Cuts an unfinished `[POINT:...` (no closing bracket yet) or a trailing prefix of `[POINT:` or `[CHAT]` off the end.
     private static func removingTrailingIncompleteTag(from text: String) -> String {
         if let openRange = text.range(of: tagOpening, options: .backwards),
            !text[openRange.lowerBound...].contains("]") {
             return String(text[..<openRange.lowerBound])
         }
-        // A partial opening such as "[", "[P" or "[POINT" at the very end.
+        // A partial opening such as "[", "[P" or "[POINT", or a half-written chat marker such as "[CH", at the very
+        // end. A complete "[CHAT]" stays: the answer parts need it.
         var prefixLength = min(tagOpening.count - 1, text.count)
         while prefixLength > 0 {
             let tail = String(text.suffix(prefixLength))
-            if tagOpening.hasPrefix(tail) { return String(text.dropLast(prefixLength)) }
+            let isHalfMarker = tail != markerOpening && markerOpening.hasPrefix(tail)
+            if tagOpening.hasPrefix(tail) || isHalfMarker { return String(text.dropLast(prefixLength)) }
             prefixLength -= 1
         }
         return text

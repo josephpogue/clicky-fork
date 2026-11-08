@@ -40,25 +40,30 @@ public protocol SessionFlowOutput: Sendable {
     /// `answerNumber` names this question's answer in every later answer report (text, checking line, tool call,
     /// final answer, cut short), so the app can tell the current answer's reports from an ended one's.
     func questionAsked(_ text: String, answerNumber: Int) async
-    /// The answer is complete (or was cut short). `spokenText` has the POINT tag removed. `pointLabel` is nil when
-    /// the answer pointed nowhere. `notesRead` are the files the answer drew on (passages sent and tool results).
+    /// The answer is complete (or was cut short). `spokenText` has the POINT tag removed; it may still hold `[CHAT]`
+    /// markers, which the app splits with `AnswerPartsTracker` (readers use
+    /// `AnswerChatMarker.removing`). `pointLabel` is nil when the answer pointed nowhere. `notesRead` are the files the answer drew
+    /// on (passages sent and tool results).
     func answerReceived(
         answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double,
         pointLabel: String?, notesRead: [String]
     ) async
-    /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag hidden.
+    /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag or marker hidden.
+    /// A complete `[CHAT]` marker stays in `visibleText`; the app splits it into parts with `AnswerPartsTracker`.
     func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async
     /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
     func checkingNotesShown(answerNumber: Int) async
     /// An answer ended before it was complete. `visibleText` is what had arrived; the app finishes the chat message
-    /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own).
+    /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own). It may hold
+    /// `[CHAT]` markers; the app splits it with `AnswerPartsTracker.chatText(ofVisibleText:)`.
     /// `answerNumber` is the number `questionAsked` gave this answer. Never sent after Stop began.
     func answerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
         reason: AnswerCutReason
     ) async
     /// The model began a tool call (every one, whether or not the checking line shows): a sentence that ended right
-    /// before it is complete even with no space after it yet, so speech may say it now.
+    /// before it is complete even with no space after it yet, so speech may say it now. The app also ends the
+    /// current `AnswerPartsTracker` part here: text after it opens a new part.
     func toolCallStarted(answerNumber: Int) async
     func noticeShown(_ text: String) async
     func usageLimitOffered(message: String, switchTo: ProviderID) async
