@@ -259,6 +259,9 @@ public actor SessionQuestionFlow {
                 // Every question has its own number, also one asked with nothing running.
                 questionSerial += 1
                 await setPhase(.listening)
+                // The key was lost (or Stop began) while the listening report went out: the question was dropped, so
+                // it is neither marked, logged nor accepted.
+                guard !isFinished, !isStopping, phase == .listening else { return .ignoredBecauseBusy }
             case .waitingForAnswer:
                 // A new question ends the answer still coming. The number moves on first, so everything the old
                 // answer reports from here on is dropped; the phase moves on before the first await, so a second
@@ -285,6 +288,9 @@ public actor SessionQuestionFlow {
                 return .ignoredBecauseBusy
             }
             await dependencies.markQuestionStarted(date)
+            // Dropped while the mark was in flight: the speech side closes the span it just opened (see
+            // `SessionSpeechPipeline.abandonOpenQuestion`), and nothing is logged.
+            guard !isFinished, !isStopping, phase == .listening else { return .ignoredBecauseBusy }
             await noteEvent(SessionEvent(time: date, kind: .questionStarted))
             return .accepted
         case .sendQuestion(let speechFrom, let speechTo):

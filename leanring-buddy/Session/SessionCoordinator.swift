@@ -123,9 +123,10 @@ final class SessionCoordinator: ObservableObject {
             // Spoken-only: the waiting marker stays until the voice actually starts. A late start event of an old
             // answer's voice (after the new question's listening marker showed) must not hide that marker.
             if isSpeaking, let self, case .waitingForAnswer = self.currentPhase { self.markerPanel.hide() }
-            // The reading ended: a cursor notice that waited for it shows now.
-            if !isSpeaking { self?.showDeferredKeyNoticeIfDue() }
         }
+        // The reading ended, by any path (also one that never began to speak): a cursor notice that waited for it
+        // shows now.
+        spokenAnswerPlayer.onReadingEnded = { [weak self] in self?.showDeferredKeyNoticeIfDue() }
         // Switching to a mode that does not speak stops a reading in progress; switching to Spoken starts nothing.
         settings.$answerDeliveryMode
             .removeDuplicates()
@@ -956,17 +957,19 @@ final class SessionCoordinator: ObservableObject {
         refreshChatKeyName(question: settings.questionKey, chat: settings.chatKey)
         let flow = questionFlow
         let pipeline = speechPipeline
+        let lostInSessionID = sessionID
         Task { @MainActor [weak self] in
             // A question heard so far but not yet sent ends the way Stop ends it, and its captured words are dropped.
             let questionDropped = await flow?.abandonListening() ?? false
             if questionDropped { await pipeline?.abandonOpenQuestion(at: Date()) }
-            self?.reportKeyTapLost(questionDropped: questionDropped)
+            self?.reportKeyTapLost(questionDropped: questionDropped, lostInSessionID: lostInSessionID)
         }
     }
 
-    private func reportKeyTapLost(questionDropped: Bool) {
-        // Stop may have begun meanwhile: it already cleared everything about the keys.
-        guard lifecycle.acceptsPointerFlights else { return }
+    private func reportKeyTapLost(questionDropped: Bool, lostInSessionID: String?) {
+        // Stop may have begun meanwhile (it already cleared everything about the keys), and a quick Start after it is a
+        // new session the old session's loss must not reach.
+        guard lifecycle.acceptsPointerFlights, sessionID == lostInSessionID else { return }
         let text = KeyTapNotice.text(questionDropped: questionDropped)
         let cursor = keyLoss.tapLost(
             text: text, isAnswerInFlight: isAnswerInFlight, isReadingAloud: spokenAnswerPlayer.isReading)

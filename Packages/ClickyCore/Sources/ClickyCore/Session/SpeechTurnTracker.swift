@@ -24,6 +24,7 @@ public struct SpeechTurnTracker: Sendable {
     private var currentToken: Int?
     private var isReportedSpeaking = false
     private var nextToken = 0
+    private var endedSpeaker: SpeechSpeaker?
 
     public init() {}
 
@@ -65,7 +66,17 @@ public struct SpeechTurnTracker: Sendable {
         return endCurrentReport()
     }
 
+    /// Which speaker's reading ended since the last call, whether or not the voice ever reported "speaking": a queued
+    /// sentence cancelled or finished with no start event, and a stop before the voice began, end a reading with no
+    /// speaking change. Whoever must react to a reading's end (the deferred cursor notice) asks here after each call
+    /// that can end one (`begin`, `stop`, `stopAll`, `event`). Reading it clears it.
+    public mutating func takeEndedReading() -> SpeechSpeaker? {
+        defer { endedSpeaker = nil }
+        return endedSpeaker
+    }
+
     private mutating func endCurrentReport() -> [SpeechChange] {
+        if let speaker = currentSpeaker { endedSpeaker = speaker }
         defer {
             currentToken = nil
             currentSpeaker = nil

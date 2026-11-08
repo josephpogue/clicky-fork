@@ -60,6 +60,7 @@ final class SpeechOwner {
     /// Each utterance still alive, with its reading token, until its finish or cancel arrives.
     private var liveUtterances: [ObjectIdentifier: (utterance: AVSpeechUtterance, token: Int)] = [:]
     private var speakingHandlers: [SpeechSpeaker: (Bool) -> Void] = [:]
+    private var readingEndedHandlers: [SpeechSpeaker: () -> Void] = [:]
     /// The reading token of the answer being read, so a later sentence of the same answer joins its queue.
     private var answerReadingToken: Int?
 
@@ -70,13 +71,19 @@ final class SpeechOwner {
         }
     }
 
-    /// `handler` hears true when `speaker` starts speaking and false when it ends, is stopped or is replaced.
     /// True from the moment an answer's reading is queued until its last sentence has ended or it is stopped (the
     /// Settings sample does not count). Unlike the speaking report, it is true before the voice's first word.
     var isReadingAnswer: Bool { tracker.currentSpeaker == .answer }
 
+    /// `handler` hears true when `speaker` starts speaking and false when it ends, is stopped or is replaced.
     func setSpeakingHandler(for speaker: SpeechSpeaker, _ handler: @escaping (Bool) -> Void) {
         speakingHandlers[speaker] = handler
+    }
+
+    /// `handler` runs each time a reading by `speaker` ends by any path: finished, stopped, replaced, or cancelled
+    /// before the voice began (when no speaking report was ever made).
+    func setReadingEndedHandler(for speaker: SpeechSpeaker, _ handler: @escaping () -> Void) {
+        readingEndedHandlers[speaker] = handler
     }
 
     /// Reads `text` as `speaker`, stopping whatever was being read, whoever read it.
@@ -130,8 +137,10 @@ final class SpeechOwner {
         apply(tracker.event(token: live.token, isSpeaking: isSpeaking))
     }
 
+    /// Reports the speaking changes, then tells the speaker whose reading just ended (if one did).
     private func apply(_ changes: [SpeechChange]) {
         for change in changes { speakingHandlers[change.speaker]?(change.isSpeaking) }
+        if let ended = tracker.takeEndedReading() { readingEndedHandlers[ended]?() }
     }
 }
 
@@ -142,6 +151,15 @@ final class SpokenAnswerPlayer {
         didSet {
             let handler = onSpeakingChanged
             SpeechOwner.shared.setSpeakingHandler(for: .answer) { isSpeaking in handler?(isSpeaking) }
+        }
+    }
+
+    /// Called each time an answer's reading ends by any path, also one that never began to speak (stopped or cancelled
+    /// while still queued). A reading replaced by a newer answer's reading calls it with that reading already current.
+    var onReadingEnded: (() -> Void)? {
+        didSet {
+            let handler = onReadingEnded
+            SpeechOwner.shared.setReadingEndedHandler(for: .answer) { handler?() }
         }
     }
 
