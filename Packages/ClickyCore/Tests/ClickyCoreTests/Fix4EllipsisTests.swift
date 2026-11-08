@@ -50,7 +50,6 @@ struct Fix4EllipsisTests {
         ("Wait... Next, open it.", ["Wait...", "Next, open it."]),
         ("Hmm... Now click Save.", ["Hmm...", "Now click Save."]),
         ("Hmm... Also check it.", ["Hmm...", "Also check it."]),
-        ("Hmm... But why.", ["Hmm...", "But why."]),
         ("Hmm... First, open it.", ["Hmm...", "First, open it."]),
         ("Hmm... Finally, save.", ["Hmm...", "Finally, save."]),
         ("Hmm... Otherwise stop.", ["Hmm...", "Otherwise stop."]),

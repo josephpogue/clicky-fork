@@ -69,6 +69,7 @@ enum UIPreviewSamples {
             ("chat-empty.png", ChatWindowState(sessionPhase: .running)),
             ("chat-three-exchanges.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running)),
             ("chat-latest-long-answer.png", ChatWindowState(messages: latestIsLongMessages, sessionPhase: .running)),
+            ("chat-keys-lost.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running, isKeyTapLost: true)),
             ("chat-listening.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running, questionPhase: .listening(audioLevel: 0.7))),
             ("chat-transcribing.png", ChatWindowState(messages: threeExchanges, sessionPhase: .running, questionPhase: .transcribing)),
             ("chat-waiting.png", ChatWindowState(messages: threeExchanges + [followUpQuestion], sessionPhase: .running, questionPhase: .waitingForAnswer(providerName: "Claude"))),

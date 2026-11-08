@@ -42,7 +42,7 @@ public enum SentenceRule {
     /// ("Wait... Then click Save."). Any other word after "..." (a pronoun, "If", "So", "When", "Maybe", a question
     /// word) usually continues the trailing-off thought ("Hmm... If you want."), so the sentence stays whole.
     private static let settlesEllipsis: Set<String> = [
-        "Then", "Next", "Now", "Also", "But", "First", "Second", "Third", "Finally", "Otherwise", "However",
+        "Then", "Next", "Now", "Also", "First", "Second", "Third", "Finally", "Otherwise", "However",
         "Click", "Press", "Open", "Use", "Try", "Select", "Go", "Choose", "Type", "Enter", "Close", "Save", "Run",
         "Check", "Make", "See", "Note", "Tap", "Scroll", "Drag", "Copy", "Paste", "Install", "Set", "Turn", "Start",
         "Stop", "Wait", "Let's", "Please", "Keep", "Hold", "Look", "Add", "Remove", "Delete", "Create", "Pick",
@@ -166,7 +166,8 @@ public enum SentenceRule {
     private static func nextWordIsSentenceOpener(after index: Int, in characters: [Character], isTextComplete: Bool, afterEllipsis: Bool = false) -> Bool {
         guard let word = nextWord(after: index, in: characters) else { return isTextComplete }
         if !word.isClosed && !isTextComplete { return false }
-        let bare = word.text.trimmingCharacters(in: CharacterSet(charactersIn: "\"'\u{2018}\u{2019}\u{201C}\u{201D}([\u{00AB}\u{00BB}"))
+        // A curly apostrophe is the same letter as the straight one in "Let's" and "I'm".
+        let bare = word.text.replacingOccurrences(of: "\u{2019}", with: "'").trimmingCharacters(in: CharacterSet(charactersIn: "\"'\u{2018}\u{2019}\u{201C}\u{201D}([\u{00AB}\u{00BB}"))
         let withoutEnd = bare.trimmingCharacters(in: CharacterSet(charactersIn: ",;:!?)]"))
         // Another single capital letter with its period is an initial, not an opener ("J. A. Smith").
         if withoutEnd.count == 2, withoutEnd.hasSuffix("."), let letter = withoutEnd.first, letter.isUppercase { return false }

@@ -48,7 +48,10 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var panelNotice: String?
     /// True from the moment the key tap died in a running session until the next Start or Stop. Settings shows the
     /// lost line under both keys meanwhile.
-    @Published private(set) var keyTapLost = false
+    @Published private(set) var keyTapLost = false {
+        // The chat window's footer follows it.
+        didSet { chatWindowState.isKeyTapLost = keyTapLost }
+    }
 
     /// Sends a session's id once Stop has finished writing its log and cleanup.
     let sessionFinished = PassthroughSubject<String, Never>()

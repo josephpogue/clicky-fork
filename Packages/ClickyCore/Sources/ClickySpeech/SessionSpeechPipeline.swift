@@ -271,6 +271,8 @@ public actor SessionSpeechPipeline {
         nextFrameStartIndex = 0
         sourceHasFinished = false
         transcriptionHasEnded = false
+        // An abandon left over from an earlier session must not reach this session's first question.
+        pendingAbandon = nil
         // A question may be marked just before start(), so question state is cleared in stop() instead.
     }
 

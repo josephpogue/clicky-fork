@@ -488,7 +488,15 @@ struct ChatWindowView: View {
 
     private var statusLine: some View {
         HStack(spacing: 9) {
-            if state.isSessionRunning && state.questionPhase == .idle {
+            if state.isSessionRunning && state.questionPhase == .idle,
+               case .plain(let keyLostText) = ChatFooter.idleLine(isKeyTapLost: state.isKeyTapLost) {
+                // The keys are gone: say so, with no key pill.
+                Text(keyLostText)
+                    .font(DS.WindowText.meta)
+                    .foregroundColor(DS.Colors.textMuted)
+                    .lineLimit(2)
+                    .accessibilityIdentifier("chat.status")
+            } else if state.isSessionRunning && state.questionPhase == .idle {
                 // "Press [⌘ right] to ask": the key sits inside the sentence.
                 HStack(spacing: 6) {
                     Text("Press")
