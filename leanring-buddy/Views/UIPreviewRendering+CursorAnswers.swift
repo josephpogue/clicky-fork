@@ -43,20 +43,26 @@ extension UIPreviewRendering {
     }
 
     /// The bubble while an answer is still coming: the first words, the "Checking your notes" line alone, under a line,
-    /// and under a line with the footer.
+    /// and under a line with the footer; and the footer after the chat key stopped working. Footers come from
+    /// `CursorFooter`, the same rule the presenter uses, so a footer-only line with the checking line shows no footer.
     @MainActor
     private static func renderGrowingAnswerPreviews(into directory: URL, tileSize: CGSize, cursor: CGPoint) throws {
         let firstWords = "The demo server runs on port 4100."
-        let growingPreviews: [(fileName: String, text: String, footer: String?, showsCheckingLine: Bool)] = [
-            ("cursor-growing-short.png", firstWords, nil, false),
-            ("cursor-growing-checking-alone.png", "", nil, true),
-            ("cursor-growing-with-checking.png", firstWords, nil, true),
-            ("cursor-growing-with-checking-and-footer.png", firstWords, "More in chat: Right ⌘ ,", true),
-            ("cursor-growing-footer-only-with-checking.png", "", "Answer in chat: Right ⌘ ,", true),
+        let workingChatKey = "Right ⌘ ,"
+        let growingPreviews: [(fileName: String, line: CursorLine, showsCheckingLine: Bool, chatKeyName: String?)] = [
+            ("cursor-growing-short.png", CursorLine(text: firstWords, hasMoreInChat: false), false, workingChatKey),
+            ("cursor-growing-checking-alone.png", CursorLine(text: "", hasMoreInChat: false), true, workingChatKey),
+            ("cursor-growing-with-checking.png", CursorLine(text: firstWords, hasMoreInChat: false), true, workingChatKey),
+            ("cursor-growing-with-checking-and-footer.png", CursorLine(text: firstWords, hasMoreInChat: true), true, workingChatKey),
+            ("cursor-growing-footer-only-with-checking.png", CursorLine(text: "", hasMoreInChat: true), true, workingChatKey),
+            ("cursor-footer-after-chat-key-stopped.png", CursorLine(text: firstWords, hasMoreInChat: true), false, nil),
         ]
         for preview in growingPreviews {
             let content = AnswerBubbleContent(
-                text: preview.text, isNotice: false, footerText: preview.footer, showsCheckingLine: preview.showsCheckingLine)
+                text: preview.line.text, isNotice: false,
+                footerText: CursorFooter.text(
+                    for: preview.line, chatKeyName: preview.chatKeyName, showsCheckingLine: preview.showsCheckingLine),
+                showsCheckingLine: preview.showsCheckingLine)
             try render(
                 CursorAnswerTile(tileSize: tileSize, cursor: cursor, content: .bubble(content)),
                 size: tileSize, fileName: preview.fileName, into: directory)

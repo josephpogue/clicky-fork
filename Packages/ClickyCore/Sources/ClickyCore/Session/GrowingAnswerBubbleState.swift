@@ -15,6 +15,9 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         case show(line: CursorLine, showsCheckingLine: Bool)
         /// A bubble is on screen: change its line in place, with no fade and no re-show animation.
         case update(line: CursorLine, showsCheckingLine: Bool)
+        /// The bubble on screen showed only "Checking your notes" and the answer ended with nothing to show in its
+        /// place: remove it.
+        case hide
     }
 
     private var isOnScreen = false
@@ -55,11 +58,16 @@ public struct GrowingAnswerBubbleState: Equatable, Sendable {
         if isDismissed { hasNewFindingSinceDismissal = true }
     }
 
-    /// The final answer arrived: "Checking your notes" never stays on a finished answer, even when the final line is
-    /// the one already shown (so `lineReported` was not called again).
+    /// The answer ended (the final answer, or an answer cut short for any reason): "Checking your notes" never stays
+    /// on it, even when the final line is the one already shown (so `lineReported` was not called again). A bubble
+    /// that showed the checking line alone has nothing else to show: it goes.
     public mutating func answerFinished() -> Action {
         guard isOnScreen, showsCheckingLine else { return .nothing }
-        guard !shownLine.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || shownLine.hasMoreInChat else { return .nothing }
+        guard !shownLine.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || shownLine.hasMoreInChat else {
+            isOnScreen = false
+            showsCheckingLine = false
+            return .hide
+        }
         return display(line: shownLine, showsCheckingLine: false)
     }
 

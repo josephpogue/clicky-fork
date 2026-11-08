@@ -51,6 +51,13 @@ public protocol SessionFlowOutput: Sendable {
     /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag or marker hidden.
     /// A complete `[CHAT]` marker stays in `visibleText`; the app splits it into parts with `AnswerPartsTracker`.
     func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async
+    /// The same report, also saying whether the visible text ends where a point tag or chat marker is being written
+    /// (`StreamingAnswerView.endsBeforeHiddenText`): then nothing more can follow the text's last sentence end, so an
+    /// end that needs the next word ("etc.", "Plan B.") is final. The flow sends this one; an output that does not
+    /// care gets the plain report through the default.
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async
     /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
     func checkingNotesShown(answerNumber: Int) async
     /// An answer ended before it was complete. `visibleText` is what had arrived; the app finishes the chat message
@@ -76,6 +83,11 @@ public protocol SessionFlowOutput: Sendable {
 /// Defaults so an output that does not show streaming yet still compiles; the final answer still arrives.
 public extension SessionFlowOutput {
     func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {}
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async {
+        await answerTextChanged(answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model)
+    }
     func checkingNotesShown(answerNumber: Int) async {}
     func answerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
@@ -179,6 +191,7 @@ public actor SessionQuestionFlow {
         var provider: ProviderID
         var model: String
         var visibleText = ""
+        var endsBeforeHiddenText = false
         var checkingNotesRule = CheckingNotesRule()
         var hasFlownPointer = false
         /// The tag the pointer flew to while streaming, so a later tag in the final text can be told apart.
@@ -535,6 +548,9 @@ public actor SessionQuestionFlow {
         case .textSoFar(let rawTextSoFar):
             let view = StreamingAnswerText.visible(rawTextSoFar: rawTextSoFar)
             let visibleTextChanged = view.visibleText != state.visibleText
+            // A hidden tag or marker starting right after a sentence end settles that end, with the text unchanged.
+            let reportChanged = visibleTextChanged || view.endsBeforeHiddenText != state.endsBeforeHiddenText
+            state.endsBeforeHiddenText = view.endsBeforeHiddenText
             if visibleTextChanged {
                 state.visibleText = view.visibleText
                 state.checkingNotesRule.textChanged(visibleTextSoFar: view.visibleText)
@@ -548,8 +564,10 @@ public actor SessionQuestionFlow {
                 pointerToFly = (mapped.point, mapped.shot.displayFrameInPoints, tag.label.flatMap { $0 == "none" ? nil : $0 })
             }
             streamingAnswers[serial] = state
-            if visibleTextChanged {
-                await output.answerTextChanged(answerNumber: serial, visibleText: view.visibleText, provider: state.provider, model: state.model)
+            if reportChanged {
+                await output.answerTextChanged(
+                    answerNumber: serial, visibleText: view.visibleText, endsBeforeHiddenText: view.endsBeforeHiddenText,
+                    provider: state.provider, model: state.model)
             }
             if let pointerToFly, isCurrent(serial) {
                 await output.pointerRequested(

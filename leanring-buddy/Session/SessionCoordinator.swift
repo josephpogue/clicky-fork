@@ -797,10 +797,12 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// The answer so far: the chat message grows, the bubble grows in place and finished sentences are spoken.
-    fileprivate func showAnswerText(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) {
+    fileprivate func showAnswerText(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) {
         guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
         var answerParts = answerPartsByNumber[answerNumber] ?? AnswerPartsTracker()
-        answerParts.textReported(visibleText)
+        answerParts.textReported(visibleText, endsBeforeHiddenText: endsBeforeHiddenText)
         answerPartsByNumber[answerNumber] = answerParts
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
@@ -834,8 +836,9 @@ final class SessionCoordinator: ObservableObject {
         if deliveryMode.speaksAloud { spokenAnswerPlayer.speakCheckingLine() }
     }
 
-    /// An answer ended early: the chat message ends with the line for the reason, once. The bubble stays as it is
-    /// until the new question's listening phase hides it, as it does today; a failure's notice arrives separately.
+    /// An answer ended early: the chat message ends with the line for the reason, once. The bubble keeps the text it
+    /// shows until the new question's listening phase hides it, as it does today (a failure's notice arrives
+    /// separately), but "Checking your notes" goes now: no search is running once the answer has ended.
     fileprivate func showAnswerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
     ) {
@@ -844,6 +847,8 @@ final class SessionCoordinator: ObservableObject {
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: nil, pointLabel: nil, notesRead: notesRead)
+        // Only the answer on screen owns the bubble: an older answer's late report must not touch the new one's.
+        let endedAnswerIsCurrent = growingAnswerChat.isCurrent(answerNumber: answerNumber)
         // The card keeps the answer's own paragraphs: its tracker when it still has one, else the text alone.
         let chatText: String
         if var answerParts = answerPartsByNumber.removeValue(forKey: answerNumber) {
@@ -855,6 +860,7 @@ final class SessionCoordinator: ObservableObject {
         apply(
             growingAnswerChat.cutShort(answerNumber: answerNumber, visibleText: chatText, reason: reason),
             details: details)
+        if endedAnswerIsCurrent, settings.answerDeliveryMode.showsText { cursorAnswerPresenter.answerFinished() }
     }
 
     /// The model began a tool call: the bubble now treats new text as a new finding, and a Spoken answer says the
@@ -994,9 +1000,17 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         }
     }
 
-    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async {
         await MainActor.run { coordinator?.showAnswerText(
-                answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model) }
+                answerNumber: answerNumber, visibleText: visibleText, endsBeforeHiddenText: endsBeforeHiddenText,
+                provider: provider, model: model) }
+    }
+
+    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+        await answerTextChanged(
+            answerNumber: answerNumber, visibleText: visibleText, endsBeforeHiddenText: false, provider: provider, model: model)
     }
 
     func checkingNotesShown(answerNumber: Int) async {

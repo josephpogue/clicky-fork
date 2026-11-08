@@ -6,6 +6,11 @@ public struct StreamingAnswerView: Equatable, Sendable {
     public var visibleText: String
     /// The first complete tag that points somewhere; nil for none or no complete tag yet
     public var firstCompletePoint: PointTagParseResult?
+    /// True when what was hidden at the end is a recognisable point tag or chat marker (or the start of one, at
+    /// least two characters): the visible text ends there, so a sentence end before it is final even when the next
+    /// word would have decided it ("... etc. [POINT:none]"). A lone "[" does not count: it may be the start of
+    /// ordinary text, so an unclear sentence end before it stays whole until the next character says more.
+    public var endsBeforeHiddenText: Bool = false
 }
 
 public enum StreamingAnswerText {
@@ -21,9 +26,28 @@ public enum StreamingAnswerText {
         // is finished all the same, so the space stays for it, and it shows without waiting for the final answer.
         if withoutOpenTag.count != rawTextSoFar.count || endsInCompleteTag(withoutOpenTag) {
             visibleText = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let lastCharacter = visibleText.last, ".!?".contains(lastCharacter) { visibleText += " " }
+            if endsWithSentenceMark(visibleText) { visibleText += " " }
         }
-        return StreamingAnswerView(visibleText: visibleText, firstCompletePoint: firstPoint(in: withoutOpenTag))
+        let hiddenSuffix = String(rawTextSoFar.dropFirst(withoutOpenTag.count))
+        let endsBeforeHiddenText = isRecognisableHiddenStart(hiddenSuffix) || endsInCompleteTag(withoutOpenTag)
+        return StreamingAnswerView(
+            visibleText: visibleText, firstCompletePoint: firstPoint(in: withoutOpenTag),
+            endsBeforeHiddenText: endsBeforeHiddenText)
+    }
+
+    /// A sentence end mark, then at most closing quotes or brackets: the text ends where a sentence may have ended.
+    private static func endsWithSentenceMark(_ text: String) -> Bool {
+        let closers: Set<Character> = ["\"", "'", "\u{2019}", "\u{201D}", "\u{00BB}", ")", "]"]
+        var characters = Array(text)
+        while let last = characters.last, closers.contains(last) { characters.removeLast() }
+        guard let mark = characters.last else { return false }
+        return ".!?\u{2026}".contains(mark)
+    }
+
+    /// An unfinished point tag, or at least two characters of a point tag's or chat marker's opening.
+    private static func isRecognisableHiddenStart(_ hiddenSuffix: String) -> Bool {
+        guard hiddenSuffix.count >= 2 else { return false }
+        return hiddenSuffix.hasPrefix(tagOpening) || tagOpening.hasPrefix(hiddenSuffix) || markerOpening.hasPrefix(hiddenSuffix)
     }
 
     private static func endsInCompleteTag(_ text: String) -> Bool {

@@ -77,11 +77,14 @@ public struct CursorLineState: Equatable, Sendable {
     private var measuredRunByPartIndex: [Int: MeasuredRun] = [:]
     /// The line last returned, so an update that changes nothing returns no line (the bubble is not asked to re-show).
     private var lastLine: CursorLine?
+    /// The part that line came from. A line from a later part is always a change, even when it equals the last one:
+    /// the search between the two parts put "Checking your notes" on the bubble, and only a returned line clears it.
+    private var lastLinePartIndex: Int?
 
     public init() {}
 
     /// Returns `line` nil while no part has a whole sentence yet and whenever the line is the same as the last one
-    /// returned. `newSentencesToSpeak` holds each shown sentence once; a part whose text was replaced (a provider
+    /// returned for the same part. `newSentencesToSpeak` holds each shown sentence once; a part whose text was replaced (a provider
     /// that rewrites its text) speaks the replacing text.
     public mutating func update(parts: [AnswerPart], fits: (String) -> Bool) -> CursorLineUpdate {
         var partIndex = parts.count - 1
@@ -132,8 +135,9 @@ public struct CursorLineState: Equatable, Sendable {
             footerSpokenPartIndexes.insert(partIndex)
             newSentences.append(Self.footerOnlySpokenSentence)
         }
-        let isChange = line != lastLine
+        let isChange = line != lastLine || partIndex != lastLinePartIndex
         lastLine = line
+        lastLinePartIndex = partIndex
         return CursorLineUpdate(line: isChange ? line : nil, newSentencesToSpeak: newSentences)
     }
 

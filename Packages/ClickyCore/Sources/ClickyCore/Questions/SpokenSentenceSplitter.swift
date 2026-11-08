@@ -16,7 +16,7 @@ public struct SpokenSentenceSplitter: Equatable, Sendable {
         var sentenceStart = spokenCharacterCount
         var index = spokenCharacterCount
         while index < characters.count {
-            if SentenceRule.endsSentence(at: index, in: characters) {
+            if SentenceRule.endsSentence(at: index, in: characters, isTextComplete: isFinal) {
                 Self.appendSentence(characters[sentenceStart...index], to: &sentences)
                 sentenceStart = index + 1
                 spokenCharacterCount = sentenceStart

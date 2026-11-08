@@ -20,12 +20,21 @@ import AppKit
 import ClickyCore
 import SwiftUI
 
+/// The line, and how it is drawn, behind the bubble on screen.
+private struct BubbleSource {
+    let line: CursorLine
+    let isNotice: Bool
+    let showsCheckingLine: Bool
+}
+
 @MainActor
 final class CursorAnswerPresenter {
     private let pointerFlight: PointerFlightController
 
     private var bubblePanel: CursorAttachedPanel?
     private var bubbleContent: AnswerBubbleContent?
+    /// What the bubble on screen was built from, so its footer can be redrawn when the chat key's name changes.
+    private var bubbleSource: BubbleSource?
     private var bubbleNearCorner: CursorBubbleLayout.NearCorner = .topLeading
     /// A bubble that is fading out after a click or keypress; `hideAll` removes it at once.
     private var fadingBubblePanel: CursorAttachedPanel?
@@ -51,7 +60,7 @@ final class CursorAnswerPresenter {
     func showNotice(text: String) {
         growingBubbleState.reset()
         let line = CursorLine.notice(text: text, fits: { AnswerBubbleMetrics.fitsInBubble(text: $0) })
-        showBubble(content: content(for: line, isNotice: true, showsCheckingLine: false))
+        showBubble(source: BubbleSource(line: line, isNotice: true, showsCheckingLine: false))
     }
 
     /// "Checking your notes" under the line so far, or alone before any text.
@@ -59,9 +68,20 @@ final class CursorAnswerPresenter {
         apply(growingBubbleState.checkingLineReported())
     }
 
-    /// The chat key's name for the footer ("Right ⌘ ,") while a session runs; nil outside a session, when the
-    /// footer points to the menu-bar panel's Open chat instead. Set by SessionCoordinator.
-    var chatKeyName: String?
+    /// The chat key's name for the footer ("Right ⌘ ,") while a session runs and the key works; nil when pressing it
+    /// opens nothing (outside a session, or an inactive key), when the footer points to the menu-bar panel's Open
+    /// chat instead. Set by SessionCoordinator. A bubble on screen is redrawn at once when its footer would read
+    /// differently, so it never names a key that no longer works.
+    var chatKeyName: String? {
+        didSet {
+            guard let source = bubbleSource, bubblePanel != nil,
+                  CursorFooter.needsRedraw(
+                    line: source.line, showsCheckingLine: source.showsCheckingLine, oldChatKeyName: oldValue,
+                    newChatKeyName: chatKeyName)
+            else { return }
+            updateBubbleInPlace(source: source)
+        }
+    }
 
     /// The answer's cursor line (whole sentences that fit, and whether more is in the chat) each time it changes,
     /// streaming and final alike: the first one shows the bubble, later ones change it in place.
@@ -69,22 +89,18 @@ final class CursorAnswerPresenter {
         apply(growingBubbleState.lineReported(line))
     }
 
-    /// The final answer arrived: the checking line goes away even when the final line is the one already shown.
+    /// The answer ended (final, or cut short): the checking line goes away even when the final line is the one
+    /// already shown, and a bubble that showed only the checking line goes with it.
     func answerFinished() {
         apply(growingBubbleState.answerFinished())
     }
 
-    /// The footer for a line: "More in chat: <key>" under text, "Answer in chat: <key>" when it is the footer
-    /// alone, and a pointer to the menu bar's Open chat outside a session. Nil when the line holds everything.
-    private func footerText(for line: CursorLine) -> String? {
-        guard line.hasMoreInChat else { return nil }
-        guard let chatKeyName else { return "More in Open chat, in the menu bar" }
-        return line.text.isEmpty ? "Answer in chat: \(chatKeyName)" : "More in chat: \(chatKeyName)"
-    }
-
-    private func content(for line: CursorLine, isNotice: Bool, showsCheckingLine: Bool) -> AnswerBubbleContent {
+    private func makeContent(for source: BubbleSource) -> AnswerBubbleContent {
         AnswerBubbleContent(
-            text: line.text, isNotice: isNotice, footerText: footerText(for: line), showsCheckingLine: showsCheckingLine)
+            text: source.line.text, isNotice: source.isNotice,
+            footerText: CursorFooter.text(
+                for: source.line, chatKeyName: chatKeyName, showsCheckingLine: source.showsCheckingLine),
+            showsCheckingLine: source.showsCheckingLine)
     }
 
     /// The model began a tool call: after a click dismissed the bubble, the next text is a new finding.
@@ -122,19 +138,26 @@ final class CursorAnswerPresenter {
         case .nothing:
             return
         case .show(let line, let showsCheckingLine):
-            showBubble(content: content(for: line, isNotice: false, showsCheckingLine: showsCheckingLine))
+            showBubble(source: BubbleSource(line: line, isNotice: false, showsCheckingLine: showsCheckingLine))
         case .update(let line, let showsCheckingLine):
-            updateBubbleInPlace(content: content(for: line, isNotice: false, showsCheckingLine: showsCheckingLine))
+            updateBubbleInPlace(source: BubbleSource(line: line, isNotice: false, showsCheckingLine: showsCheckingLine))
+        case .hide:
+            removeBubbleNow()
+            removeDismissMonitors()
+            refreshSpeakingCapsule()
+            stopFollowingWhenNothingShows()
         }
     }
 
     /// Changes the text of the bubble on screen with no fade. When the new text needs a different size, a new panel
     /// takes the old one's place at once (shown before the old one goes), because a panel is fixed-size.
-    private func updateBubbleInPlace(content: AnswerBubbleContent) {
+    private func updateBubbleInPlace(source: BubbleSource) {
         guard let panel = bubblePanel, let currentContent = bubbleContent else {
-            showBubble(content: content)
+            showBubble(source: source)
             return
         }
+        let content = makeContent(for: source)
+        bubbleSource = source
         if content.size == currentContent.size {
             bubbleContent = content
             panel.update(rootView: AnswerBubbleView(content: content, nearCorner: bubbleNearCorner))
@@ -150,7 +173,8 @@ final class CursorAnswerPresenter {
         panel.removeNow()
     }
 
-    private func showBubble(content: AnswerBubbleContent) {
+    private func showBubble(source: BubbleSource) {
+        let content = makeContent(for: source)
         removeBubbleNow()
         fadingBubblePanel?.removeNow()
         fadingBubblePanel = nil
@@ -163,6 +187,7 @@ final class CursorAnswerPresenter {
             shadowMargin: AnswerBubbleView.shadowMargin)
         bubblePanel = panel
         bubbleContent = content
+        bubbleSource = source
         bubbleNearCorner = .topLeading
         moveBubbleToItsSpot()
         panel.showFadingIn(duration: 0.15)
@@ -174,6 +199,7 @@ final class CursorAnswerPresenter {
         bubblePanel?.removeNow()
         bubblePanel = nil
         bubbleContent = nil
+        bubbleSource = nil
     }
 
     /// A click or keypress: fade the bubble out, stop watching events, and bring the capsule back if reading continues.
@@ -182,6 +208,7 @@ final class CursorAnswerPresenter {
         growingBubbleState.userDismissed()
         bubblePanel = nil
         bubbleContent = nil
+        bubbleSource = nil
         removeDismissMonitors()
         fadingBubblePanel?.removeNow()
         fadingBubblePanel = panel

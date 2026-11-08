@@ -53,11 +53,14 @@ public struct AnswerPartsTracker: Equatable, Sendable {
     /// The visible answer so far (POINT tags removed, half-written tags and markers hidden), each time it grows.
     /// A text that is not the earlier text plus more (a provider that replaces its text) keeps only the tool-call
     /// boundaries whose text before them is unchanged.
-    public mutating func textReported(_ visibleText: String) {
+    /// `endsBeforeHiddenText` is `StreamingAnswerView.endsBeforeHiddenText`: the text ends where a point tag or chat
+    /// marker is being written, so nothing more can follow its last sentence end.
+    public mutating func textReported(_ visibleText: String, endsBeforeHiddenText: Bool = false) {
         if !toolCallBoundaries.isEmpty {
             toolCallBoundaries = Self.boundaries(toolCallBoundaries, keptFrom: latestVisibleText, into: visibleText)
         }
         latestVisibleText = visibleText
+        latestEndsBeforeHiddenText = endsBeforeHiddenText
     }
 
     /// The model began a tool call: the text so far ends the current part, and text after it starts a new one.
@@ -69,7 +72,7 @@ public struct AnswerPartsTracker: Equatable, Sendable {
     /// The final answer text (POINT tags removed; markers still in it). Every part is complete after it.
     public mutating func finalReported(_ text: String) {
         // Only the tool calls whose text before them is unchanged in the final text still mark a part's end.
-        textReported(text)
+        textReported(text, endsBeforeHiddenText: true)
         isFinal = true
     }
 
@@ -100,7 +103,7 @@ public struct AnswerPartsTracker: Equatable, Sendable {
             // A tool call at or after the part's end means nothing more is added to it.
             let toolCallFollows = toolCallBoundaries.contains { min($0, characters.count) >= endOffset }
             if var part = Self.part(from: segment, isComplete: isFinal || !isLast || toolCallFollows) {
-                part.endsAtSentenceEnd = isLast && Self.endsAtSentenceEnd(segment)
+                part.endsAtSentenceEnd = isLast && Self.endsAtSentenceEnd(segment, isTextComplete: latestEndsBeforeHiddenText)
                 parts.append(part)
             }
             segmentStart = endOffset
@@ -131,12 +134,13 @@ public struct AnswerPartsTracker: Equatable, Sendable {
     /// Character counts of the visible text at each tool call, in order.
     private var toolCallBoundaries: [Int] = []
     private var isFinal = false
+    private var latestEndsBeforeHiddenText = false
 
     /// A segment that ends with a real sentence end (by `SentenceRule`, so not "Dr." or "U.S.") and then whitespace.
-    private static func endsAtSentenceEnd(_ segment: String) -> Bool {
+    private static func endsAtSentenceEnd(_ segment: String, isTextComplete: Bool) -> Bool {
         guard let last = segment.last, last.isWhitespace else { return false }
         let characters = Array(segment.trimmingCharacters(in: .whitespacesAndNewlines) + " ")
-        return characters.count > 1 && SentenceRule.endsSentence(at: characters.count - 2, in: characters)
+        return characters.count > 1 && SentenceRule.endsSentence(at: characters.count - 2, in: characters, isTextComplete: isTextComplete)
     }
 
     /// The boundaries (character counts into `old`) that still stand in `new`: a boundary stays when the text before
