@@ -44,6 +44,8 @@ Every answer has a cursor part, and a long answer also has a chat part.
 - The point tag stays at the very end of the whole answer, as today.
 - The instructions live in `ClickyCore/Questions/AnswerInstructions.swift`, so Claude and ChatGPT get the same rule. The marker's exact spelling is the builder's call; it must be something the model would not write by accident, and it is hidden while half-written the same way a half-written point tag is today (`StreamingAnswerText`).
 - "Explain more", "go step by step" and "dig deeper" answers follow the same shape: a short cursor part, and the long answer in the chat part.
+- Answers that search the notes (my call, settled after the builder check): an answer is a run of parts, and a new part starts at each search. "Let me check your notes for the demo port." is a part's cursor text. Each part opens with its own cursor text and may have its own marker and chat text after it, so one answer can hold several markers. A "Correction:" sentence starts a new part too. The instructions tell the model this.
+- The chat window joins the parts in order, each part's cursor text followed by its chat text, as paragraphs of one message.
 
 ### Beside the cursor
 
@@ -51,6 +53,8 @@ Every answer has a cursor part, and a long answer also has a chat part.
 - When there is a chat part, a footer under the cursor part says "More in chat: " followed by the current chat key's name (for example "Right ⌘ ,"). It replaces today's "The rest is in Open chat, in the menu bar" and "The start is in Open chat, in the menu bar".
 - The bubble never cuts text. It shows only whole sentences that fit under today's height cap (`CursorBubbleLayout.maximumBodyHeight`). The newest whole part that fits wins: a correction or a later finding from a notes search replaces the earlier cursor text instead of piling up under it.
 - When even one cursor sentence does not fit, the bubble shows only the footer line ("Answer in chat: Right ⌘ ," or similar wording, builder's call), never part of the sentence.
+- A long answer with no marker (the model ignored the rule) gets the same treatment (my call): the whole sentences that fit show, the rest is chat-only, and the footer shows. The app never relies on the model for the no-cut rule.
+- Outside a session the chat key does not work, so a notice that overflows then (a failed Start, for example) says "More in Open chat, in the menu bar" instead of naming the key (my call).
 - While text streams in, the bubble grows with whole sentences only; a sentence still being written that would not fit does not show until the app knows it fits, or the footer takes its place.
 - "Checking your notes" works as today.
 - Notices (failed start, provider error, usage limit) follow the same no-cut rule.
@@ -70,14 +74,16 @@ Every answer has a cursor part, and a long answer also has a chat part.
 - It runs on the same session-only event tap as the question key (`QuestionKeyMonitor`), so it exists only between Start and Stop.
 - Settings gets a Chat key section next to the Question key section: the current key, Record (Escape cancels) and Reset to right ⌘ ,. Recording works like the question key's recorder.
 - The chat key keeps which side each modifier was pressed on. Question-key combinations today match either side (`ModifierFamily`, "side-agnostic"); the chat key needs sides so right Command + comma leaves left Command + comma alone. How the spec carries sides is the builder's call; the question key's behaviour must not change.
-- Settings refuses a chat key that is the same as the question key, and refuses a question key that is the same as the chat key. A bare regular key is refused, as for the question key.
+- Settings refuses a chat key that any press could share with the question key, and the other way round (my call). Identical keys are refused, and so are overlaps: a question key of Command + K matches right Command + K, so a chat key of right Command + K is refused. A bare regular key is refused, as for the question key.
 - The default question key (a lone tap of right Command) does not fire when comma is pressed during the press, as today, so the two defaults do not clash.
 - The choice is kept between launches in `AppSettings`.
 
 ### Read aloud
 
-- When answers are spoken, only the cursor part is read. The chat part is never spoken.
-- With "Both", the voice and the bubble say the same thing.
+- When answers are spoken, only cursor text is read. Chat text is never spoken.
+- The voice reads exactly the sentences the bubble shows (my call). Speech already waits for each sentence to finish (`SpokenSentenceSplitter`), and the fit check is a local measurement of that finished sentence, so this adds no delay. A sentence the bubble leaves out (it did not fit, or it came after the cut in an answer with no marker) is not spoken.
+- A part that replaces an earlier one was already spoken while it showed; that is expected, not a mismatch.
+- With "Spoken" only, the voice reads the same cursor text it would read with "Both", so the rule does not depend on the bubble being on screen.
 
 ## Constraints
 
