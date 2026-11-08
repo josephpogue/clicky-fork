@@ -46,7 +46,7 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
   - Acceptance: When no search folder is set, the app shall answer from the screen alone, as before.
   - Acceptance: When a question is sent and search folders are set, the app shall attach the passages from those folders that match the question, found on the Mac.
   - Acceptance: When the passages do not answer the question, the app shall let the answer search and read files inside the search folders, and never any file outside them or any file that may hold secrets.
-  - Acceptance: When the first words of an answer arrive, the app shall show or speak them at once, and add later findings to the same answer as they arrive.
+  - Acceptance: When the first sentence of an answer is complete, the app shall show or speak it at once, and add later findings to the same answer as they arrive.
   - Acceptance: When the answer is searching the notes and has not said so, the app shall show "Checking your notes" beside the cursor.
   - Acceptance: When the user asks a new question while an answer is still coming, the app shall end that answer and take the new question.
   - Acceptance: When a question starts with "dig deeper", the app shall answer it on the stronger model and effort from Settings, and use the normal model again from the next question.
