@@ -28,7 +28,8 @@ Shorthand below: `D` means `testenv exec <id> -- /Users/admin/testenv-driver/cli
 | `D type "<text>"` | Types into the focused field | 0 |
 | `D menu-bar-click` | Opens the app's menu-bar panel | 0, 1 no menu-bar item |
 | `D tap-right-command` | Presses and releases the right Command key, 80 ms apart | 0 |
-| `D chord-right-command <key>` | Holds right Command while pressing one letter or digit key, then releases both. Use it for the "this must not start a question" case | 0, 64 |
+| `D chord-right-command <key>` | Holds right Command while pressing one letter, digit or comma key, then releases both. Use it for the "this must not start a question" case (`a`) and for the chat key (`,`) | 0, 64 |
+| `D chord-left-command <key>` | The same with left Command (the Command key on the left of the space bar). `,` is left Command comma | 0, 64 |
 | `D click-at <x> <y>` | Moves the pointer to a screen point and clicks it with a real left mouse down and up. Use it to prove a click hides the answer text | 0, 64 |
 | `D press-key <key>` | Presses and releases one letter or digit key with no modifier (a plain typed key). Use it to prove typing hides the answer text | 0, 64 |
 | `D cursor <x> <y>` | Moves the pointer to a screen point | 0 |
@@ -39,9 +40,9 @@ Exit 64 is a usage mistake in the command.
 Screen controls have identifiers. Click by text for the menu panel and by identifier elsewhere:
 
 - Menu-bar panel (after `menu-bar-click`): `Start session` or `Stop session` (one button that flips), rows `Open chat`, `Sessions`, `Settings`, and `Quit Clicky Fork`.
-- Beside the cursor (a small window with no title, listed by `D read` only while it shows): `cursor.answer` (the answer text; its value is the whole answer even when the bubble cuts it), `cursor.notice` (a notice such as a failed Start or the usage limit), `cursor.answer.more` (the footer "The rest is in Open chat, in the menu bar", shown only when the answer is cut), `cursor.speaking` (the speaker capsule while an answer is read aloud and no text shows).
-- Chat window (opens only after `Open chat` in the panel): `chat.latestAnswer` (the newest answer text), `chat.status`.
-- Settings: `settings.signIn.claude`, `settings.status.claude` (and the ChatGPT pair).
+- Beside the cursor (a small window with no title, listed by `D read` only while it shows): `cursor.answer` (the bubble's text: whole cursor sentences that fit, up to about 9 short lines, never a cut sentence; it is no longer the whole answer. `D read` lists the element but prints no value for it, so read its text from `testenv shot`), `cursor.answer.more` (the footer, present only while the footer shows: `More in chat: Right ⌘ ,` when a line is above it, `Answer in chat: Right ⌘ ,` when the footer stands alone; outside a session it reads `More in Open chat, in the menu bar`), `cursor.notice` (a notice such as a failed Start or the usage limit), `cursor.speaking` (the speaker capsule while an answer is read aloud and no text shows). A spoken answer reads only what the bubble shows.
+- Chat window (opens with `Open chat` in the panel, or with the chat key during a session): `chat.latestAnswer` (the newest answer: every part's cursor text then its chat text, as paragraphs, with no `[CHAT]` anywhere), `chat.status`. The chat window never takes focus.
+- Settings: `settings.signIn.claude`, `settings.status.claude` (and the ChatGPT pair); `settings.chatKey` with `settings.chatKey.field` (shows `Right ⌘ ,`), `settings.chatKey.record`, `settings.chatKey.reset` and `settings.chatKey.message`.
   Close Settings by clicking its red close button (top-left corner of the window) with `D click-at <x> <y>`: the tree cannot name that traffic-light button, so take `testenv shot` and find it. It sits at about `265 39` when Settings opens on its own, and further left (about `70 38`) when the chat window is open too. After it, `D read` lists no `settings.nswindow` (if it still does, click once more: the first click can only focus the window). Do not use `osascript`: it raises a System Events permission prompt that covers the screen.
 - Sessions: `sessions.row.0` (the first row); inside a session `sessionDetail.save`; the Save sheet has `save.project`, `save.confirm`, `save.result`.
 
@@ -55,7 +56,7 @@ The start/stop state shows in the menu-bar icon (an amber ring while it starts, 
 2. Press right Command once: `D tap-right-command`. Wait a second.
 3. Play the clip (section 5). It plays for the clip's length; the command returns when it ends.
 4. Press right Command again: `D tap-right-command`.
-5. Read the answer: `D wait cursor.answer 30`, then `D read`; the chat window does not open at Start, so `chat.latestAnswer` exists only after `Open chat` from the panel. `testenv shot <id> answer` shows the bubble beside the cursor and the pointer. Moving the pointer (`D cursor <x> <y>`) keeps the bubble and it follows. Then `D click-at <x> <y>` on an empty spot, or `D press-key a`, hides it: `D wait cursor.answer 3` now fails and `D read` shows no `cursor.answer`.
+5. Read the answer: `D wait cursor.answer 30`, then `D read`; the chat window does not open at Start, so `chat.latestAnswer` exists only after `Open chat` from the panel or the chat key (`D chord-right-command ,`). `testenv shot <id> answer` shows the bubble beside the cursor and the pointer. Moving the pointer (`D cursor <x> <y>`) keeps the bubble and it follows. Then `D click-at <x> <y>` on an empty spot, or `D press-key a`, hides it: `D wait cursor.answer 3` now fails and `D read` shows no `cursor.answer`.
 6. Negative case: `D chord-right-command a` (right Command with another key) must not start a question.
 7. `D click "Stop session"`.
 
@@ -94,10 +95,10 @@ Read the sidecar for the words: `testenv exec <id> -- cat /Users/admin/clips/lim
 |---|---|
 | `limit` | the real CLI's usage-limit message (Claude: `You've hit your limit` ...; Codex: `You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage ...`) |
 | `save` | `Click the Save button at the top right. [POINT:1180,40:save button:screen1]` |
-| `explain` | a four sentence answer about the menu bar |
+| `explain` | a cursor sentence, then `[CHAT]`, then a chat part: `This menu bar holds the session controls. [CHAT] The first button starts the session. The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now. [POINT:none]`. Claude streams the marker split across two pieces (`[CH`, then `AT]`) to prove the app never shows half a marker; Codex sends it whole |
 | `error` | an answer about a red banner saying a file could not be found |
 | `port`, `deploy`, `secret`, `env`, `correction` | the brain rows, section 6b (Claude only, and only when the brain is on; with it off they get the default answer) |
-| `long` | Claude: a 20 sentence answer streamed over about 6 s |
+| `long` | Claude: 20 sentences (`This is sentence number N of a long answer with no chat marker.`), no `[CHAT]`, streamed over about 6 s |
 | `slow` | Claude: one word every half second for 30 s; Codex: a 30 s wait before one short answer |
 | starts with `dig deeper` (checked before every row) | `Digging deeper on <model>, effort <effort>.` with the model and effort of that call |
 | anything else | `I can see your screen. [POINT:none]` |
@@ -123,11 +124,11 @@ With search folders set, the app gives Claude a helper that searches a notes fol
 
 Steps (start a session, then for each: tap right Command, play the clip, tap right Command, `D read`, `testenv shot`). Use Claude first, then ChatGPT from Settings for step 7. Look for the text with `D read` (`cursor.answer`, `cursor.notice`) and in the chat window (`chat.latestAnswer`; Open chat).
 
-1. `what-port-does-the-demo-server-use`: within about a second the cursor bubble shows `Let me check your notes for the demo port.` (the first part). Then a finding replaces or follows it: `Your notes say the demo server listens on port 4417.` The chat shows the answer and a Notes read list that names `demo-server.md`. The 4417 comes from the helper, so seeing it proves the search ran on the fixture brain.
+1. `what-port-does-the-demo-server-use`: within about a second the cursor bubble shows `Let me check your notes for the demo port.` (the first part). Then the line beside the cursor is replaced by the finding `Your notes say the demo server listens on port 4417.` with the footer `More in chat: Right ⌘ ,` (`cursor.answer.more`). The chat answer holds both parts (the preamble, the finding) and `The port is set in demo-server.md under Wiki/Projects.` with no `[CHAT]`, and a Notes read list that names `demo-server.md`. The 4417 comes from the helper, so seeing it proves the search ran on the fixture brain.
 2. `how-do-i-deploy-this`: the stand-in starts its search call at once (no preamble text) and the search takes 3 s, so the bubble shows the app's own `Checking your notes` during that wait (shoot at about 1 s after the send tap), then `Deploys go through the release script in your notes.` Notes read lists `release.md`.
 3. `what-is-in-the-env-file`: the answer is `I can't open that file: That file is never readable: it may hold secrets.` The secret value never shows anywhere. Notes read does not list the `.env` as read.
-4. `is-this-the-right-build-correction`: first `From the screen this looks like the Debug build.`, then the later finding `Correction: your notes say test builds use Release.` Both parts are visible in the chat answer, the correction last.
-5. `tell-me-something-long`: the bubble keeps showing the newest lines as the sentences stream in (over about 6 s) and ends with the cut footer pointing to Open chat; `cursor.answer` holds the whole text.
+4. `is-this-the-right-build-correction`: first `From the screen this looks like the Debug build.`, then the later finding `Correction: your notes say test builds use Release.` The Correction line replaces the Debug line beside the cursor. The chat answer has both, the correction last.
+5. `tell-me-something-long`: the bubble grows with whole sentences only, starting at sentence 1 and never showing a half sentence, while the answer streams in (over about 6 s). It ends with the footer `More in chat: Right ⌘ ,`. `cursor.answer` ends with a full stop. The chat answer has all 20 sentences.
 6. `say-something-slow` and then, after about 3 s, a second question (`where-is-the-save-button`): the slow answer stops at the next question (it would otherwise run 30 s) and the second answer arrives at once. In `claude.jsonl` the second question is preceded by a `control_request` with subtype `interrupt`.
 7. Dig deeper: play `dig-deeper-on-the-deploy` (only the spoken words matter). The answer reads `Digging deeper on <the stronger model>, effort high.` Ask `where-is-the-save-button` next: it is answered on the normal model again (check `claude.jsonl` for `set_model` and `apply_flag_settings` going out and coming back). With ChatGPT selected the answer reads `Digging deeper on <model>, effort high.` from the call's `-m` and `-c model_reasoning_effort` flags (`codex.jsonl` argv shows them).
 8. ChatGPT with passages: select ChatGPT in Settings, close Settings, Stop and Start the session again (a running session keeps the provider it started with), then ask the port question. The answer starts `From demo-server.md:` followed by the sentence under its heading, which proves the Mac put the passages in the prompt (`codex.jsonl` `prompt` holds a `Notes from the user's own files` block). `codex.jsonl` argv must show no MCP or tool flags.
@@ -142,6 +143,20 @@ Reset: `testenv exec <id> -- bash /Users/admin/reset-walk.sh` (restores the brai
 
 For a host run of the stand-ins (no test Mac): `STANDIN_LOG_DIR=<dir> STANDIN_TIME_SCALE=0.05 testenv/claude-standin/claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --model m --mcp-config '<json naming a helper>'` and pipe user lines in. `STANDIN_TIME_SCALE` shortens every pause.
 
+### Explain walk (cursor part, chat part)
+
+Start a session, play `explain-more-about-that` (tap right Command, clip, tap right Command). The bubble shows `This menu bar holds the session controls.` and the footer `More in chat: Right ⌘ ,`. The marker never shows, not even half of it, while the answer streams. Open the chat (`D chord-right-command ,`): `chat.latestAnswer` holds all four sentences as two paragraphs: `This menu bar holds the session controls.` and then `The first button starts the session. The next ones open the chat, the session list and the settings. Everything else on screen is not needed for now.`
+
+### Chat key walk
+
+Needs a session running (`D click "Start session"`) and an answer on screen (any clip).
+
+1. `D chord-right-command ,` opens the chat window: `D read` lists it with `chat.latestAnswer`. Press it again: the window closes and `D read` no longer lists it. The comma never types into anything, and the chat window never takes focus (the app you were in stays frontmost).
+2. The bubble stays when the key is pressed.
+3. Bring Finder to the front, then `D chord-left-command ,`: Finder Settings opens (left Command comma reaches the front app) and the chat window does not change.
+4. Stop the session (`D click "Stop session"`), then `D chord-right-command ,`: nothing happens in Clicky, no chat window.
+5. Settings shows `settings.chatKey.field` with `Right ⌘ ,`.
+
 ## 7. Read what the app saved
 
 - Sessions: `testenv exec <id> -- ls -R /Users/admin/clicky-data` (each session has its own folder).
@@ -152,6 +167,10 @@ For a host run of the stand-ins (no test Mac): `STANDIN_LOG_DIR=<dir> STANDIN_TI
 
 - `testenv exec <id> -- bash /Users/admin/reset-walk.sh` quits the app and restores everything: vault, brain fixture, app data (sessions and both stand-in sign-in flags) and the stand-in logs. Then run `launch-app.sh` again.
 - Only the vault: `testenv exec <id> -- bash /Users/admin/reset-vault.sh`. Only the brain fixture: `bash /Users/admin/reset-brain.sh`.
+
+## 8b. Taking Accessibility away mid-session
+
+`testenv exec <id> -- tccutil reset Accessibility com.clickyfork.app` in a running session removes the grant, and the guest then behaves like a real revoke with one catch: the running app's `AXIsProcessTrusted()` keeps returning true (also after writing `auth_value 0` and restarting `tccd`), the existing event tap stays enabled and keeps getting events, and no `com.apple.accessibility.api` notification arrives. Only creating a new tap that can remove events fails, at once. The app reports the loss within one 3 s check. Turning the System Settings switch off cannot be walked here: driving it needs `osascript` control of System Events, which raises a permission prompt that covers the screen and takes the keys, so never use `osascript` in the guest. Press the keys with the driver after the reset and read the panel with `D read`.
 
 ## 9. Finish
 

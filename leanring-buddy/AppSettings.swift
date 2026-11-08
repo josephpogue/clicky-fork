@@ -71,6 +71,11 @@ final class AppSettings: ObservableObject {
         didSet { userDefaults.set(digDeeperEffort.rawValue, forKey: Keys.digDeeperEffort) }
     }
 
+    /// The key that opens and closes the chat window during a session (default right Command + comma).
+    @Published var chatKey: QuestionKeySpec {
+        didSet { userDefaults.set(chatKey.encoded, forKey: Keys.chatKey) }
+    }
+
     /// The key that starts and sends a spoken question. Right Command by default.
     @Published var questionKey: QuestionKeySpec {
         didSet { userDefaults.set(questionKey.encoded, forKey: Keys.questionKey) }
@@ -99,6 +104,9 @@ final class AppSettings: ObservableObject {
         digDeeperChatgptModel = userDefaults.string(forKey: Keys.digDeeperChatgptModel) ?? ""
         digDeeperEffort = userDefaults.string(forKey: Keys.digDeeperEffort).flatMap(AnswerEffort.init(rawValue:)) ?? .high
         questionKey = userDefaults.string(forKey: Keys.questionKey).flatMap(QuestionKeySpec.init(encoded:)) ?? .default
+        // Only the sided form the chat key's recorder makes is accepted; whether it overlaps the question key is
+        // decided where the keys meet (the monitor and the Chat key section), so the question key always wins.
+        chatKey = QuestionKeySpec.savedChatKey(encoded: userDefaults.string(forKey: Keys.chatKey))
         measuredAnswerSeconds = userDefaults.dictionary(forKey: Keys.measuredAnswerSeconds) as? [String: Double] ?? [:]
     }
 
@@ -116,5 +124,6 @@ final class AppSettings: ObservableObject {
         static let digDeeperChatgptModel = "settings.digDeeperChatgptModel"
         static let digDeeperEffort = "settings.digDeeperEffort"
         static let questionKey = "settings.questionKey"
+        static let chatKey = "settings.chatKey"
     }
 }

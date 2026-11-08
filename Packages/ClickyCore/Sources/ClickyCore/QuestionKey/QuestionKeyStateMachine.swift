@@ -1,6 +1,6 @@
 import Foundation
 
-public enum QuestionKeySignal: Equatable {
+public enum QuestionKeySignal: Equatable, Sendable {
     case questionStarted(at: Date)
     /// The user spoke between `speechFrom` and `speechTo`.
     case sendQuestion(speechFrom: Date, speechTo: Date)

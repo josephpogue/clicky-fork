@@ -11,7 +11,7 @@ public enum RecapBuilder {
         guard !exchanges.isEmpty else { return nil }
 
         var blocks = exchanges.map { exchange in
-            "Q: \(exchange.question)\nA: \(PointTagParser.parse(exchange.answer).spokenText)"
+            "Q: \(exchange.question)\nA: \(AnswerChatMarker.removing(from: PointTagParser.parse(exchange.answer).spokenText, joinedBy: " "))"
         }
         func total() -> Int { header.count + blocks.joined(separator: "\n").count }
 

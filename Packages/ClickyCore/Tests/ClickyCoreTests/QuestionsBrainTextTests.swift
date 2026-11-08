@@ -158,12 +158,12 @@ struct QuestionsCheckingNotesRuleTests {
 @Suite("Streaming answer text")
 struct QuestionsStreamingAnswerTextTests {
     @Test func incompleteTagIsHidden() {
-        #expect(StreamingAnswerText.visible(rawTextSoFar: "The port is 4417. [POI").visibleText == "The port is 4417.")
+        #expect(StreamingAnswerText.visible(rawTextSoFar: "The port is 4417. [POI").visibleText == "The port is 4417. ")
     }
 
     @Test(arguments: ["[", "[P", "[PO", "[POINT", "[POINT:", "[POINT:12,3", "[POINT:12,30:gear"])
     func everyTagPrefixIsHidden(suffix: String) {
-        #expect(StreamingAnswerText.visible(rawTextSoFar: "Hello. " + suffix).visibleText == "Hello.")
+        #expect(StreamingAnswerText.visible(rawTextSoFar: "Hello. " + suffix).visibleText == "Hello. ")
     }
 
     @Test func completeTagIsRemovedAndReported() {

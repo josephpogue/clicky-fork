@@ -8,6 +8,8 @@ import Foundation
 let appBundleIdentifier = ProcessInfo.processInfo.environment["DRIVER_BUNDLE_ID"] ?? "com.clickyfork.app"
 let rightCommandKeyCode: CGKeyCode = 54
 let rightCommandDeviceFlag: UInt64 = 0x10  // NX_DEVICERCMDKEYMASK: which Command key is down
+let leftCommandKeyCode: CGKeyCode = 55
+let leftCommandDeviceFlag: UInt64 = 0x8  // NX_DEVICELCMDKEYMASK
 
 let usageText = """
 usage: clicky-driver <command>
@@ -17,7 +19,8 @@ usage: clicky-driver <command>
   type <text>                   type text into the focused field
   menu-bar-click                open the app's menu bar item
   tap-right-command             press and release the right Command key, 80 ms apart
-  chord-right-command <key>     hold right Command, press one letter or digit key, release both
+  chord-right-command <key>     hold right Command, press one letter, digit or comma key, release both
+  chord-left-command <key>      hold left Command, press one letter, digit or comma key, release both
   click-at <x> <y>              move the pointer to screen point x,y and click it with a real left mouse down and up
   press-key <key>               press and release one letter or digit key with no modifier
   cursor <x> <y>                move the mouse pointer to screen point x,y
@@ -162,17 +165,35 @@ func press(_ element: AXUIElement) {
 
 // MARK: - Keyboard
 
-func postRightCommand(down: Bool, source: CGEventSource?) {
-    guard let event = CGEvent(keyboardEventSource: source, virtualKey: rightCommandKeyCode, keyDown: down) else { return }
+func postCommandKey(keyCode: CGKeyCode, deviceFlag: UInt64, down: Bool, source: CGEventSource?) {
+    guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else { return }
     event.type = .flagsChanged
-    event.flags = down ? CGEventFlags(rawValue: CGEventFlags.maskCommand.rawValue | rightCommandDeviceFlag) : []
+    event.flags = down ? CGEventFlags(rawValue: CGEventFlags.maskCommand.rawValue | deviceFlag) : []
     event.post(tap: .cghidEventTap)
+}
+
+func postRightCommand(down: Bool, source: CGEventSource?) {
+    postCommandKey(keyCode: rightCommandKeyCode, deviceFlag: rightCommandDeviceFlag, down: down, source: source)
+}
+
+/// Holds one Command key, presses and releases `keyCode`, releases the Command key: the way a keyboard chord arrives.
+func postCommandChord(commandKeyCode: CGKeyCode, deviceFlag: UInt64, keyCode: CGKeyCode, source: CGEventSource?) {
+    postCommandKey(keyCode: commandKeyCode, deviceFlag: deviceFlag, down: true, source: source)
+    Thread.sleep(forTimeInterval: 0.04)
+    let flags = CGEventFlags(rawValue: CGEventFlags.maskCommand.rawValue | deviceFlag)
+    for isDown in [true, false] {
+        let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown)
+        event?.flags = flags
+        event?.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.04)
+    }
+    postCommandKey(keyCode: commandKeyCode, deviceFlag: deviceFlag, down: false, source: source)
 }
 
 let letterKeyCodes: [Character: CGKeyCode] = [
     "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
     "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "o": 31,
-    "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+    "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46, ",": 43,
 ]
 
 func typeText(_ text: String) {
@@ -272,20 +293,13 @@ case "tap-right-command":
     Thread.sleep(forTimeInterval: 0.08)
     postRightCommand(down: false, source: source)
     print("posted right Command down and up")
-case "chord-right-command":
+case "chord-right-command", "chord-left-command":
     guard arguments.count >= 2, let key = arguments[1].lowercased().first, let keyCode = letterKeyCodes[key] else { fail(usageText, code: 64) }
+    let isRight = command == "chord-right-command"
     let source = CGEventSource(stateID: .hidSystemState)
-    postRightCommand(down: true, source: source)
-    Thread.sleep(forTimeInterval: 0.04)
-    let flags = CGEventFlags(rawValue: CGEventFlags.maskCommand.rawValue | rightCommandDeviceFlag)
-    for isDown in [true, false] {
-        let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown)
-        event?.flags = flags
-        event?.post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: 0.04)
-    }
-    postRightCommand(down: false, source: source)
-    print("posted right Command + \(key)")
+    postCommandChord(commandKeyCode: isRight ? rightCommandKeyCode : leftCommandKeyCode,
+                     deviceFlag: isRight ? rightCommandDeviceFlag : leftCommandDeviceFlag, keyCode: keyCode, source: source)
+    print("posted \(isRight ? "right" : "left") Command + \(key)")
 case "click-at":
     guard arguments.count >= 3, let x = Double(arguments[1]), let y = Double(arguments[2]) else { fail(usageText, code: 64) }
     mouseClick(at: CGPoint(x: x, y: y))

@@ -33,13 +33,20 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
   - Acceptance: When spoken answers are on, the app shall read each answer aloud.
   - Acceptance: When the user asks a new question while an answer is being read, the app shall stop reading.
 - **Short answers first:** As a user, I want short answers unless I ask for more, so that I can take them in at a glance while I work.
-  - Acceptance: When the user asks a question, the app shall answer in one or two sentences.
-  - Acceptance: When the user asks it to explain more, the app shall give the longer answer.
+  - Acceptance: When the user asks a question, the app shall show the answer beside the cursor in one or two sentences.
+  - Acceptance: When an answer needs more than that, or the user asks it to explain more, the app shall put the whole answer in the chat window.
+  - Acceptance: When an answer shows beside the cursor, the app shall show only whole sentences, never cut-off text.
+- **Open the whole answer:** As a user, I want a key that brings up the whole conversation during a session, so that I can read a long answer without reaching for the menu bar.
+  - Acceptance: When the user presses the chat key during a session, the app shall open the chat window without taking focus from the app the user is in, and close it if it is open.
+  - Acceptance: When the chat key is pressed, the app shall keep that key press from reaching the app the user is in.
+  - Acceptance: When the user opens Settings, the app shall show the current chat key and let the user record a new one by pressing it.
+  - Acceptance: When the user records a chat key that could fire together with the question key, the app shall refuse it.
+  - Acceptance: When the user resets the chat key, the app shall go back to right Command with comma.
 - **Answers from my notes:** As a user, I want answers to draw on my own notes and project files only when a question needs them, so that I get accurate answers without waiting for everything to load.
   - Acceptance: When no search folder is set, the app shall answer from the screen alone, as before.
   - Acceptance: When a question is sent and search folders are set, the app shall attach the passages from those folders that match the question, found on the Mac.
   - Acceptance: When the passages do not answer the question, the app shall let the answer search and read files inside the search folders, and never any file outside them or any file that may hold secrets.
-  - Acceptance: When the first words of an answer arrive, the app shall show or speak them at once, and add later findings to the same answer as they arrive.
+  - Acceptance: When the first sentence of an answer is complete, the app shall show or speak it at once, and add later findings to the same answer as they arrive.
   - Acceptance: When the answer is searching the notes and has not said so, the app shall show "Checking your notes" beside the cursor.
   - Acceptance: When the user asks a new question while an answer is still coming, the app shall end that answer and take the new question.
   - Acceptance: When a question starts with "dig deeper", the app shall answer it on the stronger model and effort from Settings, and use the normal model again from the next question.
@@ -63,7 +70,8 @@ An over-the-shoulder assistant that sits beside the user on their Mac: it sees w
 
 - Sessions start and stop only by the user's action; the app never launches at login.
 - The question key is right Command by default, and the choice is kept between launches.
-- No window opens during a session unless the user opens it; the chat window holding the whole conversation opens only from the menu-bar panel.
+- The chat key is right Command with comma by default (right Command only), and the choice is kept between launches.
+- No window opens during a session unless the user opens it; the chat window holding the whole conversation opens only from the menu-bar panel or the chat key.
 - Spoken answers use the voices built into macOS.
 - Screenshots, speech-to-text, change detection, cleanup and the notes index and passage search run on the Mac with no AI request.
 - The app does not read text off screenshots.

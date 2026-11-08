@@ -3,12 +3,10 @@
 //  leanring-buddy
 //
 //  The answer (or notice) text beside the cursor: a dark rounded bubble with no tail. The corner nearest
-//  the cursor is tight (5 pt), the others 14 pt. A long answer is cut at a fixed height with its bottom
-//  fading out, and a footer says the rest is in Open chat. Nothing in it scrolls or takes a click.
-//
-//  While an answer is still coming the bubble grows with it. Past the cap it shows the newest lines instead,
-//  with the top fading in so it reads as continued, and the footer says the start is in Open chat. A
-//  "Checking your notes" line can sit at the end, or show alone in a small bubble before any text comes.
+//  the cursor is tight (5 pt), the others 14 pt. It holds only whole sentences that fit (decided by
+//  `CursorLineState` through `AnswerBubbleMetrics.fitsInBubble`), so nothing is ever cut or faded. When the chat
+//  window holds more, a footer names the chat key. A "Checking your notes" line can sit at the end, or show alone
+//  in a small bubble before any text comes. Nothing in it scrolls or takes a click.
 //
 
 import AppKit
@@ -17,32 +15,40 @@ import SwiftUI
 
 /// Everything the bubble needs, measured once so the panel and the view agree on the size.
 ///
-/// For an answer still coming, build a new content on each text report with `showsNewestLines: true`, so a
-/// text past the cap shows its last lines. `showsCheckingLine` adds "Checking your notes" at the end; with an
-/// empty `text` it is the whole bubble. A finished answer uses today's `init(text:isNotice:)`.
+/// `text` is exactly the cursor line's text (empty for a footer-only or checking-only bubble). `footerText` is the
+/// footer line when the chat window holds more. `showsCheckingLine` adds "Checking your notes" at the end; with an
+/// empty `text` and no footer it is the whole bubble.
 struct AnswerBubbleContent: Equatable {
     let fullText: String
     let paragraphs: [String]
     let isNotice: Bool
+    let footerText: String?
     let showsCheckingLine: Bool
     let layout: CursorBubbleLayout.TextLayout
 
     @MainActor
-    init(text: String, isNotice: Bool, showsNewestLines: Bool = false, showsCheckingLine: Bool = false) {
+    init(text: String, isNotice: Bool, footerText: String? = nil, showsCheckingLine: Bool = false) {
         fullText = text
         paragraphs = AnswerBubbleMetrics.paragraphs(of: text)
         self.isNotice = isNotice
+        self.footerText = footerText
         self.showsCheckingLine = showsCheckingLine
         layout = AnswerBubbleMetrics.textLayout(
-            forParagraphs: paragraphs, showsNewestLines: showsNewestLines, showsCheckingLine: showsCheckingLine)
+            forParagraphs: paragraphs, showsCheckingLine: showsCheckingLine)
     }
 
+    /// True when a rule sits between the body (or checking line) and the footer: not for a footer-only bubble.
+    var footerHasRuleAbove: Bool { !paragraphs.isEmpty || showsCheckingLine }
+
     var size: CGSize {
-        CGSize(width: layout.width, height: AnswerBubbleView.totalHeight(forContentHeight: layout.contentHeight, showsFooter: layout.isBodyCut))
+        CGSize(
+            width: layout.width,
+            height: AnswerBubbleView.totalHeight(
+                forContentHeight: layout.contentHeight, showsFooter: footerText != nil, footerHasRuleAbove: footerHasRuleAbove))
     }
 }
 
-/// Measures the text the way the bubble draws it, so the short/long choice and the cut use real line counts.
+/// Measures the text the way the bubble draws it, so the short/long choice and the fit test use real line counts.
 enum AnswerBubbleMetrics {
     static let font = NSFont.systemFont(ofSize: 13.5)
     static let lineHeight: CGFloat = 13.5 * 1.45
@@ -94,21 +100,39 @@ enum AnswerBubbleMetrics {
         return measuringView.fittingSize.height
     }
 
+    /// True when `text` fits the bubble's body with nothing cut: at most `shortLineLimit` lines at the short width, or
+    /// else a body at the long width no taller than `maximumBodyHeight`. Measured with the same metrics the view
+    /// draws with, and the bubble picks its width by the same rule, so text that fits is never clipped.
+    /// `CursorLineState` and the notice rule call it to decide which whole sentences show.
+    @MainActor
+    static func fitsInBubble(text: String) -> Bool {
+        let paragraphs = paragraphs(of: text)
+        let shortTextWidth = CursorBubbleLayout.shortWidth - 2 * horizontalPadding
+        let longTextWidth = CursorBubbleLayout.longWidth - 2 * horizontalPadding
+        var lineCountAtShortWidth = 0
+        var paragraphIndex = 0
+        while paragraphIndex < paragraphs.count {
+            lineCountAtShortWidth += lineCount(of: paragraphs[paragraphIndex], textWidth: shortTextWidth)
+            paragraphIndex += 1
+        }
+        if lineCountAtShortWidth <= CursorBubbleLayout.shortLineLimit { return true }
+        return CursorBubbleLayout.fits(
+            lineCountAtShortWidth: lineCountAtShortWidth,
+            naturalBodyHeightAtLongWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth))
+    }
+
     @MainActor
     static func textLayout(
         forParagraphs paragraphs: [String],
-        showsNewestLines: Bool = false,
         showsCheckingLine: Bool = false
     ) -> CursorBubbleLayout.TextLayout {
         let shortTextWidth = CursorBubbleLayout.shortWidth - 2 * horizontalPadding
         let longTextWidth = CursorBubbleLayout.longWidth - 2 * horizontalPadding
         let shortLineCounts = paragraphs.map { lineCount(of: $0, textWidth: shortTextWidth) }
-        let longLineCounts = paragraphs.map { lineCount(of: $0, textWidth: longTextWidth) }
         return CursorBubbleLayout.textLayout(
             lineCountAtShortWidth: shortLineCounts.reduce(0, +),
-            naturalBodyHeightAtShortWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: shortTextWidth),
-            naturalBodyHeightAtLongWidth: bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth),
-            showsNewestLines: showsNewestLines,
+            naturalBodyHeightAtShortWidth: paragraphs.isEmpty ? 0 : bodyHeight(ofParagraphs: paragraphs, textWidth: shortTextWidth),
+            naturalBodyHeightAtLongWidth: paragraphs.isEmpty ? 0 : bodyHeight(ofParagraphs: paragraphs, textWidth: longTextWidth),
             showsCheckingLine: showsCheckingLine)
     }
 }
@@ -143,15 +167,16 @@ struct AnswerBubbleView: View {
     /// 6 pt above the hairline, 1 pt hairline, 8 pt below it.
     private static let footerExtra: CGFloat = 6 + 1 + 8
 
-    /// `contentHeight` is the body plus the checking line (`TextLayout.contentHeight`).
-    static func totalHeight(forContentHeight contentHeight: CGFloat, showsFooter: Bool) -> CGFloat {
-        topPadding + contentHeight + bottomPadding + (showsFooter ? footerExtra + footerHeight : 0)
+    /// `contentHeight` is the body plus the checking line (`TextLayout.contentHeight`). A footer with nothing above
+    /// it has no rule, so it is only its own height.
+    static func totalHeight(forContentHeight contentHeight: CGFloat, showsFooter: Bool, footerHasRuleAbove: Bool) -> CGFloat {
+        guard showsFooter else { return topPadding + contentHeight + bottomPadding }
+        let footerTotal = footerHasRuleAbove ? footerExtra + footerHeight : footerHeight
+        return topPadding + contentHeight + bottomPadding + footerTotal
     }
 
     /// Preview renderer only: freezes the checking line's passing light (see `CheckingNotesLine`).
     var fixedCheckingSweepPhase: Double? = nil
-
-    private var isCutAtTop: Bool { content.layout.cutEdge == .top }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -163,8 +188,8 @@ struct AnswerBubbleView: View {
                     .frame(height: CursorBubbleLayout.checkingLineHeight, alignment: .leading)
                     .padding(.top, content.paragraphs.isEmpty ? 0 : CursorBubbleLayout.checkingLineGap)
             }
-            if content.layout.isBodyCut {
-                footer
+            if let footerText = content.footerText {
+                footer(text: footerText)
             }
         }
         .padding(.horizontal, AnswerBubbleMetrics.horizontalPadding)
@@ -193,79 +218,39 @@ struct AnswerBubbleView: View {
     }
 
     private var bodyText: some View {
-        let bodyHeight = content.layout.bodyHeight
-        return AnswerBubbleParagraphs(paragraphs: content.paragraphs)
-        .frame(
-            width: content.layout.width - 2 * AnswerBubbleMetrics.horizontalPadding,
-            height: content.layout.isBodyCut ? bodyHeight : nil,
-            // Cut at the top, the text's bottom sits on the frame's bottom, so the newest line is always the
-            // last one showing, even when SwiftUI wraps a line differently from the measurement.
-            alignment: isCutAtTop ? .bottomLeading : .topLeading)
-        // Only a cut body is held to a height; an uncut one sizes itself, so a line SwiftUI wraps differently
-        // from the measurement is never clipped.
-        .clipped()
-        .mask(fadeMask(bodyHeight: bodyHeight))
-        // One element for the test Mac driver: the whole answer is its value, even where the bubble cuts it.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(content.isNotice ? "Notice" : "Answer")
-        .accessibilityValue(content.fullText)
-        .accessibilityIdentifier(content.isNotice ? "cursor.notice" : "cursor.answer")
+        // An uncut body sizes itself, so a line SwiftUI wraps differently from the measurement is never clipped.
+        AnswerBubbleParagraphs(paragraphs: content.paragraphs)
+            .frame(width: content.layout.width - 2 * AnswerBubbleMetrics.horizontalPadding, alignment: .topLeading)
+            // One element for the test Mac driver: the value is exactly the line shown.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(content.isNotice ? "Notice" : "Answer")
+            .accessibilityValue(content.fullText)
+            .accessibilityIdentifier(content.isNotice ? "cursor.notice" : "cursor.answer")
     }
 
-    /// Opaque except the cut end: the bottom 22 pt of a finished answer fade to 25%, and the top 30 pt of a
-    /// growing answer fade in from almost nothing, so its first visible line reads as the middle of something
-    /// even when the cut falls exactly between two lines.
-    @ViewBuilder
-    private func fadeMask(bodyHeight: CGFloat) -> some View {
-        let fadeLength = min(30 / max(bodyHeight, 1), 1)
-        if isCutAtTop {
-            LinearGradient(
-                stops: [
-                    .init(color: .black.opacity(0.08), location: 0),
-                    .init(color: .black, location: fadeLength),
-                    .init(color: .black, location: 1),
-                ],
-                startPoint: .top, endPoint: .bottom)
-        } else {
-            bottomFadeMask(bodyHeight: bodyHeight)
-        }
-    }
-
-    private func bottomFadeMask(bodyHeight: CGFloat) -> some View {
-        let fadeStart = content.layout.isBodyCut ? max(0, (bodyHeight - 22) / bodyHeight) : 1
-        return LinearGradient(
-            stops: [
-                .init(color: .black, location: 0),
-                .init(color: .black, location: fadeStart),
-                .init(color: .black.opacity(content.layout.isBodyCut ? 0.25 : 1), location: 1),
-            ],
-            startPoint: .top, endPoint: .bottom)
-    }
-
-    private var footer: some View {
+    private func footer(text: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Rectangle()
-                .fill(Color.white.opacity(0.08))
-                .frame(height: 1)
-                .padding(.top, 6)
+            if content.footerHasRuleAbove {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.top, 6)
+            }
             HStack(spacing: 6) {
                 Image(systemName: "bubble.left.fill")
                     .font(.system(size: 11))
-                Text(footerText)
+                Text(text)
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             .foregroundColor(DS.Colors.textMuted)
             .frame(height: Self.footerHeight)
-            .padding(.top, 8)
+            .padding(.top, content.footerHasRuleAbove ? 8 : 0)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(footerText)
+            .accessibilityLabel(text)
+            .accessibilityValue(text)
             .accessibilityIdentifier("cursor.answer.more")
         }
-    }
-
-    /// A finished answer hides its end; a growing one past the cap hides its start.
-    private var footerText: String {
-        isCutAtTop ? "The start is in Open chat, in the menu bar" : "The rest is in Open chat, in the menu bar"
     }
 }

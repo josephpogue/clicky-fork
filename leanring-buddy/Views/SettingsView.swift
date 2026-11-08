@@ -3,7 +3,7 @@
 //  leanring-buddy
 //
 //  Settings: which plan answers, each provider's sign-in, model and measured
-//  answer time, the question key, the dig-deeper model and effort, the folders Clicky can search,
+//  answer time, the question key and the chat key, the dig-deeper model and effort, the folders Clicky can search,
 //  the notes folder, the summary switch, and a short note on the three macOS
 //  permissions. Choices are shown as visible pills, not drop-downs,
 //  because each set is small.
@@ -15,6 +15,7 @@ struct SettingsView: View {
     @ObservedObject var state: SettingsState
     @ObservedObject var answerDeliveryState: AnswerDeliverySettingsState
     @ObservedObject var questionKeyState: QuestionKeySettingsState
+    @ObservedObject var chatKeyState: QuestionKeySettingsState
 
     /// `init(state:)` supplies a default answer-delivery state so previews that build `SettingsView(state:)` keep compiling;
     /// the default shows Text with no voice row and never reads this Mac's voices.
@@ -28,10 +29,15 @@ struct SettingsView: View {
         self.init(state: state, answerDeliveryState: answerDeliveryState, questionKeyState: QuestionKeySettingsState())
     }
 
-    init(state: SettingsState, answerDeliveryState: AnswerDeliverySettingsState, questionKeyState: QuestionKeySettingsState) {
+    @MainActor
+    init(
+        state: SettingsState, answerDeliveryState: AnswerDeliverySettingsState, questionKeyState: QuestionKeySettingsState,
+        chatKeyState: QuestionKeySettingsState? = nil
+    ) {
         self.state = state
         self.answerDeliveryState = answerDeliveryState
         self.questionKeyState = questionKeyState
+        self.chatKeyState = chatKeyState ?? QuestionKeySettingsState(kind: .chat)
     }
 
     var body: some View {
@@ -39,6 +45,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 28) {
                 AnswerDeliverySettingsSection(state: answerDeliveryState)
                 QuestionKeySettingsSection(state: questionKeyState)
+                QuestionKeySettingsSection(state: chatKeyState)
                 providerSection
                 DigDeeperSettingsSection(state: state)
                 SearchFoldersSettingsSection(state: state)

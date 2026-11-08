@@ -22,6 +22,7 @@ final class SettingsWindowController {
     private let state: SettingsState
     private let answerDeliveryController = AnswerDeliverySettingsController()
     private let questionKeyController = QuestionKeySettingsController()
+    private let chatKeyController = QuestionKeySettingsController(kind: .chat)
     private var window: NSWindow?
     /// Providers whose sign-in the user cancelled, so the ended login shows as cancelled, not as a failure.
     private var providersWithCancelledSignIn: Set<ProviderID> = []
@@ -57,7 +58,7 @@ final class SettingsWindowController {
             let newWindow = WindowHosting.makeStandardWindow(
                 title: "Clicky Fork Settings", contentSize: Self.contentSize, isResizable: true, identifier: "settings.nswindow")
             newWindow.contentMinSize = CGSize(width: 480, height: 420)
-            newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state, answerDeliveryState: answerDeliveryController.state, questionKeyState: questionKeyController.state), contentSize: Self.contentSize)
+            newWindow.contentView = WindowHosting.makeHostingView(rootView: SettingsView(state: state, answerDeliveryState: answerDeliveryController.state, questionKeyState: questionKeyController.state, chatKeyState: chatKeyController.state), contentSize: Self.contentSize)
             window = newWindow
         }
         reloadFromSettings()
@@ -280,6 +281,7 @@ final class SettingsWindowController {
     private func reloadFromSettings() {
         answerDeliveryController.reloadFromSettings()
         questionKeyController.reloadFromSettings()
+        chatKeyController.reloadFromSettings()
         state.selectedProviderName = settings.selectedProvider.windowDisplayName
         reloadNotesFolder()
         state.isSummaryAtStopEnabled = settings.summaryAtStopEnabled

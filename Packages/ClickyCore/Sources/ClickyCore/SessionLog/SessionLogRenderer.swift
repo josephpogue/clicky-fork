@@ -86,7 +86,10 @@ public enum SessionLogRenderer {
                 ))
             case .answer(let answerText, let provider, let model, let secondsToAnswer, let pointLabel):
                 var parts: [String] = []
-                let plainAnswer = SessionLogText.singleLine(SessionLogText.removingPointTags(from: answerText))
+                let plainAnswer = SessionLogText.singleLine(
+                    AnswerChatMarker.removing(
+                        from: SessionLogText.removingPointTags(from: StreamingAnswerText.removingTrailingIncompleteTag(from: answerText)),
+                        joinedBy: " "))
                 if !plainAnswer.isEmpty { parts.append(plainAnswer) }
                 if let pointLabel, !pointLabel.isEmpty { parts.append("Pointed at: \(pointLabel).") }
                 let seconds = String(format: "%.1f", secondsToAnswer)

@@ -40,25 +40,37 @@ public protocol SessionFlowOutput: Sendable {
     /// `answerNumber` names this question's answer in every later answer report (text, checking line, tool call,
     /// final answer, cut short), so the app can tell the current answer's reports from an ended one's.
     func questionAsked(_ text: String, answerNumber: Int) async
-    /// The answer is complete (or was cut short). `spokenText` has the POINT tag removed. `pointLabel` is nil when
-    /// the answer pointed nowhere. `notesRead` are the files the answer drew on (passages sent and tool results).
+    /// The answer is complete (or was cut short). `spokenText` has the POINT tag removed; it may still hold `[CHAT]`
+    /// markers, which the app splits with `AnswerPartsTracker` (readers use
+    /// `AnswerChatMarker.removing`). `pointLabel` is nil when the answer pointed nowhere. `notesRead` are the files the answer drew
+    /// on (passages sent and tool results).
     func answerReceived(
         answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double,
         pointLabel: String?, notesRead: [String]
     ) async
-    /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag hidden.
+    /// The visible answer so far, each time it grows: POINT tags removed and a half-written tag or marker hidden.
+    /// A complete `[CHAT]` marker stays in `visibleText`; the app splits it into parts with `AnswerPartsTracker`.
     func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async
+    /// The same report, also saying whether the visible text ends where a point tag or chat marker is being written
+    /// (`StreamingAnswerView.endsBeforeHiddenText`): then nothing more can follow the text's last sentence end, so an
+    /// end that needs the next word ("etc.", "Plan B.") is final. The flow sends this one; an output that does not
+    /// care gets the plain report through the default.
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async
     /// The model began a brain tool call without first saying it was checking: show and say "Checking your notes".
     func checkingNotesShown(answerNumber: Int) async
     /// An answer ended before it was complete. `visibleText` is what had arrived; the app finishes the chat message
-    /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own).
+    /// with the line for `reason` and shows nothing else for it (a failure's notice arrives on its own). It may hold
+    /// `[CHAT]` markers; the app splits it with `AnswerPartsTracker.chatText(ofVisibleText:)`.
     /// `answerNumber` is the number `questionAsked` gave this answer. Never sent after Stop began.
     func answerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
         reason: AnswerCutReason
     ) async
     /// The model began a tool call (every one, whether or not the checking line shows): a sentence that ended right
-    /// before it is complete even with no space after it yet, so speech may say it now.
+    /// before it is complete even with no space after it yet, so speech may say it now. The app also ends the
+    /// current `AnswerPartsTracker` part here: text after it opens a new part.
     func toolCallStarted(answerNumber: Int) async
     func noticeShown(_ text: String) async
     func usageLimitOffered(message: String, switchTo: ProviderID) async
@@ -71,6 +83,11 @@ public protocol SessionFlowOutput: Sendable {
 /// Defaults so an output that does not show streaming yet still compiles; the final answer still arrives.
 public extension SessionFlowOutput {
     func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {}
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async {
+        await answerTextChanged(answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model)
+    }
     func checkingNotesShown(answerNumber: Int) async {}
     func answerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String],
@@ -174,6 +191,7 @@ public actor SessionQuestionFlow {
         var provider: ProviderID
         var model: String
         var visibleText = ""
+        var endsBeforeHiddenText = false
         var checkingNotesRule = CheckingNotesRule()
         var hasFlownPointer = false
         /// The tag the pointer flew to while streaming, so a later tag in the final text can be told apart.
@@ -241,6 +259,9 @@ public actor SessionQuestionFlow {
                 // Every question has its own number, also one asked with nothing running.
                 questionSerial += 1
                 await setPhase(.listening)
+                // The key was lost (or Stop began) while the listening report went out: the question was dropped, so
+                // it is neither marked, logged nor accepted.
+                guard !isFinished, !isStopping, phase == .listening else { return .ignoredBecauseBusy }
             case .waitingForAnswer:
                 // A new question ends the answer still coming. The number moves on first, so everything the old
                 // answer reports from here on is dropped; the phase moves on before the first await, so a second
@@ -254,9 +275,9 @@ public actor SessionQuestionFlow {
                 // Stop beginning at any point (`isStopping`) ends the unit: a stopping session starts no question.
                 let announcement = Task { [self] () -> Bool in
                     await output.phaseChanged(.listening)
-                    guard !isFinished, !isStopping else { return false }
+                    guard !isFinished, !isStopping, phase == .listening else { return false }
                     await dependencies.markQuestionStarted(date)
-                    guard !isFinished, !isStopping else { return false }
+                    guard !isFinished, !isStopping, phase == .listening else { return false }
                     await noteEvent(SessionEvent(time: date, kind: .questionStarted))
                     return true
                 }
@@ -267,6 +288,9 @@ public actor SessionQuestionFlow {
                 return .ignoredBecauseBusy
             }
             await dependencies.markQuestionStarted(date)
+            // Dropped while the mark was in flight: the speech side closes the span it just opened (see
+            // `SessionSpeechPipeline.abandonOpenQuestion`), and nothing is logged.
+            guard !isFinished, !isStopping, phase == .listening else { return .ignoredBecauseBusy }
             await noteEvent(SessionEvent(time: date, kind: .questionStarted))
             return .accepted
         case .sendQuestion(let speechFrom, let speechTo):
@@ -274,6 +298,16 @@ public actor SessionQuestionFlow {
             await runQuestion(speechFrom: speechFrom, speechTo: speechTo, serial: questionSerial)
             return .accepted
         }
+    }
+
+    /// The question key is gone while a question is being listened for: nothing can send it. Listening ends the way
+    /// Stop ends it (the marker and the listening state go, nothing is sent). Returns whether a question was
+    /// dropped; the caller then drops the speech captured for it. A question already sent runs on.
+    @discardableResult
+    public func abandonListening() async -> Bool {
+        guard !isFinished, !isStopping, !isSwitching, phase == .listening else { return false }
+        await setPhase(.idle)
+        return true
     }
 
     /// Stops the answer a new question ended without holding the new question's listening back: the provider may take
@@ -530,6 +564,9 @@ public actor SessionQuestionFlow {
         case .textSoFar(let rawTextSoFar):
             let view = StreamingAnswerText.visible(rawTextSoFar: rawTextSoFar)
             let visibleTextChanged = view.visibleText != state.visibleText
+            // A hidden tag or marker starting right after a sentence end settles that end, with the text unchanged.
+            let reportChanged = visibleTextChanged || view.endsBeforeHiddenText != state.endsBeforeHiddenText
+            state.endsBeforeHiddenText = view.endsBeforeHiddenText
             if visibleTextChanged {
                 state.visibleText = view.visibleText
                 state.checkingNotesRule.textChanged(visibleTextSoFar: view.visibleText)
@@ -543,8 +580,10 @@ public actor SessionQuestionFlow {
                 pointerToFly = (mapped.point, mapped.shot.displayFrameInPoints, tag.label.flatMap { $0 == "none" ? nil : $0 })
             }
             streamingAnswers[serial] = state
-            if visibleTextChanged {
-                await output.answerTextChanged(answerNumber: serial, visibleText: view.visibleText, provider: state.provider, model: state.model)
+            if reportChanged {
+                await output.answerTextChanged(
+                    answerNumber: serial, visibleText: view.visibleText, endsBeforeHiddenText: view.endsBeforeHiddenText,
+                    provider: state.provider, model: state.model)
             }
             if let pointerToFly, isCurrent(serial) {
                 await output.pointerRequested(

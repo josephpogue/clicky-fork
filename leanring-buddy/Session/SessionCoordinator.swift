@@ -46,6 +46,12 @@ final class SessionCoordinator: ObservableObject {
 
     /// A short line for the menu bar panel when a session could not start.
     @Published private(set) var panelNotice: String?
+    /// True from the moment the key tap died in a running session until the next Start or Stop. Settings shows the
+    /// lost line under both keys meanwhile.
+    @Published private(set) var keyTapLost = false {
+        // The chat window's footer follows it.
+        didSet { chatWindowState.isKeyTapLost = keyTapLost }
+    }
 
     /// Sends a session's id once Stop has finished writing its log and cleanup.
     let sessionFinished = PassthroughSubject<String, Never>()
@@ -62,8 +68,11 @@ final class SessionCoordinator: ObservableObject {
     private var growingAnswerChat = GrowingAnswerChatState()
     /// The chat message of each answer, by the answer token `growingAnswerChat` gave it.
     private var answerMessageIDs: [Int: UUID] = [:]
-    /// The visible text of the answer so far, so a tool call can have its trailing sentence spoken.
-    private var lastVisibleAnswerText = ""
+    /// Each answer's parts (cursor text and chat text), by answer number, so a late cut-short report of an older
+    /// answer still gets its own paragraphs. An entry goes once its chat card is finished.
+    private var answerPartsByNumber: [Int: AnswerPartsTracker] = [:]
+    /// Which whole sentences of the current answer show beside the cursor and have been read aloud.
+    private var cursorLineState = CursorLineState()
     /// The provider the open usage-limit offer switches to; an answer from any other provider clears the offer.
     private var usageLimitSwitchTarget: ProviderID?
     private let questionKeyMonitor = QuestionKeyMonitor()
@@ -86,6 +95,10 @@ final class SessionCoordinator: ObservableObject {
     private var startStatusMessageID: UUID?
     /// True once the screen, microphone or key tap was switched on for the session being started.
     private var didStartCapture = false
+    /// True between a finished Start and Stop: the chat key's tap is on, so the footer may name the key.
+    private var chatKeyWorks = false
+    /// What the user sees after the key tap died, and when the cursor notice shows (`KeyTapLossState`).
+    private var keyLoss = KeyTapLossState()
 
     private var sessionID: String?
     private var screenRecorder: SessionScreenRecorder?
@@ -114,19 +127,42 @@ final class SessionCoordinator: ObservableObject {
             // answer's voice (after the new question's listening marker showed) must not hide that marker.
             if isSpeaking, let self, case .waitingForAnswer = self.currentPhase { self.markerPanel.hide() }
         }
+        // The reading ended, by any path (also one that never began to speak): a cursor notice that waited for it
+        // shows now.
+        spokenAnswerPlayer.onReadingEnded = { [weak self] in self?.showDeferredKeyNoticeIfDue() }
         // Switching to a mode that does not speak stops a reading in progress; switching to Spoken starts nothing.
         settings.$answerDeliveryMode
             .removeDuplicates()
             .sink { [weak self] mode in
-                if !mode.speaksAloud { self?.spokenAnswerPlayer.stopSpeaking() }
+                if !mode.speaksAloud {
+                    self?.spokenAnswerPlayer.stopSpeaking()
+                    self?.showDeferredKeyNoticeIfDue()
+                }
             }
             .store(in: &settingsSubscriptions)
 
         // A new question key applies at once, also in a running session.
         settings.$questionKey
             .removeDuplicates()
-            .sink { [weak self] key in self?.questionKeyMonitor.apply(questionKey: key) }
+            .sink { [weak self] key in
+                guard let self else { return }
+                self.questionKeyMonitor.apply(questionKey: key)
+                self.refreshChatKeyName(question: key, chat: self.settings.chatKey)
+            }
             .store(in: &settingsSubscriptions)
+
+        // A new chat key applies at once, also in a running session, and the footer names it.
+        settings.$chatKey
+            .removeDuplicates()
+            .sink { [weak self] key in
+                guard let self else { return }
+                self.questionKeyMonitor.apply(chatKey: key)
+                self.refreshChatKeyName(question: self.settings.questionKey, chat: key)
+            }
+            .store(in: &settingsSubscriptions)
+        questionKeyMonitor.onChatKeyPressed = { [weak self] in self?.handleChatKeyPressed() }
+        // The tap died mid-session (Accessibility was turned off): say so where session problems show, never fail silently.
+        questionKeyMonitor.onTapLost = { [weak self] in self?.showKeyTapLost() }
 
         // The button in the chat window does what the panel's button does in the current phase (Starting cancels).
         chatWindowState.onStartSession = { [weak self] in self?.handleSessionButton() }
@@ -180,12 +216,14 @@ final class SessionCoordinator: ObservableObject {
     func startSession() {
         guard lifecycle.beginStart() else { return }
         panelNotice = nil
+        clearKeyTapLoss()
         didStartCapture = false
         // A new session replaces the finished conversation in the chat window.
         chatWindowState.messages = []
         growingAnswerChat.reset()
         answerMessageIDs = [:]
-        lastVisibleAnswerText = ""
+        answerPartsByNumber = [:]
+        cursorLineState = CursorLineState()
         chatWindowState.isCheckingNotes = false
         chatWindowState.usageLimitOffer = nil
         chatWindowState.questionPhase = .idle
@@ -436,6 +474,17 @@ final class SessionCoordinator: ObservableObject {
             chatWindowState.messages.append(ChatMessage(role: .notice, text: "Using Apple speech: the Parakeet model is not available"))
         }
         _ = lifecycle.finishStart()
+        // From now on the chat key works, so a bubble with more in the chat names it.
+        chatKeyWorks = true
+        refreshChatKeyName(question: settings.questionKey, chat: settings.chatKey)
+    }
+
+    /// The footer names the chat key only while pressing it opens the chat: during a session, and while it does not
+    /// overlap the question key (an overlapping chat key is inactive). Otherwise it points at the menu bar's Open chat.
+    /// The sinks pass the new key themselves, since `@Published` sends before the property changes.
+    private func refreshChatKeyName(question: QuestionKeySpec, chat: QuestionKeySpec) {
+        let isActive = chatKeyWorks && KeyOverlap.isChatKeyActive(chat, question: question)
+        cursorAnswerPresenter.chatKeyName = isActive ? chat.displayName : nil
     }
 
     /// Ends a Start that failed or was cancelled: switches off whatever was on, ends the provider, and applies
@@ -446,6 +495,8 @@ final class SessionCoordinator: ObservableObject {
             isCancelled: Task.isCancelled, failureNotice: noticeText, captureBegan: didStartCapture
         )
         questionKeyMonitor.stop()
+        chatKeyWorks = false
+        cursorAnswerPresenter.chatKeyName = nil
         // The window tracker goes first: its callback feeds the recorder and the input queue.
         frontmostWindowTracker.stop()
         await speechPipeline?.stop()
@@ -540,6 +591,12 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
+    /// The chat key opens the chat panel, or closes it when it is open. The key tap exists only during a session.
+    private func handleChatKeyPressed() {
+        guard lifecycle.acceptsQuestionKeySignals else { return }
+        AppWindowRouter.shared.toggleChat()
+    }
+
     private func noteAudioLevel(_ level: Double) {
         guard lifecycle.acceptsFlowPhaseUpdates, case .listening = currentPhase,
               abs(level - lastShownAudioLevel) > 0.02 else { return }
@@ -572,6 +629,10 @@ final class SessionCoordinator: ObservableObject {
     /// Leaves running at once (so no key signal or phase update passes), then finishes the stop in the background.
     private func beginStop(askForSummary: Bool) {
         guard lifecycle.beginStop() else { return }
+        // The keys are gone with the session: the lost line leaves the panel and Settings, and a cursor notice that
+        // was waiting for an answer never shows.
+        if KeyTapNotice.isLossNotice(panelNotice) { panelNotice = nil }
+        clearKeyTapLoss()
         // The slow parts of Stop (the speech and screen shutdown) come next: close the answer now, so the card does
         // not say "still coming", the checking line does not animate and no queued sentence is read meanwhile.
         closeAnswerAsStopped()
@@ -589,6 +650,8 @@ final class SessionCoordinator: ObservableObject {
 
         // Everything that watches or listens goes off first.
         questionKeyMonitor.stop()
+        chatKeyWorks = false
+        cursorAnswerPresenter.chatKeyName = nil
         await speechPipeline?.stop()
         await screenRecorder?.stop()
         frontmostWindowTracker.stop()
@@ -625,6 +688,7 @@ final class SessionCoordinator: ObservableObject {
     /// Stop and of Quit (both go through `beginStop`); later calls find nothing left to end.
     private func closeAnswerAsStopped() {
         apply(growingAnswerChat.abandon(reason: .stopped), details: nil)
+        answerPartsByNumber.removeAll()
         hideCursorAnswerAndStopSpeaking()
     }
 
@@ -681,6 +745,8 @@ final class SessionCoordinator: ObservableObject {
         // Once Stop has begun, a late phase (a tap queued just before Stop) must not light the marker again.
         guard lifecycle.acceptsFlowPhaseUpdates else { return }
         currentPhase = phase
+        // A question that ends (the phase goes idle) may be the last thing a deferred cursor notice waited for.
+        defer { showDeferredKeyNoticeIfDue() }
         let providerName: (ProviderID) -> String = { ProviderFailureNotice.displayName(for: $0) }
         switch phase {
         case .idle:
@@ -691,7 +757,8 @@ final class SessionCoordinator: ObservableObject {
             // (when the flow did not already report it cut short) ends here as cut short; its own late cut report
             // then finds this same card instead of adding a second one.
             apply(growingAnswerChat.newQuestionListening(), details: nil)
-            lastVisibleAnswerText = ""
+            // The ended answer keeps its parts for its own late cut-short report; nothing more of it shows or is said.
+            cursorLineState = CursorLineState()
             cursorAnswerPresenter.hideAll()
             spokenAnswerPlayer.stopAllSpeaking()
             // The old pointer flies home, so the next answer sits by the cursor, not under the old label.
@@ -713,12 +780,16 @@ final class SessionCoordinator: ObservableObject {
         // The answer number is the card's token: every later report names it, so a report of an older answer finds
         // its own card (or is dropped) and never reaches this one.
         apply(growingAnswerChat.beginAnswer(answerNumber: answerNumber), details: nil)
+        answerPartsByNumber[answerNumber] = AnswerPartsTracker()
+        cursorLineState = CursorLineState()
     }
 
     fileprivate func showAnswer(
         answerNumber: Int, spokenText: String, provider: ProviderID, model: String, secondsToAnswer: Double, pointLabel: String?,
         notesRead: [String]
     ) {
+        // Its sentences are queued for reading by the end of this call, so the reading check below is true.
+        defer { showDeferredKeyNoticeIfDue() }
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: secondsToAnswer, pointLabel: pointLabel, notesRead: notesRead)
@@ -726,7 +797,11 @@ final class SessionCoordinator: ObservableObject {
         // dropped: no card, no bubble, no voice. The measurements below still count as a provider answer.
         let isCurrentAnswer = growingAnswerChat.isCurrent(answerNumber: answerNumber)
         if isCurrentAnswer {
-            apply(growingAnswerChat.finalAnswerReceived(answerNumber: answerNumber, text: spokenText), details: details)
+            // The chat card holds the whole answer: every part's cursor text and chat text, no marker.
+            var answerParts = answerPartsByNumber[answerNumber] ?? AnswerPartsTracker()
+            answerParts.finalReported(spokenText)
+            answerPartsByNumber[answerNumber] = answerParts
+            apply(growingAnswerChat.finalAnswerReceived(answerNumber: answerNumber, text: answerParts.chatText), details: details)
         }
         chatWindowState.activeModel = model.isEmpty ? "default" : model
         settings.recordMeasuredAnswerSeconds(secondsToAnswer, for: provider)
@@ -736,26 +811,45 @@ final class SessionCoordinator: ObservableObject {
         }
         // An answer that lands during Stop's drain finds its number already retired by Stop (the card ended as
         // "(Stopped.)"), so it reaches nothing: no chat card, no bubble, no voice, and no pointer (`flyPointer`).
-        guard isCurrentAnswer, lifecycle.acceptsPointerFlights else { return }
-        let deliveryMode = settings.answerDeliveryMode
-        if deliveryMode.showsText { cursorAnswerPresenter.showFinalAnswer(text: spokenText) }
-        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakFinalAnswer(text: spokenText) }
+        guard isCurrentAnswer, lifecycle.acceptsPointerFlights else {
+            answerPartsByNumber[answerNumber] = nil
+            return
+        }
+        refreshCursorLine(answerNumber: answerNumber)
+        // "Checking your notes" never stays on a finished answer, also when the final line is the one already shown.
+        if settings.answerDeliveryMode.showsText { cursorAnswerPresenter.answerFinished() }
+        answerPartsByNumber[answerNumber] = nil
     }
 
     /// The answer so far: the chat message grows, the bubble grows in place and finished sentences are spoken.
-    fileprivate func showAnswerText(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) {
+    fileprivate func showAnswerText(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) {
         guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
-        lastVisibleAnswerText = visibleText
+        var answerParts = answerPartsByNumber[answerNumber] ?? AnswerPartsTracker()
+        answerParts.textReported(visibleText, endsBeforeHiddenText: endsBeforeHiddenText)
+        answerPartsByNumber[answerNumber] = answerParts
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: nil, pointLabel: nil, notesRead: [])
-        apply(growingAnswerChat.textReported(answerNumber: answerNumber, text: visibleText), details: details)
+        apply(growingAnswerChat.textReported(answerNumber: answerNumber, text: answerParts.chatText), details: details)
+        refreshCursorLine(answerNumber: answerNumber)
+    }
+
+    /// Recomputes the current answer's cursor line from its parts: the bubble shows only whole sentences that fit,
+    /// and the voice reads exactly the sentences the bubble shows for the first time, with Spoken only too.
+    private func refreshCursorLine(answerNumber: Int) {
+        guard let answerParts = answerPartsByNumber[answerNumber] else { return }
+        let update = cursorLineState.update(
+            parts: answerParts.parts, fits: { candidateText in AnswerBubbleMetrics.fitsInBubble(text: candidateText) })
         let deliveryMode = settings.answerDeliveryMode
-        // The listening or waiting marker has done its job once the answer shows; for Spoken-only it stays until
-        // the voice starts (see onSpeakingChanged).
-        if deliveryMode.showsText { markerPanel.hide() }
-        if deliveryMode.showsText { cursorAnswerPresenter.showGrowingAnswer(text: visibleText) }
-        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakNewSentences(visibleTextSoFar: visibleText) }
+        if deliveryMode.showsText, let line = update.line {
+            // The listening or waiting marker has done its job once the answer shows; for Spoken-only it stays until
+            // the voice starts (see onSpeakingChanged).
+            markerPanel.hide()
+            cursorAnswerPresenter.showCursorLine(line)
+        }
+        if deliveryMode.speaksAloud { spokenAnswerPlayer.speak(sentences: update.newSentencesToSpeak) }
     }
 
     fileprivate func showCheckingNotes(answerNumber: Int) {
@@ -767,28 +861,44 @@ final class SessionCoordinator: ObservableObject {
         if deliveryMode.speaksAloud { spokenAnswerPlayer.speakCheckingLine() }
     }
 
-    /// An answer ended early: the chat message ends with the line for the reason, once. The bubble stays as it is
-    /// until the new question's listening phase hides it, as it does today; a failure's notice arrives separately.
+    /// An answer ended early: the chat message ends with the line for the reason, once. The bubble keeps the text it
+    /// shows until the new question's listening phase hides it, as it does today (a failure's notice arrives
+    /// separately), but "Checking your notes" goes now: no search is running once the answer has ended.
     fileprivate func showAnswerCutShort(
         answerNumber: Int, visibleText: String, provider: ProviderID, model: String, notesRead: [String], reason: AnswerCutReason
     ) {
         // After Stop began, only the Stop's own report may finish the card (Stop ended it as "(Stopped.)" already).
         guard lifecycle.acceptsPointerFlights || reason == .stopped else { return }
+        defer { showDeferredKeyNoticeIfDue() }
         let details = ComingAnswerDetails(
             providerName: ProviderFailureNotice.displayName(for: provider), model: model,
             secondsToAnswer: nil, pointLabel: nil, notesRead: notesRead)
+        // Only the answer on screen owns the bubble: an older answer's late report must not touch the new one's.
+        let endedAnswerIsCurrent = growingAnswerChat.isCurrent(answerNumber: answerNumber)
+        // The card keeps the answer's own paragraphs: its tracker when it still has one, else the text alone.
+        let chatText: String
+        if var answerParts = answerPartsByNumber.removeValue(forKey: answerNumber) {
+            answerParts.textReported(visibleText)
+            chatText = answerParts.chatText
+        } else {
+            chatText = AnswerPartsTracker.chatText(ofVisibleText: visibleText)
+        }
         apply(
-            growingAnswerChat.cutShort(answerNumber: answerNumber, visibleText: visibleText, reason: reason),
+            growingAnswerChat.cutShort(answerNumber: answerNumber, visibleText: chatText, reason: reason),
             details: details)
+        if endedAnswerIsCurrent, settings.answerDeliveryMode.showsText { cursorAnswerPresenter.answerFinished() }
     }
 
     /// The model began a tool call: the bubble now treats new text as a new finding, and a Spoken answer says the
     /// sentence that just ended ("Let me check your notes.") instead of waiting through the whole search in silence.
     fileprivate func showToolCallStarted(answerNumber: Int) {
         guard lifecycle.acceptsPointerFlights, growingAnswerChat.isCurrent(answerNumber: answerNumber) else { return }
-        let deliveryMode = settings.answerDeliveryMode
-        if deliveryMode.showsText { cursorAnswerPresenter.noteToolCallStarted() }
-        if deliveryMode.speaksAloud { spokenAnswerPlayer.speakTrailingSentence(visibleTextSoFar: lastVisibleAnswerText) }
+        // The tool call ends the current part, so its last sentence is complete and may show and be spoken now.
+        answerPartsByNumber[answerNumber]?.toolCallStarted()
+        // The line first, then the note: after a click, the ended part's last sentence completing is not a new finding,
+        // only the next part's line is.
+        refreshCursorLine(answerNumber: answerNumber)
+        if settings.answerDeliveryMode.showsText { cursorAnswerPresenter.noteToolCallStarted() }
     }
 
     private struct ComingAnswerDetails {
@@ -839,6 +949,64 @@ final class SessionCoordinator: ObservableObject {
         change(&chatWindowState.messages[index])
     }
 
+    /// The question key and the chat key no longer work in this session. Everything the user sees follows at once and
+    /// stays true until Stop or the next Start: the chat footer stops naming the dead chat key, a question being
+    /// listened for is dropped (nothing can send it), and the menu-bar panel, the chat and Settings say so. An answer
+    /// still coming or being read is never cut: the chat and the panel get the notice now, the cursor once the answer
+    /// has ended and its reading has finished (`KeyTapLossState`).
+    private func showKeyTapLost() {
+        guard lifecycle.acceptsPointerFlights else { return }
+        chatKeyWorks = false
+        refreshChatKeyName(question: settings.questionKey, chat: settings.chatKey)
+        let flow = questionFlow
+        let pipeline = speechPipeline
+        let lostInSessionID = sessionID
+        Task { @MainActor [weak self] in
+            // A question heard so far but not yet sent ends the way Stop ends it, and its captured words are dropped.
+            let questionDropped = await flow?.abandonListening() ?? false
+            if questionDropped { await pipeline?.abandonOpenQuestion(at: Date()) }
+            self?.reportKeyTapLost(questionDropped: questionDropped, lostInSessionID: lostInSessionID)
+        }
+    }
+
+    private func reportKeyTapLost(questionDropped: Bool, lostInSessionID: String?) {
+        // Stop may have begun meanwhile (it already cleared everything about the keys), and a quick Start after it is a
+        // new session the old session's loss must not reach.
+        guard lifecycle.acceptsPointerFlights, sessionID == lostInSessionID else { return }
+        let text = KeyTapNotice.text(questionDropped: questionDropped)
+        let cursor = keyLoss.tapLost(
+            text: text, isAnswerInFlight: isAnswerInFlight, isReadingAloud: spokenAnswerPlayer.isReading)
+        if case .none = cursor { return }
+        keyTapLost = true
+        panelNotice = text
+        // The chat line goes in after the answer's card, which keeps growing above it.
+        chatWindowState.messages.append(ChatMessage(role: .notice, text: text))
+        if case .showNow(let cursorText) = cursor { cursorAnswerPresenter.showNotice(text: cursorText) }
+    }
+
+    /// An answer is coming when its card is open or its question was sent and has not finished.
+    private var isAnswerInFlight: Bool {
+        if growingAnswerChat.isAnswerInFlight { return true }
+        switch currentPhase {
+        case .transcribing, .waitingForAnswer: return true
+        case .idle, .listening: return false
+        }
+    }
+
+    /// Shows the cursor notice that waited for an answer and its reading to end, once both are over.
+    private func showDeferredKeyNoticeIfDue() {
+        guard lifecycle.acceptsPointerFlights,
+              let text = keyLoss.answerActivityChanged(
+                isAnswerInFlight: isAnswerInFlight, isReadingAloud: spokenAnswerPlayer.isReading)
+        else { return }
+        cursorAnswerPresenter.showNotice(text: text)
+    }
+
+    private func clearKeyTapLoss() {
+        keyLoss.sessionStopped()
+        keyTapLost = false
+    }
+
     fileprivate func showNotice(_ text: String) {
         // A notice takes the answer's place: a message still coming ends, the checking line stops, the voice stops.
         let endedSteps = growingAnswerChat.noticeShown()
@@ -848,6 +1016,9 @@ final class SessionCoordinator: ObservableObject {
         // Only an answer still coming (or its checking line) is cut off by the notice. A notice that arrives with
         // nothing in flight (the failed switch to ChatGPT) leaves a finished answer being read aloud.
         if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
+        // This notice has the cursor; a key-loss notice that was waiting would replace it. The panel, the chat and
+        // Settings still carry the loss.
+        keyLoss.cursorTakenByAnotherNotice()
         cursorAnswerPresenter.showNotice(text: text)
     }
 
@@ -860,6 +1031,7 @@ final class SessionCoordinator: ObservableObject {
         // The one-tap switch lives in the menu-bar panel; the cursor only says where to find it.
         guard lifecycle.acceptsPointerFlights else { return }
         if !endedSteps.isEmpty { spokenAnswerPlayer.stopSpeaking() }
+        keyLoss.cursorTakenByAnotherNotice()
         cursorAnswerPresenter.showNotice(
             text: UsageLimitOfferRules.cursorNotice(message: message, switchToProviderName: switchToProviderName))
     }
@@ -916,9 +1088,17 @@ private final class SessionFlowBridge: SessionFlowOutput, @unchecked Sendable {
         }
     }
 
-    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+    func answerTextChanged(
+        answerNumber: Int, visibleText: String, endsBeforeHiddenText: Bool, provider: ProviderID, model: String
+    ) async {
         await MainActor.run { coordinator?.showAnswerText(
-                answerNumber: answerNumber, visibleText: visibleText, provider: provider, model: model) }
+                answerNumber: answerNumber, visibleText: visibleText, endsBeforeHiddenText: endsBeforeHiddenText,
+                provider: provider, model: model) }
+    }
+
+    func answerTextChanged(answerNumber: Int, visibleText: String, provider: ProviderID, model: String) async {
+        await answerTextChanged(
+            answerNumber: answerNumber, visibleText: visibleText, endsBeforeHiddenText: false, provider: provider, model: model)
     }
 
     func checkingNotesShown(answerNumber: Int) async {

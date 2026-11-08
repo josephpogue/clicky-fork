@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 @testable import ClickyCore
 
 /// A stand-in for the `claude` command line tool, written to a temp folder. It records every start (argv and
@@ -423,4 +424,174 @@ while True:
 
 append("exits.jsonl", {"pid": pid})
 """#
+}
+
+// MARK: - The test Mac's own stand-in (testenv/claude-standin/claude), run as a host child process
+
+/// Runs the real test Mac stand-in `claude` from the repo with its pauses shortened. It reads no credentials and talks to no network.
+struct TestEnvClaudeStandInRun {
+    static let explainText = "This menu bar holds the session controls. [CHAT] The first button starts the session. "
+        + "The next ones open the chat, the session list and the settings. "
+        + "Everything else on screen is not needed for now. [POINT:none]"
+
+    /// The repo root, found from this file: Packages/ClickyCore/Tests/ClickyCoreTests/<file>.
+    static var repoRoot: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        return url
+    }
+
+    static var scriptURL: URL { repoRoot.appendingPathComponent("testenv/claude-standin/claude") }
+
+    let logDirectory: URL
+    let helperScriptURL: URL
+
+    init() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("testenv-claude-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        logDirectory = folder.appendingPathComponent("log", isDirectory: true)
+        helperScriptURL = folder.appendingPathComponent("fake-helper.py")
+        try Self.fakeHelper.write(to: helperScriptURL, atomically: true, encoding: .utf8)
+    }
+
+    func cleanUp() { try? FileManager.default.removeItem(at: logDirectory.deletingLastPathComponent()) }
+
+    /// A one-file MCP helper: handshake, one tool list, and a search that finds port 4417.
+    private static let fakeHelper = #"""
+import json, sys
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "search_brain"}, {"name": "read_brain_file"}]}
+    else:
+        result = {"content": [{"type": "text", "text": "demo-server.md: the demo server listens on port 4417."}], "isError": False}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""#
+
+    /// One stream-json question; returns every stdout line as a parsed object.
+    func ask(_ question: String, withHelper: Bool = false) throws -> [[String: Any]] {
+        var arguments = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                         "--include-partial-messages", "--model", "test-model"]
+        if withHelper {
+            let config: [String: Any] = ["mcpServers": ["brain": ["command": "/usr/bin/python3", "args": [helperScriptURL.path]]]]
+            let data = try JSONSerialization.data(withJSONObject: config)
+            arguments += ["--mcp-config", String(decoding: data, as: UTF8.self)]
+        }
+        let line: [String: Any] = ["type": "user", "message": ["role": "user", "content": [["type": "text", "text": "Question: \(question)"]]]]
+        let input = try JSONSerialization.data(withJSONObject: line) + Data("\n".utf8)
+        let output = try Self.run(Self.scriptURL, arguments: arguments, input: input, logDirectory: logDirectory)
+        return output.split(separator: UInt8(ascii: "\n")).compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
+    }
+
+    static func run(_ script: URL, arguments: [String], input: Data, logDirectory: URL) throws -> Data {
+        let process = Process()
+        process.executableURL = script
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["STANDIN_LOG_DIR"] = logDirectory.path
+        environment["STANDIN_TIME_SCALE"] = "0.05"
+        environment["CLAUDE_CONFIG_DIR"] = logDirectory.appendingPathComponent("config").path
+        environment["CODEX_HOME"] = logDirectory.appendingPathComponent("config").path
+        process.environment = environment
+        let inPipe = Pipe(), outPipe = Pipe()
+        process.standardInput = inPipe
+        process.standardOutput = outPipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 60) { if process.isRunning { process.terminate() } }
+        inPipe.fileHandleForWriting.write(input)
+        try inPipe.fileHandleForWriting.close()
+        let output = outPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return output
+    }
+
+    /// The text deltas of the whole run, in order.
+    static func textDeltas(_ lines: [[String: Any]]) -> [String] {
+        lines.compactMap { line in
+            guard line["type"] as? String == "stream_event", let event = line["event"] as? [String: Any],
+                  event["type"] as? String == "content_block_delta", let delta = event["delta"] as? [String: Any],
+                  delta["type"] as? String == "text_delta" else { return nil }
+            return delta["text"] as? String
+        }
+    }
+
+    /// The text of the last assistant text block (the final answer).
+    static func lastAssistantText(_ lines: [[String: Any]]) -> String? {
+        let texts: [String] = lines.compactMap { line in
+            guard line["type"] as? String == "assistant", let message = line["message"] as? [String: Any],
+                  let content = message["content"] as? [[String: Any]] else { return nil }
+            return content.first { $0["type"] as? String == "text" }?["text"] as? String
+        }
+        return texts.last
+    }
+}
+
+@Suite("Test Mac claude stand-in rows", .serialized)
+struct TestEnvClaudeStandInRowTests {
+    @Test func theExplainRowStreamsTheMarkerSplitAcrossTwoDeltas() throws {
+        let run = try TestEnvClaudeStandInRun()
+        defer { run.cleanUp() }
+        let deltas = TestEnvClaudeStandInRun.textDeltas(try run.ask("please explain this"))
+        #expect(deltas.joined() == TestEnvClaudeStandInRun.explainText)
+        let splitAt = deltas.firstIndex { $0.hasSuffix("[CH") }
+        #expect(splitAt != nil)
+        if let splitAt { #expect(deltas[safe: splitAt + 1]?.hasPrefix("AT]") == true) }
+        #expect(deltas.contains { $0.contains("[CHAT]") } == false)
+    }
+
+    @Test func theLongRowIsTwentySentencesWithNoMarkerAndNoTalkOfCutting() throws {
+        let run = try TestEnvClaudeStandInRun()
+        defer { run.cleanUp() }
+        let lines = try run.ask("give me a long answer")
+        let text = try #require(TestEnvClaudeStandInRun.lastAssistantText(lines))
+        #expect(TestEnvClaudeStandInRun.textDeltas(lines).joined() == text)
+        #expect(text.hasSuffix(" [POINT:none]"))
+        #expect(text.contains("[CHAT]") == false)
+        #expect(text.contains("cut") == false)
+        var sentences = 0
+        var number = 1
+        while number <= 20 {
+            if text.contains("This is sentence number \(number) of a long answer with no chat marker.") { sentences += 1 }
+            number += 1
+        }
+        #expect(sentences == 20)
+        #expect(text.contains("sentence number 21 ") == false)
+    }
+
+    @Test func thePortRowEndsWithTheChatPartAfterTheHelpersRealAnswer() throws {
+        let run = try TestEnvClaudeStandInRun()
+        defer { run.cleanUp() }
+        let lines = try run.ask("what port does the demo server use", withHelper: true)
+        let final = try #require(TestEnvClaudeStandInRun.lastAssistantText(lines))
+        #expect(final == "Your notes say the demo server listens on port 4417. [CHAT] The port is set in demo-server.md under Wiki/Projects. [POINT:none]")
+        let first = TestEnvClaudeStandInRun.textDeltas(lines).joined()
+        #expect(first.hasPrefix("Let me check your notes for the demo port."))
+    }
+
+    @Test func thePortRowWithoutAHelperAnswersWithTheDefaultReply() throws {
+        let run = try TestEnvClaudeStandInRun()
+        defer { run.cleanUp() }
+        let lines = try run.ask("what port does the demo server use")
+        #expect(TestEnvClaudeStandInRun.lastAssistantText(lines) == "I can see your screen. [POINT:none]")
+    }
+
+    @Test func theSaveRowAndTheSummaryAndStatusCallsStillWork() throws {
+        let run = try TestEnvClaudeStandInRun()
+        defer { run.cleanUp() }
+        let save = try run.ask("where is the save button")
+        #expect(TestEnvClaudeStandInRun.lastAssistantText(save) == "Click the Save button at the top right. [POINT:1180,40:save button:screen1]")
+        let summary = try TestEnvClaudeStandInRun.run(TestEnvClaudeStandInRun.scriptURL, arguments: ["-p", "--model", "test-model"],
+                                                      input: Data("recap this".utf8), logDirectory: run.logDirectory)
+        #expect(String(decoding: summary, as: UTF8.self).contains("Asked where the save button is"))
+        let status = try TestEnvClaudeStandInRun.run(TestEnvClaudeStandInRun.scriptURL, arguments: ["auth", "status"],
+                                                     input: Data(), logDirectory: run.logDirectory)
+        #expect(String(decoding: status, as: UTF8.self).contains("\"loggedIn\": true"))
+    }
 }

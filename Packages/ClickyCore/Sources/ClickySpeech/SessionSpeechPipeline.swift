@@ -58,6 +58,9 @@ public actor SessionSpeechPipeline {
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
 
     private var openQuestionStart: Date?
+    /// When an abandon arrived with no question open yet: the press's mark was still on its way. A mark stamped at or
+    /// before it is the dropped question and closes at once, so an abandon wins in either order.
+    private var pendingAbandon: Date?
     private var finishedQuestionSpans: [(from: Date, to: Date)] = []
 
     /// `now` is the clock that stamps each chunk of audio as it arrives; tests pass a fake one.
@@ -154,6 +157,7 @@ public actor SessionSpeechPipeline {
         ring = RecentSampleRing(capacity: ring.capacity)
         timeline = SampleTimeline()
         openQuestionStart = nil
+        pendingAbandon = nil
         finishedQuestionSpans = []
         resumeFinishWaiters()
         let waitingForStop = stopWaiters
@@ -193,7 +197,30 @@ public actor SessionSpeechPipeline {
 
     /// The question key went down at `date`. Speech from then on belongs to the question.
     public func markQuestionStarted(at date: Date) {
+        if let abandonedAt = pendingAbandon {
+            pendingAbandon = nil
+            if date <= abandonedAt {
+                finishedQuestionSpans.append((from: date, to: abandonedAt))
+                return
+            }
+        }
         openQuestionStart = date
+    }
+
+    /// Whether an open question is claiming the speech from its start onward.
+    var openQuestionIsClaiming: Bool { openQuestionStart != nil }
+    /// How many questions are closed (sent or dropped).
+    var droppedSpanCount: Int { finishedQuestionSpans.count }
+
+    /// The question the user was speaking is dropped, never sent (the question key died): its speech stays claimed by
+    /// that question, so it is not reported as an utterance either, but speech after `date` is reported as usual.
+    public func abandonOpenQuestion(at date: Date) {
+        guard let start = openQuestionStart else {
+            pendingAbandon = date
+            return
+        }
+        finishedQuestionSpans.append((from: start, to: date))
+        openQuestionStart = nil
     }
 
     /// Transcribes what was said from `speechFrom` to `speechTo` (padded 0.3 s before and 0.5 s
@@ -244,6 +271,8 @@ public actor SessionSpeechPipeline {
         nextFrameStartIndex = 0
         sourceHasFinished = false
         transcriptionHasEnded = false
+        // An abandon left over from an earlier session must not reach this session's first question.
+        pendingAbandon = nil
         // A question may be marked just before start(), so question state is cleared in stop() instead.
     }
 

@@ -98,6 +98,9 @@ final class ChatWindowState: ObservableObject {
     /// your notes" at the end of the growing answer, or alone before any answer text has come.
     @Published var isCheckingNotes: Bool
 
+    /// True while the question key and chat key are lost (Accessibility was taken away); the footer says so.
+    @Published var isKeyTapLost: Bool = false
+
     var isSessionRunning: Bool { sessionPhase == .running }
 
     var onSwitchProvider: () -> Void
@@ -114,6 +117,7 @@ final class ChatWindowState: ObservableObject {
         usageLimitOffer: UsageLimitOffer? = nil,
         questionKeyLabel: String = "right Command",
         isCheckingNotes: Bool = false,
+        isKeyTapLost: Bool = false,
         onSwitchProvider: @escaping () -> Void = {},
         onStopSession: @escaping () -> Void = {},
         onStartSession: @escaping () -> Void = {}
@@ -127,6 +131,7 @@ final class ChatWindowState: ObservableObject {
         self.usageLimitOffer = usageLimitOffer
         self.questionKeyLabel = questionKeyLabel
         self.isCheckingNotes = isCheckingNotes
+        self.isKeyTapLost = isKeyTapLost
         self.onSwitchProvider = onSwitchProvider
         self.onStopSession = onStopSession
         self.onStartSession = onStartSession
